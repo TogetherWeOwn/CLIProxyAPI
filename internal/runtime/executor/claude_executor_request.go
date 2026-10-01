@@ -1730,6 +1730,7 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 	forwardMap := make(map[string]string)
 	protectedNames := make(map[string]bool)
 	reservedNames := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
+	allocatedSemantics := make(map[string]string)
 	if tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			name := tool.Get("name").String()
@@ -1757,7 +1758,7 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 			if _, exists := forwardMap[name]; exists {
 				return true
 			}
-			alias, allocated := helps.AllocateClaudeMCPToolAlias(mcpAliases.secret, name, reservedNames)
+			alias, allocated := helps.AllocateUniqueClaudeMCPToolAlias(mcpAliases.secret, name, reservedNames, allocatedSemantics)
 			if !allocated {
 				log.Warnf("claude oauth mcp alias: no free alias left for tool %q, forwarding the original name", name)
 				return true
@@ -2019,6 +2020,7 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 	forwardMap := make(map[string]string)
 	protectedNames := make(map[string]bool)
 	reservedNames := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
+	allocatedSemantics := make(map[string]string)
 	if tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			name := tool.Get("name").String()
@@ -2046,7 +2048,7 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 			if _, exists := forwardMap[name]; exists {
 				return true
 			}
-			alias, allocated := helps.AllocateClaudeMCPToolAlias(mcpAliases.secret, name, reservedNames)
+			alias, allocated := helps.AllocateUniqueClaudeMCPToolAlias(mcpAliases.secret, name, reservedNames, allocatedSemantics)
 			if !allocated {
 				log.Warnf("claude oauth mcp alias: no free alias left for tool %q, forwarding the original name", name)
 				return true
