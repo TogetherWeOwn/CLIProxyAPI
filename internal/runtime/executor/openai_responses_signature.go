@@ -19,6 +19,17 @@ func openaiResponsesReasoningSummaryIsEmpty(summary gjson.Result) bool {
 	return summary.IsArray() && len(summary.Array()) == 0
 }
 
+// openaiResponsesReasoningItemIsEmpty reports whether a reasoning item carries no
+// summary and no content, so that nothing is left of it once encrypted_content is gone.
+func openaiResponsesReasoningItemIsEmpty(itemRaw string) bool {
+	item := gjson.Parse(itemRaw)
+	if !openaiResponsesReasoningSummaryIsEmpty(item.Get("summary")) {
+		return false
+	}
+	content := item.Get("content")
+	return !content.Exists() || content.Type == gjson.Null || (content.IsArray() && len(content.Array()) == 0)
+}
+
 func promoteOpenAIResponsesReasoningTextToSummary(itemRaw string, content gjson.Result) (string, error) {
 	var b strings.Builder
 	b.WriteByte('[')
@@ -48,19 +59,60 @@ func promoteOpenAIResponsesReasoningTextToSummary(itemRaw string, content gjson.
 	return sjson.SetRaw(itemRaw, "summary", b.String())
 }
 
+// reasoningReplayDecision is what a reasoningReplayInspector decides for one
+// reasoning item's encrypted_content.
+type reasoningReplayDecision struct {
+	// replay is the encrypted_content to forward upstream. Used only when reason is empty.
+	replay string
+	// reason, when non-empty, drops the encrypted_content and explains why.
+	reason string
+	// dropItem additionally removes the whole reasoning item when dropping the
+	// encrypted_content left it without any summary or content of its own.
+	dropItem bool
+}
+
+// reasoningReplayInspector decides whether a string encrypted_content may be
+// replayed to the upstream. Providers differ in what they can decrypt.
+type reasoningReplayInspector func(raw string) reasoningReplayDecision
+
+// gptReasoningReplayInspector accepts only structurally valid GPT/Codex reasoning signatures.
+func gptReasoningReplayInspector(raw string) reasoningReplayDecision {
+	if raw != strings.TrimSpace(raw) {
+		return reasoningReplayDecision{reason: "encrypted_content has leading or trailing whitespace"}
+	}
+	if _, err := signature.InspectGPTReasoningSignature(raw); err != nil {
+		return reasoningReplayDecision{reason: err.Error()}
+	}
+	return reasoningReplayDecision{replay: raw}
+}
+
+// foreignReasoningReplayInspector also replays unknown-format encrypted_content,
+// which third-party Responses models (such as DeepSeek) expect back verbatim.
+func foreignReasoningReplayInspector(raw string) reasoningReplayDecision {
+	decision := gptReasoningReplayInspector(raw)
+	if decision.reason != "" && raw != "" && raw == strings.TrimSpace(raw) && signature.DetectSignatureProvider(raw) == signature.SignatureProviderUnknown {
+		return reasoningReplayDecision{replay: raw}
+	}
+	return decision
+}
+
 func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provider string, body []byte) []byte {
-	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, false, false)
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithInspector(ctx, provider, body, false, gptReasoningReplayInspector)
 }
 
 func sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(ctx context.Context, provider string, body []byte, isCompat bool) []byte {
-	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, isCompat, isCompat)
+	inspect := gptReasoningReplayInspector
+	if isCompat {
+		inspect = foreignReasoningReplayInspector
+	}
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithInspector(ctx, provider, body, isCompat, inspect)
 }
 
 func sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign(ctx context.Context, provider string, body []byte) []byte {
-	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, false, true)
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithInspector(ctx, provider, body, false, foreignReasoningReplayInspector)
 }
 
-func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Context, provider string, body []byte, isCompat bool, keepForeign bool) []byte {
+func sanitizeOpenAIResponsesReasoningEncryptedContentWithInspector(ctx context.Context, provider string, body []byte, isCompat bool, inspect reasoningReplayInspector) []byte {
 	inputResult := util.GetGJSONBytesNoCopy(body, "input")
 	if !inputResult.Exists() || !inputResult.IsArray() {
 		return body
@@ -169,24 +221,29 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Con
 			continue
 		}
 
-		reason := ""
+		var decision reasoningReplayDecision
 		switch encryptedContent.Type {
 		case gjson.String:
-			rawSignature := encryptedContent.String()
-			if rawSignature != strings.TrimSpace(rawSignature) {
-				reason = "encrypted_content has leading or trailing whitespace"
-			} else if _, err := signature.InspectGPTReasoningSignature(rawSignature); err != nil {
-				// When keepForeign is true (compat callers enable it via WithCompat),
-				// third-party Responses models (such as Muse) expect their own
-				// unknown-format encrypted_content to be replayed.
-				if !keepForeign || rawSignature == "" || signature.DetectSignatureProvider(rawSignature) != signature.SignatureProviderUnknown {
-					reason = err.Error()
+			decision = inspect(encryptedContent.String())
+		case gjson.Null:
+			decision.reason = "encrypted_content is null"
+		default:
+			decision.reason = fmt.Sprintf("encrypted_content must be a string, got %s", encryptedContent.Type.String())
+		}
+		reason := decision.reason
+		if reason == "" {
+			if decision.replay != encryptedContent.String() {
+				replayed, errReplay := sjson.Set(nextItem, "encrypted_content", decision.replay)
+				if errReplay != nil {
+					// Forwarding the stored value would send an envelope the inspector did not
+					// approve, so fall back to dropping it like any other invalid value.
+					decision.reason = fmt.Sprintf("failed to rewrite encrypted_content: %v", errReplay)
+					reason = decision.reason
+				} else {
+					nextItem = replayed
+					changed = true
 				}
 			}
-		case gjson.Null:
-			reason = "encrypted_content is null"
-		default:
-			reason = fmt.Sprintf("encrypted_content must be a string, got %s", encryptedContent.Type.String())
 		}
 		if reason == "" {
 			if !changed {
@@ -220,6 +277,10 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Con
 		}
 
 		startRebuild(index)
+		if decision.dropItem && openaiResponsesReasoningItemIsEmpty(nextItem) {
+			helps.LogWithRequestID(ctx).Debugf("%s: dropped reasoning item at input[%d] item_id=%q reason=%s", provider, index, itemID, reason)
+			continue
+		}
 		keep(nextItem)
 
 		helps.LogWithRequestID(ctx).Debugf("%s: dropped invalid reasoning encrypted_content at input[%d] item_id=%q reason=%s", provider, index, itemID, reason)

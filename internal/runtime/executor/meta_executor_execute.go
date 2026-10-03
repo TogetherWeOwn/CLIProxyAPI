@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,9 +30,26 @@ type metaPreparedRequest struct {
 	to              sdktranslator.Format
 	originalPayload []byte
 	body            []byte
+	// replay carries the account-bound Muse reasoning policy for this request.
+	replay metaReasoningReplay
+	// replayRetried records that the one-shot retry without reasoning envelopes ran.
+	replayRetried bool
 }
 
-func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*metaPreparedRequest, error) {
+// retryWithoutReplay decides whether a rejected request should be sent once more
+// with every reasoning envelope removed, and prepares that body. It only fires
+// when envelopes were actually forwarded and Meta rejected them as foreign.
+func (p *metaPreparedRequest) retryWithoutReplay(ctx context.Context, statusCode int, errBody []byte) bool {
+	if p.replayRetried || p.replay.stats == nil || p.replay.stats.kept == 0 || !isMetaReasoningNotIssued(statusCode, errBody) {
+		return false
+	}
+	p.replayRetried = true
+	p.body = p.replay.withoutReplay().sanitizeRequest(ctx, p.body)
+	helps.LogWithRequestID(ctx).Warnf("meta reasoning replay: Meta rejected %d replayed reasoning envelope(s) as not issued to this caller; retrying once without reasoning", p.replay.stats.kept)
+	return true
+}
+
+func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*metaPreparedRequest, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -71,7 +89,8 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, req cliproxy
 		return nil, errNormalizePatch
 	}
 	body = normalizeCodexInstructions(body)
-	body = sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign(ctx, "meta executor", body)
+	replay := e.newMetaReasoningReplay(opts, req.Model, baseModel, auth)
+	body = replay.sanitizeRequest(ctx, body)
 	body = helps.SanitizeMetaWebSearchTools(body)
 	body = helps.NormalizeCodexToolIntegerTypes(body, opts.Headers)
 
@@ -84,6 +103,7 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, req cliproxy
 		to:              to,
 		originalPayload: originalPayload,
 		body:            body,
+		replay:          replay,
 	}, nil
 }
 
@@ -98,10 +118,11 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, errAuth
 	}
 
-	prepared, errPrepare := e.prepareResponsesRequest(ctx, req, opts, true)
+	prepared, errPrepare := e.prepareResponsesRequest(ctx, enriched, req, opts, true)
 	if errPrepare != nil {
 		return resp, errPrepare
 	}
+	prepared.replay.recordRequest(ctx, prepared.baseModel, enriched.ID)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, enriched)
 	defer reporter.TrackFailure(ctx, &err)
@@ -113,44 +134,41 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
-	if errRequest != nil {
-		return resp, errRequest
-	}
-	applyMetaAPIHeaders(httpReq, enriched, token, true, opts.Headers)
-	e.recordMetaRequest(ctx, enriched, url, httpReq.Header.Clone(), prepared.body)
-
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, enriched, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, errDo := httpClient.Do(httpReq)
-	if errDo != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-		return resp, errDo
-	}
-	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("meta executor: close response body error: %v", errClose)
+	var (
+		httpResp      *http.Response
+		out           metaCompletedTranslation
+		upstreamUsage helps.StreamUsageBuffer
+	)
+	for {
+		var (
+			data     []byte
+			errPost  error
+			errEvent error
+		)
+		httpResp, data, errPost = e.postMetaResponses(ctx, enriched, token, url, prepared.body, opts, reporter)
+		if errPost != nil {
+			return resp, errPost
 		}
-	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-
-	data, errRead := io.ReadAll(httpResp.Body)
-	if errRead != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-		return resp, errRead
-	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-	reporter.ObserveResponseModel(data)
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return resp, wrapMetaUpstreamError(httpResp.StatusCode, data)
-	}
-
-	var upstreamUsage helps.StreamUsageBuffer
-	out, errCompleted := e.translateMetaCompleted(ctx, req, prepared, data, &upstreamUsage)
-	if errCompleted != nil {
-		upstreamUsage.PublishFailure(ctx, reporter, errCompleted)
-		return resp, errCompleted
+		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+			if prepared.retryWithoutReplay(ctx, httpResp.StatusCode, data) {
+				continue
+			}
+			return resp, wrapMetaUpstreamError(httpResp.StatusCode, data)
+		}
+		upstreamUsage = helps.StreamUsageBuffer{}
+		out, errEvent = e.translateMetaCompleted(ctx, req, prepared, data, &upstreamUsage)
+		if errEvent != nil {
+			// The same rejection can also arrive as an error event inside a 200 stream.
+			// Nothing has been returned to the client yet, so it can be retried too.
+			var upstreamErr statusErr
+			if errors.As(errEvent, &upstreamErr) && prepared.retryWithoutReplay(ctx, upstreamErr.code, []byte(upstreamErr.msg)) {
+				continue
+			}
+			upstreamUsage.PublishFailure(ctx, reporter, errEvent)
+			return resp, errEvent
+		}
+		break
 	}
 	if len(out.sourceEvent) > 0 {
 		reporter.ObserveResponseModel(out.sourceEvent)
@@ -165,6 +183,41 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		payload = helps.EnsureResponsesUsageDetails(payload)
 	}
 	return cliproxyexecutor.Response{Payload: payload, Headers: httpResp.Header.Clone()}, nil
+}
+
+// postMetaResponses sends one non-streaming-collected /responses request and reads
+// the whole upstream body. The returned response has its body already consumed
+// and closed; only its status and headers remain meaningful.
+func (e *MetaExecutor) postMetaResponses(ctx context.Context, auth *cliproxyauth.Auth, token, url string, body []byte, opts cliproxyexecutor.Options, reporter *helps.UsageReporter) (*http.Response, []byte, error) {
+	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if errRequest != nil {
+		return nil, nil, errRequest
+	}
+	applyMetaAPIHeaders(httpReq, auth, token, true, opts.Headers)
+	e.recordMetaRequest(ctx, auth, url, httpReq.Header.Clone(), body)
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
+	httpResp, errDo := httpClient.Do(httpReq)
+	if errDo != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+		return nil, nil, errDo
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("meta executor: close response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+
+	data, errRead := io.ReadAll(httpResp.Body)
+	if errRead != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		return nil, nil, errRead
+	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	reporter.ObserveResponseModel(data)
+	return httpResp, data, nil
 }
 
 type metaCompletedTranslation struct {
@@ -186,6 +239,7 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 		if errEvent := metaStreamEventError(eventData); errEvent != nil {
 			return metaCompletedTranslation{}, errEvent
 		}
+		eventData = prepared.replay.tagResponseEvent(eventData)
 		events, errBridge := prepared.applyPatch.Transform(eventData)
 		if errBridge != nil {
 			errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
@@ -212,6 +266,7 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 		if detail, okUsage := helps.ParseCodexUsage(completedData); okUsage {
 			upstreamUsage.Observe(detail, true)
 		}
+		completedData = prepared.replay.tagResponseEvent(completedData)
 		completedData = patchCodexCompletedOutput(completedData, outputItemsByIndex, outputItemsFallback)
 		var errBridge error
 		completedData, errBridge = prepared.applyPatch.Bridge.TransformNonStream(completedData)
@@ -234,10 +289,11 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 }
 
 func (e *MetaExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	if _, errAuth := e.ensureAuth(ctx, auth); errAuth != nil {
+	enriched, errAuth := e.ensureAuth(ctx, auth)
+	if errAuth != nil {
 		return cliproxyexecutor.Response{}, errAuth
 	}
-	prepared, errPrepare := e.prepareResponsesRequest(ctx, req, opts, false)
+	prepared, errPrepare := e.prepareResponsesRequest(ctx, enriched, req, opts, false)
 	if errPrepare != nil {
 		return cliproxyexecutor.Response{}, errPrepare
 	}

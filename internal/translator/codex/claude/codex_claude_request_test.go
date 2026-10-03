@@ -737,7 +737,7 @@ func TestConvertClaudeRequestToCodex_MuseTaggedSignatureToReasoningItem(t *testi
 
 	for _, modelName := range []string{"muse-spark-1.3", "muse-spark-1.2-contributor", "Muse-Spark-1.3(high)"} {
 		t.Run(modelName, func(t *testing.T) {
-			out := ConvertClaudeRequestToCodex(modelName, payload, false)
+			out, _ := ConvertClaudeRequestToCodex(modelName, payload, false)
 			reasoning := gjson.GetBytes(out, "input.0")
 			if reasoning.Get("type").String() != "reasoning" {
 				t.Fatalf("input.0 type = %q, want reasoning; output=%s", reasoning.Get("type").String(), out)
@@ -758,7 +758,7 @@ func TestConvertClaudeRequestToCodex_DropsUntaggedMuseSignature(t *testing.T) {
 	payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":""},{"type":"text","text":"answer"}]},{"role":"user","content":"next"}]}`)
 	payload, _ = sjson.SetBytes(payload, "messages.0.content.0.signature", "Q-PaDgA1b2C3d4E5f6G7h8I9j0K_lMnOpQrStUvWxYz-0123456789AbCdEf")
 
-	out := ConvertClaudeRequestToCodex("muse-spark-1.3", payload, false)
+	out, _ := ConvertClaudeRequestToCodex("muse-spark-1.3", payload, false)
 	if got := countRequestInputItemsByType(out, "reasoning"); got != 0 {
 		t.Fatalf("got %d reasoning items for an untagged Muse signature, want 0; output=%s", got, out)
 	}
@@ -770,7 +770,7 @@ func TestConvertClaudeRequestToCodex_IgnoresMuseTaggedSignatureForNonMuseTargets
 
 	for _, modelName := range []string{"gpt-5.4", "claude-sonnet-4-6", "grok-4.5", "gemini-3-pro"} {
 		t.Run(modelName, func(t *testing.T) {
-			out := ConvertClaudeRequestToCodex(modelName, payload, false)
+			out, _ := ConvertClaudeRequestToCodex(modelName, payload, false)
 			if got := countRequestInputItemsByType(out, "reasoning"); got != 0 {
 				t.Fatalf("got %d reasoning items for non-Muse target, want 0; output=%s", got, out)
 			}
