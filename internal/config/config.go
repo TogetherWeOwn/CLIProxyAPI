@@ -142,6 +142,9 @@ type Config struct {
 	// XAI configures provider-wide xAI request behavior.
 	XAI XAIConfig `yaml:"xai" json:"xai"`
 
+	// Meta configures provider-wide Meta (Muse) request behavior.
+	Meta MetaConfig `yaml:"meta" json:"meta"`
+
 	// Codex configures provider-wide Codex request behavior.
 	Codex CodexConfig `yaml:"codex" json:"codex"`
 
