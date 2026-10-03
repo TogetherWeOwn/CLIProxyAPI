@@ -176,6 +176,12 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 
 				rawSignature := part.Get("signature").String()
 				signature, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, rawSignature)
+				if !ok && codexClaudeTargetAcceptsMetaReasoning(modelName) && sigcompat.IsMetaReasoningTagged(rawSignature) {
+					// Keep the proxy's provenance tag intact. Only the Meta executor knows which
+					// account it selected, so it alone decides whether the envelope is replayable.
+					signature = strings.TrimSpace(rawSignature)
+					ok = true
+				}
 				if !ok && preserveEmptyThinkingBlocks && part.Get("signature").Type == gjson.String && strings.TrimSpace(rawSignature) != "" &&
 					sigcompat.DetectSignatureProviderForBlock(rawSignature, sigcompat.SignatureBlockKindClaudeThinking) == sigcompat.SignatureProviderUnknown {
 					signature = rawSignature
@@ -467,6 +473,13 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 func codexClaudeTargetAcceptsGrokSignature(modelName string) bool {
 	baseModel := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName))
 	return strings.Contains(baseModel, "grok")
+}
+
+// codexClaudeTargetAcceptsMetaReasoning reports whether modelName is a Meta Muse
+// model, the only target that can replay a Muse-tagged reasoning envelope.
+func codexClaudeTargetAcceptsMetaReasoning(modelName string) bool {
+	baseModel := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName))
+	return strings.Contains(baseModel, "muse")
 }
 
 func normalizeCodexServiceTier(result gjson.Result) string {
