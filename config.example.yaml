@@ -451,6 +451,15 @@ upstream:
       # requested name, including an oauth.model-alias, and the upstream model are tested).
       # Empty or omitted means every Meta model once enabled.
       # models: ["muse-canary*"]
+    # Send a stable per-session prompt_cache_key so the prompt cache warms in one call.
+    # The key is derived from the downstream session identity already used for affinity,
+    # so turns of one session share a bucket and sessions never share one. A key the
+    # client sent itself is never overridden. Hot-reloadable: edit + the watcher picks it up.
+    prompt-cache-key:
+      enabled: false # default false: no prompt_cache_key is set
+      # Canary by account: entries match an auth's label, email, ID or index
+      # (case-insensitive). Empty or omitted means every Meta auth once enabled.
+      # auths: ["pisnrzrs+meta5@two.gg"]
 
 # API-key upstreams are separate from access.api-keys (client authentication).
 # Each provider contains named groups: one base-url, shared settings, and a keys list.

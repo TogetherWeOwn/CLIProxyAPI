@@ -152,6 +152,8 @@ type XAIConfig struct {
 type MetaConfig struct {
 	// ReasoningReplay controls account-safe replay of Muse reasoning across tool turns.
 	ReasoningReplay MetaReasoningReplayConfig `yaml:"reasoning-replay" json:"reasoning-replay"`
+	// PromptCacheKey controls the per-session prompt_cache_key sent to Meta.
+	PromptCacheKey MetaPromptCacheKeyConfig `yaml:"prompt-cache-key" json:"prompt-cache-key"`
 }
 
 // MetaReasoningReplayConfig replays a Muse model's own reasoning back to it on later
@@ -218,6 +220,21 @@ func matchModelGlob(pattern, value string) bool {
 		value = value[idx+len(part):]
 	}
 	return strings.HasSuffix(value, last)
+}
+
+// MetaPromptCacheKeyConfig sends a stable per-session prompt_cache_key to Meta so
+// the prompt cache warms in one call instead of several. The key is derived from
+// the downstream session identity the proxy already uses for affinity, so every
+// turn of one session names the same cache bucket and different sessions never
+// share one. A key the client sent itself is never overridden.
+// Canary by account with Auths: entries match an auth's label, email, ID or index
+// (case-insensitive); empty means every Meta auth once Enabled is true.
+type MetaPromptCacheKeyConfig struct {
+	// Enabled turns the feature on. Default false: no prompt_cache_key is set.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Auths limits the feature to the named auths for a canary. Empty or omitted
+	// means every Meta auth once enabled.
+	Auths []string `yaml:"auths,omitempty" json:"auths,omitempty"`
 }
 
 // DevinConfig configures provider-wide Devin request behavior.
