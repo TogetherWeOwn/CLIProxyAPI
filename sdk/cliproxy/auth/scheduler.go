@@ -546,25 +546,54 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			state = &quotaSelectionState{}
 			s.mixedQuotaStates[cursorKey] = state
 		}
-		candidates := make([]*Auth, 0)
-		byID := make(map[string]*scheduledAuth)
+		// Try priority tiers from highest to lowest: a tier that is entirely
+		// quota-exhausted in every provider must not block lower tiers.
+		prioritySet := make(map[int]bool)
 		for _, shard := range candidateShards {
 			if shard == nil {
 				continue
 			}
-			bucket := shard.readyByPriority[bestPriority]
-			if bucket == nil {
-				continue
-			}
-			for _, entry := range bucket.all.flat {
-				if entry == nil || entry.auth == nil || !predicate(entry) {
+			for priority, bucket := range shard.readyByPriority {
+				if bucket == nil {
 					continue
 				}
-				candidates = append(candidates, entry.auth)
-				byID[entry.auth.ID] = entry
+				for _, entry := range bucket.all.flat {
+					if entry != nil && entry.auth != nil && predicate(entry) {
+						prioritySet[priority] = true
+						break
+					}
+				}
 			}
 		}
-		picked := pickQuotaAwareAuth(candidates, now, s.quotaPolicy, state)
+		priorities := make([]int, 0, len(prioritySet))
+		for priority := range prioritySet {
+			priorities = append(priorities, priority)
+		}
+		sort.Slice(priorities, func(i, j int) bool { return priorities[i] > priorities[j] })
+		var picked *Auth
+		byID := make(map[string]*scheduledAuth)
+		for _, priority := range priorities {
+			candidates := make([]*Auth, 0)
+			for _, shard := range candidateShards {
+				if shard == nil {
+					continue
+				}
+				bucket := shard.readyByPriority[priority]
+				if bucket == nil {
+					continue
+				}
+				for _, entry := range bucket.all.flat {
+					if entry == nil || entry.auth == nil || !predicate(entry) {
+						continue
+					}
+					candidates = append(candidates, entry.auth)
+					byID[entry.auth.ID] = entry
+				}
+			}
+			if picked = pickQuotaAwareAuth(candidates, now, s.quotaPolicy, state); picked != nil {
+				break
+			}
+		}
 		if picked == nil {
 			return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 		}
@@ -1378,6 +1407,18 @@ func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedule
 		return nil
 	}
 	m.promoteExpiredLocked(time.Now())
+	if strategy == schedulerStrategyQuotaAware {
+		// A tier whose credentials are all quota-exhausted yields no pick but
+		// must not block lower tiers: exhausted credentials are never picked,
+		// so they never enter cooldown and the lower tier would otherwise
+		// stay unreachable until the weekly reset.
+		for _, priority := range m.priorityOrder {
+			if picked := m.pickReadyAtPriorityLocked(preferWebsocket, priority, strategy, predicate, quotaPolicy); picked != nil {
+				return picked
+			}
+		}
+		return nil
+	}
 	priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, predicate)
 	if !okPriority {
 		return nil
@@ -1438,6 +1479,11 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		picked = view.pickWeighted(predicate)
 	case schedulerStrategyQuotaAware:
 		picked = view.pickQuotaAware(predicate, quotaPolicy)
+		if picked == nil && view != &bucket.all {
+			// Websocket-enabled entries in this tier are all quota-exhausted;
+			// do not let the transport preference hide the rest of the tier.
+			picked = bucket.all.pickQuotaAware(predicate, quotaPolicy)
+		}
 	default:
 		picked = view.pickRoundRobin(predicate)
 	}

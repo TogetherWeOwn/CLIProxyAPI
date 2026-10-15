@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
@@ -297,6 +298,183 @@ func TestValidateAuthCredits(t *testing.T) {
 	}
 	if err := ValidateAuthCredits(&Auth{Attributes: map[string]string{AttributeCredits: CreditsKindPaid}}); err != nil {
 		t.Fatalf("ValidateAuthCredits(paid attribute) = %v, want nil", err)
+	}
+}
+
+func TestQuotaAwarePassiveProbeRefreshesStaleCredential(t *testing.T) {
+	// Only the picked credential receives a fresh snapshot, mirroring the
+	// production MarkResult path. The stale idle credential must still get
+	// bounded probe picks so it can refresh instead of starving forever.
+	selector := &QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}}
+	busy := quotaTestAuth("a-busy", 10)
+	idle := quotaTestAuth("b-idle", 0)
+	idle.Quota.ObservedAt = time.Now().Add(-20 * time.Minute)
+	used := map[string]float64{busy.ID: 10, idle.ID: 0}
+	counts := map[string]int{}
+	for i := 0; i < 100; i++ {
+		got := pickQuota(t, selector, busy, idle)
+		counts[got.ID]++
+		used[got.ID]++
+		setWeeklyUsed(got, used[got.ID])
+	}
+	if counts[idle.ID] == 0 {
+		t.Fatalf("stale idle credential never probed (counts=%v)", counts)
+	}
+	if counts[busy.ID] == 100 {
+		t.Fatalf("pool collapsed onto busy credential (counts=%v)", counts)
+	}
+}
+
+func TestQuotaAwareExhaustedTopPriorityTierFallsThrough(t *testing.T) {
+	exhausted := quotaTestAuth("a-hi-exhausted", 100)
+	exhausted.Attributes = map[string]string{"priority": "10"}
+	healthy := quotaTestAuth("b-lo-healthy", 10)
+	healthy.Attributes = map[string]string{"priority": "0"}
+
+	selector := &QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}}
+	if got := pickQuota(t, selector, exhausted, healthy); got.ID != healthy.ID {
+		t.Fatalf("selector Pick() = %q, want lower-tier healthy credential", got.ID)
+	}
+
+	scheduler := newSchedulerForTest(
+		&QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}},
+		quotaTestAuthWithPriority("a-hi-exhausted", 100, "10"),
+		quotaTestAuthWithPriority("b-lo-healthy", 10, "0"),
+	)
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("scheduler pickSingle() error = %v, want lower-tier fall-through", errPick)
+	}
+	if got == nil || got.ID != "b-lo-healthy" {
+		t.Fatalf("scheduler pickSingle() = %v, want b-lo-healthy", got)
+	}
+}
+
+func quotaTestAuthWithPriority(id string, weeklyUsed float64, priority string) *Auth {
+	auth := quotaTestAuth(id, weeklyUsed)
+	auth.Attributes = map[string]string{"priority": priority}
+	return auth
+}
+
+func TestQuotaAwareAffinityReleasesExhaustedBoundCredential(t *testing.T) {
+	affinity := NewSessionAffinitySelector(&QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}})
+	bound := quotaTestAuth("a-bound", 10)
+	other := quotaTestAuth("b-other", 50)
+	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"quota-affinity-session"}}}
+
+	got, err := affinity.Pick(context.Background(), "codex", "gpt-test", opts, []*Auth{bound, other})
+	if err != nil || got == nil || got.ID != bound.ID {
+		t.Fatalf("first Pick() = %v, %v; want bound credential a-bound", got, err)
+	}
+
+	// The bound credential goes weekly-exhausted onto a paid credits pool
+	// that must not be spent; the session must move, not keep spending it.
+	bound.Attributes = map[string]string{AttributeCredits: CreditsKindPaid}
+	bound.Quota.Signals["X-Codex-Credits-Has-Credits"] = "true"
+	bound.Quota.Signals["X-Codex-Credits-Balance"] = "500"
+	setWeeklyUsed(bound, 100)
+	for i := 0; i < 3; i++ {
+		got, err = affinity.Pick(context.Background(), "codex", "gpt-test", opts, []*Auth{bound, other})
+		if err != nil || got == nil || got.ID != other.ID {
+			t.Fatalf("Pick() #%d after exhaustion = %v, %v; want reselected b-other", i, got, err)
+		}
+	}
+}
+
+func TestQuotaAwareStaleFreeCreditsServeAfterPlanExhaustion(t *testing.T) {
+	selector := &QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}}
+	onCredits := quotaTestAuth("a-credits", 100)
+	onCredits.Attributes = map[string]string{AttributeCredits: CreditsKindFree}
+	onCredits.Quota.Signals["X-Codex-Credits-Has-Credits"] = "true"
+	onCredits.Quota.Signals["X-Codex-Credits-Balance"] = "1000"
+	// Free-credit credentials idle while plan quota lasts, so by the time
+	// plan quota runs out their snapshot is older than stale-after.
+	onCredits.Quota.ObservedAt = time.Now().Add(-time.Hour)
+	exhaustedPlan := quotaTestAuth("b-plan", 100)
+	if got := pickQuota(t, selector, onCredits, exhaustedPlan); got.ID != onCredits.ID {
+		t.Fatalf("Pick() = %q, want stale free-credit credential probed into service", got.ID)
+	}
+
+	// The paid twin stays excluded while stale: a probe could spend money.
+	paid := quotaTestAuth("c-paid", 100)
+	paid.Attributes = map[string]string{AttributeCredits: CreditsKindPaid}
+	paid.Quota.Signals["X-Codex-Credits-Has-Credits"] = "true"
+	paid.Quota.Signals["X-Codex-Credits-Balance"] = "1000"
+	paid.Quota.ObservedAt = time.Now().Add(-time.Hour)
+	paidSelector := &QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}}
+	if _, err := paidSelector.Pick(context.Background(), "codex", "gpt-test", cliproxyexecutor.Options{}, []*Auth{paid, exhaustedPlan}); err == nil {
+		t.Fatal("Pick() with stale paid-credit credential succeeded, want error")
+	}
+}
+
+func claudeQuotaTestAuth(id string, weeklyUtilization float64) *Auth {
+	now := time.Now()
+	return &Auth{
+		ID:       id,
+		Provider: "claude",
+		Status:   StatusActive,
+		Quota: QuotaState{
+			ObservedAt: now,
+			Signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-5h-Status":      "allowed",
+				"Anthropic-Ratelimit-Unified-5h-Utilization": "0.1",
+				"Anthropic-Ratelimit-Unified-5h-Reset":       fmt.Sprint(now.Add(2 * time.Hour).Unix()),
+				"Anthropic-Ratelimit-Unified-7d-Status":      "allowed",
+				"Anthropic-Ratelimit-Unified-7d-Utilization": fmt.Sprint(weeklyUtilization),
+				"Anthropic-Ratelimit-Unified-7d-Reset":       fmt.Sprint(now.Add(72 * time.Hour).Unix()),
+			},
+		},
+	}
+}
+
+func pickClaudeQuota(t *testing.T, selector *QuotaAwareSelector, auths ...*Auth) *Auth {
+	t.Helper()
+	got, err := selector.Pick(context.Background(), "claude", "claude-test", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("Pick() auth = nil")
+	}
+	return got
+}
+
+func TestQuotaAwareClaudeWeeklyUtilization(t *testing.T) {
+	selector := &QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}}
+	nearlyFull := claudeQuotaTestAuth("a-nearly-full", 0.95)
+	mostlyFree := claudeQuotaTestAuth("b-mostly-free", 0.05)
+	if got := pickClaudeQuota(t, selector, nearlyFull, mostlyFree); got.ID != mostlyFree.ID {
+		t.Fatalf("Pick() = %q, want credential with greatest remaining 7d fraction", got.ID)
+	}
+}
+
+func TestQuotaAwareClaudeFiveHourRejectedIsGuarded(t *testing.T) {
+	selector := &QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}}
+	guarded := claudeQuotaTestAuth("a-5h-rejected", 0.05)
+	guarded.Quota.Signals["Anthropic-Ratelimit-Unified-5h-Status"] = "rejected"
+	healthy := claudeQuotaTestAuth("b-healthy", 0.5)
+	if got := pickClaudeQuota(t, selector, guarded, healthy); got.ID != healthy.ID {
+		t.Fatalf("Pick() = %q, want healthy; 5h-rejected Claude credential must be guarded", got.ID)
+	}
+	alone := &QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}}
+	if _, err := alone.Pick(context.Background(), "claude", "claude-test", cliproxyexecutor.Options{}, []*Auth{guarded}); err == nil {
+		t.Fatal("Pick() with only 5h-rejected Claude credential succeeded, want error")
+	}
+}
+
+func TestQuotaAwareClaudeStaleRejectedWithFutureResetStaysExhausted(t *testing.T) {
+	now := time.Now()
+	rejected := claudeQuotaTestAuth("a-stale-rejected", 0.05)
+	rejected.Quota.ObservedAt = now.Add(-time.Hour)
+	rejected.Quota.Signals["Anthropic-Ratelimit-Unified-7d-Status"] = "rejected"
+	// Reset was refreshed to 72h out at construction; keep it in the future.
+	eval := evaluateQuota(rejected, now, QuotaAwarePolicy{}.normalizedQuotaAwarePolicy())
+	if eval.Class != quotaClassExhausted {
+		t.Fatalf("evaluateQuota() class = %v, want exhausted for stale 7d-rejected snapshot with future reset (%+v)", eval.Class, eval)
+	}
+	selector := &QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}}
+	if _, err := selector.Pick(context.Background(), "claude", "claude-test", cliproxyexecutor.Options{}, []*Auth{rejected}); err == nil {
+		t.Fatal("Pick() with only stale 7d-rejected Claude credential succeeded, want error")
 	}
 }
 

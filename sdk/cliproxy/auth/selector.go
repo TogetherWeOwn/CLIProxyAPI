@@ -957,6 +957,32 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 	return cliproxysession.NewInMemorySessionTreeStore(0, time.Hour)
 }
 
+// boundAuthStillSelectable reports whether an affinity-bound credential may
+// keep serving its session. With a quota-aware fallback, a bound credential
+// that has become quota-exhausted (including an exhausted paid-credits pool
+// that may not be spent) must release the session so the fallback reselects,
+// instead of bypassing the credits gate on every cache hit.
+func (s *SessionAffinitySelector) boundAuthStillSelectable(auth *Auth, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	if quotaSelector, ok := s.fallback.(*QuotaAwareSelector); ok && quotaSelector != nil {
+		return quotaSelector.QuotaEligible(auth, now)
+	}
+	return true
+}
+
+// fallbackAuthsFor returns the candidate slice handed to the fallback
+// selector: the highest priority tier for ordinary selectors, but every
+// tier for quota-aware selection, whose tier fall-through decides whether
+// a lower tier may serve when the highest is quota-exhausted.
+func (s *SessionAffinitySelector) fallbackAuthsFor(available []*Auth) []*Auth {
+	if _, ok := s.fallback.(*QuotaAwareSelector); ok {
+		return available
+	}
+	return highestPriorityAuths(available)
+}
+
 // Pick selects an auth with session affinity when possible.
 // Explicit Claude Code, Codex, OpenCode, pi, and request-body session signals
 // are absolute authority. Requests without those signals use the Merkle LCP
@@ -1033,7 +1059,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if err != nil {
 		return nil, err
 	}
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := s.fallbackAuthsFor(available)
 
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey
@@ -1059,6 +1085,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
+				if !s.boundAuthStillSelectable(auth, now) {
+					entry.Infof("session-affinity: bound auth no longer selectable, reselecting | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+					break
+				}
 				bind(auth.ID)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
@@ -1081,6 +1111,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
+					if !s.boundAuthStillSelectable(auth, now) {
+						break
+					}
 					if !isSubagent || s.subagentAffinity {
 						bind(auth.ID)
 						if isFork {
@@ -1148,6 +1181,10 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			if auth == nil || auth.ID != match.AuthID {
 				continue
 			}
+			if !s.boundAuthStillSelectable(auth, time.Now()) {
+				entry.Infof("session-affinity: LCP bound auth no longer selectable, reselecting | session=%s auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), auth.ID, provider, model)
+				break
+			}
 			if match.SessionID != "" {
 				opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] = match.SessionID
 				opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = match.SessionID
@@ -1186,7 +1223,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		}
 	}
 
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := s.fallbackAuthsFor(available)
 	auth, errPick := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	if errPick != nil {
 		return nil, true, errPick

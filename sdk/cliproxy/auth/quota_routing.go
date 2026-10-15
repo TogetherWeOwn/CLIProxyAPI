@@ -184,38 +184,47 @@ func evaluateQuota(auth *Auth, now time.Time, policy QuotaAwarePolicy) quotaEval
 			short = window
 		}
 	}
+	// Claude reports its weekly (7d) window as a utilization fraction rather
+	// than Codex-style used-percent windows; fold it into the same shape.
+	if claudeWeekly := claudeWeeklyWindow(signals, observedAt); claudeWeekly != nil && weekly == nil {
+		weekly = claudeWeekly
+	}
 
 	weeklyExhausted := false
 	weeklyRemaining := 0.0
 	var weeklyReset time.Time
-	switch {
-	case weekly != nil:
+	weeklyResetKnown := false
+	if weekly != nil {
 		if weekly.hasReset {
 			weeklyReset = weekly.resetAt
-		}
-		if !fresh && !(weekly.usedPercent >= 100 && weekly.hasReset && now.Before(weekly.resetAt)) {
-			// A stale snapshot is unknown telemetry, eligible only via the
-			// bounded fallback. One exception: a 100%-used snapshot whose
-			// reset is still in the future stays exhausted below, because
-			// the window cannot have recovered before that reset. A
-			// snapshot taken before a reset that has since passed is the
-			// opposite case: the window has rolled over, so it is unknown.
-			return quotaEvaluation{Class: quotaClassUnknown, WeeklyResetAt: weeklyReset, Reason: "stale-telemetry"}
+			weeklyResetKnown = true
 		}
 		weeklyRemaining = 1 - weekly.usedPercent/100
 		if weeklyRemaining < 0 {
 			weeklyRemaining = 0
 		}
 		weeklyExhausted = weekly.usedPercent >= 100
-	case fresh && claudeWeeklyRejected(signals):
+	}
+	if claudeWeeklyRejected(signals) {
 		weeklyExhausted = true
-	case !fresh:
-		return quotaEvaluation{Class: quotaClassUnknown, Reason: "stale-telemetry"}
-	default:
-		if short != nil && short.usedPercent >= 100 {
-			return quotaEvaluation{Class: quotaClassExhausted, Reason: "five-hour-exhausted"}
+		weeklyRemaining = 0
+		if !weeklyResetKnown {
+			if reset, ok := claudeWeeklyReset(signals); ok {
+				weeklyReset = reset
+				weeklyResetKnown = true
+			}
 		}
-		return quotaEvaluation{Class: quotaClassUnknown, Reason: "no-weekly-telemetry"}
+	}
+
+	// A stale snapshot is unknown telemetry, eligible only via the bounded
+	// fallback and probes. One exception: a weekly-exhausted snapshot whose
+	// reset is still in the future stays exhausted, because the window cannot
+	// have recovered before that reset. A snapshot taken before a reset that
+	// has since passed is the opposite case: the window has rolled over, so
+	// it is unknown.
+	staleProvenExhausted := !fresh && weeklyExhausted && weeklyResetKnown && now.Before(weeklyReset)
+	if !fresh && !staleProvenExhausted {
+		return quotaEvaluation{Class: quotaClassUnknown, WeeklyResetAt: weeklyReset, Reason: "stale-telemetry"}
 	}
 	if fresh && codexLimitReached(signals) {
 		weeklyExhausted = true
@@ -225,7 +234,7 @@ func evaluateQuota(auth *Auth, now time.Time, policy QuotaAwarePolicy) quotaEval
 	// The short-window (5h) guard applies to every class, including the
 	// credits tier: a credential at its short-window limit is not routed to
 	// until that window recovers, whatever its weekly state.
-	if short != nil && short.usedPercent >= 100 {
+	if (short != nil && short.usedPercent >= 100) || (fresh && claudeFiveHourExhausted(signals)) {
 		return quotaEvaluation{Class: quotaClassExhausted, WeeklyRemaining: weeklyRemaining, WeeklyResetAt: weeklyReset, Reason: "five-hour-exhausted"}
 	}
 
@@ -244,6 +253,14 @@ func evaluateQuota(auth *Auth, now time.Time, policy QuotaAwarePolicy) quotaEval
 		return quotaEvaluation{Class: quotaClassExhausted, WeeklyResetAt: weeklyReset, Reason: "weekly-exhausted-credits-unclassified"}
 	}
 	if !fresh {
+		// Only reachable with a proven-future weekly reset (staleProvenExhausted).
+		// A stale free-credits credential can never refresh if it is never
+		// picked, and a probe cannot spend money, so it joins the unknown
+		// probe tier. Paid or unclassified credits stay excluded while stale:
+		// a probe could spend paid credits.
+		if kind == CreditsKindFree {
+			return quotaEvaluation{Class: quotaClassUnknown, WeeklyResetAt: weeklyReset, Reason: "weekly-exhausted-free-credits-stale-probe"}
+		}
 		return quotaEvaluation{Class: quotaClassExhausted, WeeklyResetAt: weeklyReset, Reason: "weekly-exhausted-credits-stale"}
 	}
 	balance, hasBalance := creditsBalance(signals)
@@ -309,6 +326,80 @@ func codexLimitReached(signals map[string]string) bool {
 	return false
 }
 
+// claudeSignalValue returns the value of the Anthropic unified rate-limit
+// signal whose key ends with the given suffix (e.g. "-7d-utilization").
+func claudeSignalValue(signals map[string]string, suffix string) (string, bool) {
+	for key, value := range signals {
+		if strings.HasPrefix(key, "anthropic-ratelimit-unified-") && strings.HasSuffix(key, suffix) {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+// claudeUtilizationUsedPercent normalizes a Claude utilization value to a
+// used percent. Upstream reports a 0..1 fraction; values above 1 are read
+// as percents so a differently-scaled rollout cannot manufacture headroom.
+func claudeUtilizationUsedPercent(raw string) (float64, bool) {
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || value < 0 {
+		return 0, false
+	}
+	if value <= 1 {
+		return value * 100, true
+	}
+	if value > 100 {
+		value = 100
+	}
+	return value, true
+}
+
+// claudeWeeklyWindow builds a weekly window from the Claude 7d utilization
+// and reset signals, or nil when no usable 7d utilization was observed.
+func claudeWeeklyWindow(signals map[string]string, observedAt time.Time) *quotaWindow {
+	raw, ok := claudeSignalValue(signals, "-7d-utilization")
+	if !ok {
+		return nil
+	}
+	used, ok := claudeUtilizationUsedPercent(raw)
+	if !ok {
+		return nil
+	}
+	window := &quotaWindow{usedPercent: used, windowMinutes: 10080}
+	if reset, ok := claudeWeeklyReset(signals); ok {
+		window.resetAt = reset
+		window.hasReset = true
+	}
+	return window
+}
+
+// claudeWeeklyReset parses the Claude 7d reset signal (unix seconds).
+func claudeWeeklyReset(signals map[string]string) (time.Time, bool) {
+	raw, ok := claudeSignalValue(signals, "-7d-reset")
+	if !ok {
+		return time.Time{}, false
+	}
+	seconds, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || seconds <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(seconds, 0), true
+}
+
+// claudeFiveHourExhausted reports whether the Claude 5h window is at its
+// limit: an explicit rejected status or a fully-used 5h utilization.
+func claudeFiveHourExhausted(signals map[string]string) bool {
+	if status, ok := claudeSignalValue(signals, "-5h-status"); ok && strings.EqualFold(status, "rejected") {
+		return true
+	}
+	if raw, ok := claudeSignalValue(signals, "-5h-utilization"); ok {
+		if used, valid := claudeUtilizationUsedPercent(raw); valid && used >= 100 {
+			return true
+		}
+	}
+	return false
+}
+
 func claudeWeeklyRejected(signals map[string]string) bool {
 	for key, value := range signals {
 		if strings.HasPrefix(key, "anthropic-ratelimit-unified-") && strings.Contains(key, "-7d-") &&
@@ -340,11 +431,19 @@ func creditsBalance(signals map[string]string) (float64, bool) {
 	return balance, true
 }
 
+// quotaProbeEvery bounds the probe share given to unknown/stale telemetry
+// when a known-capacity candidate exists: at most one pick in every
+// quotaProbeEvery goes to an unknown credential so its snapshot can refresh.
+// Without a probe, a credential that goes stale while idle would be outranked
+// forever and the pool would collapse onto whichever credential stayed fresh.
+const quotaProbeEvery = 10
+
 // quotaSelectionState carries hysteresis and fallback cursors for one
 // provider/model selection key.
 type quotaSelectionState struct {
-	lastPickedID   string
-	fallbackLastID string
+	lastPickedID    string
+	fallbackLastID  string
+	picksSinceProbe int
 }
 
 // pickQuotaAwareAuth selects from already-eligible candidates (disabled,
@@ -389,10 +488,33 @@ func pickQuotaAwareAuth(candidates []*Auth, now time.Time, policy QuotaAwarePoli
 		// Bounded fallback: round-robin through unknown telemetry only when
 		// no plan or free-credit candidate exists, so a cold or stale pool
 		// can bootstrap fresh signals without manufacturing headroom.
+		state.picksSinceProbe = 0
 		picked := pool[successorIndex(pool, state.fallbackLastID)]
 		state.fallbackLastID = picked.ID
 		state.lastPickedID = picked.ID
 		return picked
+	}
+
+	// Bounded probe: telemetry is passive, so a credential that goes stale
+	// while idle can only refresh by serving a request. Reserve one pick in
+	// every quotaProbeEvery for the unknown pool (round-robin), otherwise
+	// stale credentials are outranked forever and the pool collapses onto
+	// whichever credential stayed fresh.
+	var unknownPool []*Auth
+	for _, candidate := range sorted {
+		if candidate != nil && evals[candidate.ID].Class == quotaClassUnknown {
+			unknownPool = append(unknownPool, candidate)
+		}
+	}
+	if len(unknownPool) > 0 {
+		state.picksSinceProbe++
+		if state.picksSinceProbe >= quotaProbeEvery {
+			state.picksSinceProbe = 0
+			picked := unknownPool[successorIndex(unknownPool, state.fallbackLastID)]
+			state.fallbackLastID = picked.ID
+			state.lastPickedID = picked.ID
+			return picked
+		}
 	}
 
 	score := func(auth *Auth) float64 {
@@ -436,14 +558,26 @@ type QuotaAwareSelector struct {
 	maxKeys int
 }
 
+// QuotaEligible reports whether quota-aware routing may select this
+// credential right now: every class except exhausted is selectable (plan,
+// free credits, allowed paid credits, or unknown telemetry via the bounded
+// fallback/probe). Wrappers such as session affinity consult it before
+// honoring an existing binding, so a bound session cannot keep spending a
+// credential that has become weekly-exhausted.
+func (s *QuotaAwareSelector) QuotaEligible(auth *Auth, now time.Time) bool {
+	if s == nil || auth == nil {
+		return false
+	}
+	return evaluateQuota(auth, now, s.Policy).Class != quotaClassExhausted
+}
+
 // Pick implements Selector.
 func (s *QuotaAwareSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
-	available, err := getSelectorAvailableAuths(ctx, auths, provider, model, time.Now())
+	available, err := getSelectorAvailableAuthsAcrossPriorities(ctx, auths, provider, model, time.Now())
 	if err != nil {
 		return nil, err
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
 	key := provider + ":" + canonicalModelKey(model)
 
 	s.mu.Lock()
@@ -463,9 +597,33 @@ func (s *QuotaAwareSelector) Pick(ctx context.Context, provider, model string, o
 		state = &quotaSelectionState{}
 		s.states[key] = state
 	}
-	picked := pickQuotaAwareAuth(available, time.Now(), s.Policy, state)
-	if picked == nil {
-		return nil, &Error{Code: "auth_unavailable", Message: "no auth available with plan quota or allowed credits"}
+	// Priority tiers are preserved, but a tier whose credentials are all
+	// quota-exhausted must not block lower tiers: exhausted credentials are
+	// never picked, so they never cool down and the lower tier would stay
+	// unreachable until the weekly reset. Fall through tier by tier.
+	priorities := make([]int, 0, len(available))
+	seenPriority := make(map[int]bool, len(available))
+	for _, candidate := range available {
+		if candidate == nil {
+			continue
+		}
+		if priority := authPriority(candidate); !seenPriority[priority] {
+			seenPriority[priority] = true
+			priorities = append(priorities, priority)
+		}
 	}
-	return picked, nil
+	sort.Slice(priorities, func(i, j int) bool { return priorities[i] > priorities[j] })
+	now := time.Now()
+	for _, priority := range priorities {
+		tier := make([]*Auth, 0, len(available))
+		for _, candidate := range available {
+			if candidate != nil && authPriority(candidate) == priority {
+				tier = append(tier, candidate)
+			}
+		}
+		if picked := pickQuotaAwareAuth(preferCodexWebsocketAuths(ctx, provider, tier), now, s.Policy, state); picked != nil {
+			return picked, nil
+		}
+	}
+	return nil, &Error{Code: "auth_unavailable", Message: "no auth available with plan quota or allowed credits"}
 }

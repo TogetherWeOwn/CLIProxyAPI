@@ -154,6 +154,11 @@ routing:
   # auth JSON. Free credits are used after plan quota, paced by greatest balance; paid
   # credits are never spent unless allow-paid-credits is true. A bare upstream
   # "has credits" signal without a proven balance is never treated as capacity.
+  # Coverage: quota-aware selection uses Codex primary/secondary windows and
+  # Claude (Anthropic unified 7d/5h) telemetry. Providers without a passive
+  # quota signal (for example meta) have no weekly fraction to equalize, so
+  # their credentials stay in the bounded unknown-telemetry fallback
+  # (round-robin with periodic probes) instead of quota-aware ordering.
   quota-aware:
     allow-paid-credits: false # default: false; paid credits are excluded unless allowed
     stale-after: "15m" # telemetry older than this manufactures no headroom (default 15m)
