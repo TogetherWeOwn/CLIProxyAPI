@@ -21,6 +21,36 @@ func TestWeightedRoundRobinRoutingSelector(t *testing.T) {
 	}
 }
 
+func TestQuotaAwareRoutingSelector(t *testing.T) {
+	hysteresis := 0.05
+	state := normalizedRoutingRuntimeState(&internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{
+			Strategy: "quota-aware",
+			QuotaAware: internalconfig.QuotaAwareRoutingConfig{
+				AllowPaidCredits: true,
+				StaleAfter:       "30m",
+				Hysteresis:       &hysteresis,
+			},
+		},
+	})
+	if state.strategy != "quota-aware" {
+		t.Fatalf("strategy = %q, want quota-aware", state.strategy)
+	}
+	selector, ok := newRoutingSelector(state).(*coreauth.QuotaAwareSelector)
+	if !ok {
+		t.Fatalf("selector type = %T, want *auth.QuotaAwareSelector", newRoutingSelector(state))
+	}
+	if !selector.Policy.AllowPaidCredits {
+		t.Fatal("selector policy AllowPaidCredits = false, want true from config")
+	}
+	if selector.Policy.StaleAfter.String() != "30m0s" {
+		t.Fatalf("selector policy StaleAfter = %v, want 30m", selector.Policy.StaleAfter)
+	}
+	if selector.Policy.Hysteresis != hysteresis {
+		t.Fatalf("selector policy Hysteresis = %v, want %v", selector.Policy.Hysteresis, hysteresis)
+	}
+}
+
 func TestServiceRejectsInvalidCredentialWeightConfigCommit(t *testing.T) {
 	originalCfg := &internalconfig.Config{}
 	service := &Service{cfg: originalCfg}

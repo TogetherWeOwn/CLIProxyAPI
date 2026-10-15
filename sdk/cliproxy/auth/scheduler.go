@@ -22,6 +22,7 @@ const (
 	schedulerStrategyRoundRobin         schedulerStrategy = 1
 	schedulerStrategyFillFirst          schedulerStrategy = 2
 	schedulerStrategyWeightedRoundRobin schedulerStrategy = 3
+	schedulerStrategyQuotaAware         schedulerStrategy = 4
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -45,11 +46,13 @@ type scheduledGenerationMeta struct {
 type authScheduler struct {
 	mu                  sync.Mutex
 	strategy            schedulerStrategy
+	quotaPolicy         QuotaAwarePolicy
 	providers           map[string]*providerScheduler
 	authProviders       map[string]string
 	authGenerations     map[string]scheduledGenerationMeta
 	mixedCursors        map[string]int
 	mixedWeightedStates map[string]*smoothWeightedState
+	mixedQuotaStates    map[string]*quotaSelectionState
 }
 
 // providerScheduler stores auth metadata and model shards for a single provider.
@@ -98,6 +101,7 @@ type readyView struct {
 	flat          []*scheduledAuth
 	lastPicked    string
 	weightedState smoothWeightedState
+	quotaState    quotaSelectionState
 }
 
 // cooldownQueue is the blocked auth collection ordered by next retry time during rebuilds.
@@ -106,6 +110,7 @@ type cooldownQueue []*scheduledAuth
 type readyViewCursorState struct {
 	lastPicked    string
 	weightedState smoothWeightedState
+	quotaState    quotaSelectionState
 }
 
 type readyBucketCursorState struct {
@@ -114,7 +119,7 @@ type readyBucketCursorState struct {
 }
 
 func snapshotReadyViewCursors(view readyView) readyViewCursorState {
-	state := readyViewCursorState{lastPicked: view.lastPicked}
+	state := readyViewCursorState{lastPicked: view.lastPicked, quotaState: view.quotaState}
 	if len(view.weightedState.current) > 0 {
 		state.weightedState.current = make(map[string]int64, len(view.weightedState.current))
 		for authID, current := range view.weightedState.current {
@@ -135,6 +140,7 @@ func restoreReadyViewCursors(view *readyView, state readyViewCursorState) {
 		return
 	}
 	view.lastPicked = state.lastPicked
+	view.quotaState = state.quotaState
 	weights := scheduledWeightVector(view.flat)
 	if len(state.weightedState.current) == 0 || weightsConfigChanged(state.weightedState.weights, weights) {
 		return
@@ -155,11 +161,13 @@ func restoreReadyViewCursors(view *readyView, state readyViewCursorState) {
 func newAuthScheduler(selector Selector) *authScheduler {
 	return &authScheduler{
 		strategy:            selectorStrategy(selector),
+		quotaPolicy:         selectorQuotaPolicy(selector),
 		providers:           make(map[string]*providerScheduler),
 		authProviders:       make(map[string]string),
 		authGenerations:     make(map[string]scheduledGenerationMeta),
 		mixedCursors:        make(map[string]int),
 		mixedWeightedStates: make(map[string]*smoothWeightedState),
+		mixedQuotaStates:    make(map[string]*quotaSelectionState),
 	}
 }
 
@@ -170,11 +178,20 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 		return schedulerStrategyFillFirst
 	case *WeightedRoundRobinSelector:
 		return schedulerStrategyWeightedRoundRobin
+	case *QuotaAwareSelector:
+		return schedulerStrategyQuotaAware
 	case nil, *RoundRobinSelector:
 		return schedulerStrategyRoundRobin
 	default:
 		return schedulerStrategyCustom
 	}
+}
+
+func selectorQuotaPolicy(selector Selector) QuotaAwarePolicy {
+	if quotaSelector, ok := selector.(*QuotaAwareSelector); ok && quotaSelector != nil {
+		return quotaSelector.Policy
+	}
+	return QuotaAwarePolicy{}
 }
 
 // setSelector updates the active built-in strategy and resets mixed-provider cursors.
@@ -185,8 +202,10 @@ func (s *authScheduler) setSelector(selector Selector) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.strategy = selectorStrategy(selector)
+	s.quotaPolicy = selectorQuotaPolicy(selector)
 	clear(s.mixedCursors)
 	clear(s.mixedWeightedStates)
+	clear(s.mixedQuotaStates)
 }
 
 // isSchedulableAuth determines whether an auth can be scheduled by a provider scheduler,
@@ -422,7 +441,7 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
-	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
+	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate, s.quotaPolicy); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
@@ -483,7 +502,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		}
 		shard := providerState.ensureModelLocked(modelKey, time.Now())
 		predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
-		if picked := shard.pickReadyLocked(false, strategy, predicate); picked != nil {
+		if picked := shard.pickReadyLocked(false, strategy, predicate, s.quotaPolicy); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
@@ -517,13 +536,52 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
 
+	if strategy == schedulerStrategyQuotaAware {
+		cursorKey := strings.Join(normalized, ",") + ":" + modelKey
+		if s.mixedQuotaStates == nil {
+			s.mixedQuotaStates = make(map[string]*quotaSelectionState)
+		}
+		state := s.mixedQuotaStates[cursorKey]
+		if state == nil {
+			state = &quotaSelectionState{}
+			s.mixedQuotaStates[cursorKey] = state
+		}
+		candidates := make([]*Auth, 0)
+		byID := make(map[string]*scheduledAuth)
+		for _, shard := range candidateShards {
+			if shard == nil {
+				continue
+			}
+			bucket := shard.readyByPriority[bestPriority]
+			if bucket == nil {
+				continue
+			}
+			for _, entry := range bucket.all.flat {
+				if entry == nil || entry.auth == nil || !predicate(entry) {
+					continue
+				}
+				candidates = append(candidates, entry.auth)
+				byID[entry.auth.ID] = entry
+			}
+		}
+		picked := pickQuotaAwareAuth(candidates, now, s.quotaPolicy, state)
+		if picked == nil {
+			return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		}
+		entry := byID[picked.ID]
+		if entry == nil || entry.meta == nil {
+			return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		}
+		return picked, entry.meta.providerKey, nil
+	}
+
 	if strategy == schedulerStrategyFillFirst {
 		for providerIndex, providerKey := range normalized {
 			shard := candidateShards[providerIndex]
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, predicate)
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, predicate, s.quotaPolicy)
 			if picked != nil {
 				return picked, providerKey, nil
 			}
@@ -613,7 +671,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate)
+		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate, QuotaAwarePolicy{})
 		if picked == nil {
 			continue
 		}
@@ -1315,7 +1373,7 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 }
 
 // pickReadyLocked selects the next ready auth from the highest available priority bucket.
-func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
+func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool, quotaPolicy QuotaAwarePolicy) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -1324,7 +1382,7 @@ func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedule
 	if !okPriority {
 		return nil
 	}
-	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, predicate)
+	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, predicate, quotaPolicy)
 }
 
 // highestReadyPriorityLocked returns the highest priority bucket that still has a matching ready auth.
@@ -1360,7 +1418,7 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 
 // pickReadyAtPriorityLocked selects the next ready auth from a specific priority bucket.
 // The caller must ensure expired entries are already promoted when needed.
-func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
+func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool, quotaPolicy QuotaAwarePolicy) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -1378,6 +1436,8 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		picked = view.pickFirst(predicate)
 	case schedulerStrategyWeightedRoundRobin:
 		picked = view.pickWeighted(predicate)
+	case schedulerStrategyQuotaAware:
+		picked = view.pickQuotaAware(predicate, quotaPolicy)
 	default:
 		picked = view.pickRoundRobin(predicate)
 	}
@@ -1686,6 +1746,31 @@ func (v *readyView) pickWeighted(predicate func(*scheduledAuth) bool) *scheduled
 	}
 	v.weightedState.prepare(scheduledWeightVectorMatching(v.flat, predicate))
 	return pickSmoothWeightedScheduled(v.flat, v.weightedState.current, predicate)
+}
+
+// pickQuotaAware returns the quota-aware pick from this ready view, or nil
+// when every ready entry is in an exhausted quota class.
+func (v *readyView) pickQuotaAware(predicate func(*scheduledAuth) bool, policy QuotaAwarePolicy) *scheduledAuth {
+	if v == nil || len(v.flat) == 0 {
+		return nil
+	}
+	candidates := make([]*Auth, 0, len(v.flat))
+	byID := make(map[string]*scheduledAuth, len(v.flat))
+	for _, entry := range v.flat {
+		if entry == nil || entry.auth == nil {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		candidates = append(candidates, entry.auth)
+		byID[entry.auth.ID] = entry
+	}
+	picked := pickQuotaAwareAuth(candidates, time.Now(), policy, &v.quotaState)
+	if picked == nil {
+		return nil
+	}
+	return byID[picked.ID]
 }
 
 func scheduledWeightVector(entries []*scheduledAuth) map[string]int64 {
