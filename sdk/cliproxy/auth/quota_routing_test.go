@@ -205,6 +205,21 @@ func TestQuotaAwareStaleTelemetryDoesNotManufactureHeadroom(t *testing.T) {
 	}
 }
 
+func TestQuotaAwareStaleExhaustedWithFutureResetStaysExhausted(t *testing.T) {
+	now := time.Now()
+	auth := quotaTestAuth("a-stale-exhausted", 100)
+	auth.Quota.ObservedAt = now.Add(-2 * time.Hour)
+	auth.Quota.Signals["X-Codex-Secondary-Reset-At"] = fmt.Sprint(now.Add(46 * time.Hour).Unix())
+	eval := evaluateQuota(auth, now, QuotaAwarePolicy{}.normalizedQuotaAwarePolicy())
+	if eval.Class != quotaClassExhausted {
+		t.Fatalf("evaluateQuota() class = %v, want exhausted for stale 100%% snapshot whose reset is still future (%+v)", eval.Class, eval)
+	}
+	selector := &QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}}
+	if _, err := selector.Pick(context.Background(), "codex", "gpt-test", cliproxyexecutor.Options{}, []*Auth{auth}); err == nil {
+		t.Fatal("Pick() with only stale weekly-exhausted (future reset) credential succeeded, want error")
+	}
+}
+
 func TestQuotaAwareResetPassedSnapshotBecomesUnknownNotExhausted(t *testing.T) {
 	now := time.Now()
 	auth := quotaTestAuth("a-reset", 100)

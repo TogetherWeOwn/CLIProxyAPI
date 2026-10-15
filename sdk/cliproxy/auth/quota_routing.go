@@ -193,10 +193,13 @@ func evaluateQuota(auth *Auth, now time.Time, policy QuotaAwarePolicy) quotaEval
 		if weekly.hasReset {
 			weeklyReset = weekly.resetAt
 		}
-		if !fresh {
-			// A snapshot taken before a reset that has since passed is not
-			// evidence of exhaustion: the window has rolled over. It is
-			// unknown telemetry, eligible only via the bounded fallback.
+		if !fresh && !(weekly.usedPercent >= 100 && weekly.hasReset && now.Before(weekly.resetAt)) {
+			// A stale snapshot is unknown telemetry, eligible only via the
+			// bounded fallback. One exception: a 100%-used snapshot whose
+			// reset is still in the future stays exhausted below, because
+			// the window cannot have recovered before that reset. A
+			// snapshot taken before a reset that has since passed is the
+			// opposite case: the window has rolled over, so it is unknown.
 			return quotaEvaluation{Class: quotaClassUnknown, WeeklyResetAt: weeklyReset, Reason: "stale-telemetry"}
 		}
 		weeklyRemaining = 1 - weekly.usedPercent/100
@@ -239,6 +242,9 @@ func evaluateQuota(auth *Auth, now time.Time, policy QuotaAwarePolicy) quotaEval
 	kind := creditsKindOf(auth)
 	if kind == "" {
 		return quotaEvaluation{Class: quotaClassExhausted, WeeklyResetAt: weeklyReset, Reason: "weekly-exhausted-credits-unclassified"}
+	}
+	if !fresh {
+		return quotaEvaluation{Class: quotaClassExhausted, WeeklyResetAt: weeklyReset, Reason: "weekly-exhausted-credits-stale"}
 	}
 	balance, hasBalance := creditsBalance(signals)
 	if !hasBalance {
