@@ -671,3 +671,90 @@ func TestQuotaAwareStaleFiveHourExhaustedStaysExhausted(t *testing.T) {
 		t.Fatal("Pick() with only stale 5h-exhausted credential succeeded, want error")
 	}
 }
+
+func TestQuotaAwareStaleFiveHourResetPassedBecomesUnknown(t *testing.T) {
+	now := time.Now()
+	policy := QuotaAwarePolicy{}.normalizedQuotaAwarePolicy()
+
+	codexRolled := quotaTestAuth("a-codex-5h-rolled", 10)
+	codexRolled.Quota.Signals["X-Codex-Primary-Used-Percent"] = "100"
+	codexRolled.Quota.Signals["X-Codex-Primary-Reset-At"] = fmt.Sprint(now.Add(-10 * time.Minute).Unix())
+	codexRolled.Quota.ObservedAt = now.Add(-20 * time.Minute)
+	if eval := evaluateQuota(codexRolled, now, policy); eval.Class != quotaClassUnknown {
+		t.Fatalf("codex evaluateQuota() class = %v, want unknown for stale 5h snapshot whose reset already passed (%+v)", eval.Class, eval)
+	}
+
+	claudeRolled := claudeQuotaTestAuth("b-claude-5h-rolled", 0.05)
+	claudeRolled.Quota.Signals["Anthropic-Ratelimit-Unified-5h-Status"] = "rejected"
+	claudeRolled.Quota.Signals["Anthropic-Ratelimit-Unified-5h-Reset"] = fmt.Sprint(now.Add(-10 * time.Minute).Unix())
+	claudeRolled.Quota.ObservedAt = now.Add(-20 * time.Minute)
+	if eval := evaluateQuota(claudeRolled, now, policy); eval.Class != quotaClassUnknown {
+		t.Fatalf("claude evaluateQuota() class = %v, want unknown for stale 5h snapshot whose reset already passed (%+v)", eval.Class, eval)
+	}
+}
+
+func TestQuotaAwareStaleWeeklyExhaustedShortResetPassedUsesCreditsPath(t *testing.T) {
+	now := time.Now()
+	policy := QuotaAwarePolicy{}.normalizedQuotaAwarePolicy()
+
+	// Weekly window is exhausted with a reset still in the future (proven
+	// exhausted), but the 5h window has already rolled over: the credential
+	// must reach the credits path, not be reported five-hour-exhausted.
+	auth := quotaTestAuth("a-weekly-exhausted-5h-rolled", 100)
+	auth.Quota.Signals["X-Codex-Primary-Used-Percent"] = "100"
+	auth.Quota.Signals["X-Codex-Primary-Reset-At"] = fmt.Sprint(now.Add(-10 * time.Minute).Unix())
+	auth.Quota.Signals["X-Codex-Credits-Has-Credits"] = "true"
+	auth.Quota.Signals["X-Codex-Credits-Balance"] = "100"
+	auth.Attributes = map[string]string{AttributeCredits: CreditsKindFree}
+	auth.Quota.ObservedAt = now.Add(-20 * time.Minute)
+	eval := evaluateQuota(auth, now, policy)
+	if eval.Class == quotaClassExhausted && eval.Reason == "five-hour-exhausted" {
+		t.Fatalf("evaluateQuota() = %+v, want credits path, not five-hour-exhausted, once the 5h reset has passed", eval)
+	}
+	if eval.Class != quotaClassUnknown {
+		t.Fatalf("evaluateQuota() class = %v, want unknown (stale free-credits probe) (%+v)", eval.Class, eval)
+	}
+}
+
+func newQuotaManagerForTest(t *testing.T) *Manager {
+	t.Helper()
+	manager := NewManager(nil, &QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	for _, candidate := range []*Auth{
+		quotaTestAuthWithPriority("a-hi-exhausted", 100, "10"),
+		quotaTestAuthWithPriority("b-lo-healthy", 10, "0"),
+	} {
+		candidate.Metadata = map[string]any{"access_token": "test-token"}
+		if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", candidate.ID, errRegister)
+		}
+	}
+	return manager
+}
+
+func TestQuotaAwareSelectAuthByKindExhaustedTopTierFallsThrough(t *testing.T) {
+	manager := newQuotaManagerForTest(t)
+	selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", AuthKindOAuth, cliproxyexecutor.Options{})
+	if errSelect != nil {
+		t.Fatalf("SelectAuthByKind() error = %v, want lower-tier fall-through", errSelect)
+	}
+	if selected == nil || selected.ID != "b-lo-healthy" {
+		t.Fatalf("SelectAuthByKind() = %v, want b-lo-healthy", selected)
+	}
+}
+
+func TestQuotaAwarePickNextWithPluginSchedulerExhaustedTopTierFallsThrough(t *testing.T) {
+	manager := newQuotaManagerForTest(t)
+	scheduler := &fakePluginScheduler{handled: false}
+	manager.SetPluginScheduler(scheduler)
+	got, _, errPick := manager.pickNext(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNext() error = %v, want lower-tier fall-through", errPick)
+	}
+	if got == nil || got.ID != "b-lo-healthy" {
+		t.Fatalf("pickNext() = %v, want b-lo-healthy", got)
+	}
+	if scheduler.calls != 1 {
+		t.Fatalf("scheduler.calls = %d, want 1", scheduler.calls)
+	}
+}
