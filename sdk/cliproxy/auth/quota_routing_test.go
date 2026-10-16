@@ -8,6 +8,7 @@ import (
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func quotaTestAuth(id string, weeklyUsed float64) *Auth {
@@ -490,5 +491,183 @@ func TestSchedulerPick_QuotaAware(t *testing.T) {
 	}
 	if got == nil || got.ID != "b-high-remaining" {
 		t.Fatalf("pickSingle() = %v, want b-high-remaining", got)
+	}
+}
+
+func quotaSchedulerAuth(id string, weeklyUsed float64, priority string, websockets bool) *Auth {
+	auth := quotaTestAuth(id, weeklyUsed)
+	auth.Attributes = map[string]string{"priority": priority}
+	if websockets {
+		auth.Attributes["websockets"] = "true"
+	}
+	return auth
+}
+
+func exhaustOnPaidCredits(auth *Auth) {
+	auth.Attributes = map[string]string{AttributeCredits: CreditsKindPaid}
+	auth.Quota.Signals["X-Codex-Credits-Has-Credits"] = "true"
+	auth.Quota.Signals["X-Codex-Credits-Balance"] = "500"
+	setWeeklyUsed(auth, 100)
+}
+
+func TestQuotaAwareAffinitySessionlessExhaustedTopTierFallsThrough(t *testing.T) {
+	for _, prevalidated := range []bool{false, true} {
+		affinity := NewSessionAffinitySelector(&QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}})
+		exhausted := quotaTestAuthWithPriority("a-hi-exhausted", 100, "10")
+		healthy := quotaTestAuthWithPriority("b-lo-healthy", 10, "0")
+		ctx := context.Background()
+		if prevalidated {
+			ctx = context.WithValue(ctx, prevalidatedAuthCandidatesKey{}, true)
+		}
+		got, err := affinity.Pick(ctx, "codex", "gpt-test", cliproxyexecutor.Options{}, []*Auth{exhausted, healthy})
+		if err != nil || got == nil || got.ID != healthy.ID {
+			t.Fatalf("prevalidated=%v: sessionless Pick() = %v, %v; want lower-tier b-lo-healthy", prevalidated, got, err)
+		}
+	}
+}
+
+func TestQuotaAwareAffinityTwoTierSessionFallsThrough(t *testing.T) {
+	affinity := NewSessionAffinitySelector(&QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}})
+	exhausted := quotaTestAuthWithPriority("a-hi-exhausted", 100, "10")
+	healthy := quotaTestAuthWithPriority("b-lo-healthy", 10, "0")
+	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"quota-two-tier-session"}}}
+	got, err := affinity.Pick(context.Background(), "codex", "gpt-test", opts, []*Auth{exhausted, healthy})
+	if err != nil || got == nil || got.ID != healthy.ID {
+		t.Fatalf("Pick() = %v, %v; want lower-tier b-lo-healthy", got, err)
+	}
+}
+
+func TestQuotaAwareAffinityFallbackKeyReleasesExhaustedBoundCredential(t *testing.T) {
+	affinity := NewSessionAffinitySelector(&QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}})
+	bound := quotaTestAuth("a-bound", 10)
+	other := quotaTestAuth("b-other", 50)
+	auths := []*Auth{bound, other}
+
+	parentOpts := cliproxyexecutor.Options{
+		Headers:  http.Header{"Session-Id": []string{"quota-parent-100"}, "Thread-Id": []string{"quota-parent-100"}},
+		Metadata: map[string]any{},
+	}
+	got, err := affinity.Pick(context.Background(), "codex", "gpt-test", parentOpts, auths)
+	if err != nil || got == nil || got.ID != bound.ID {
+		t.Fatalf("parent Pick() = %v, %v; want a-bound", got, err)
+	}
+
+	exhaustOnPaidCredits(bound)
+	forkOpts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"Session-Id":            []string{"quota-parent-100"},
+			"Thread-Id":             []string{"quota-child-200"},
+			"X-Codex-Turn-Metadata": []string{`{"session_id":"quota-parent-100","thread_id":"quota-child-200","forked_from_thread_id":"quota-parent-100"}`},
+		},
+		Metadata: map[string]any{},
+	}
+	got, err = affinity.Pick(context.Background(), "codex", "gpt-test", forkOpts, auths)
+	if err != nil || got == nil || got.ID != other.ID {
+		t.Fatalf("fork Pick() after bound exhaustion = %v, %v; want reselected b-other", got, err)
+	}
+}
+
+func TestQuotaAwareAffinityLCPReleasesExhaustedBoundCredential(t *testing.T) {
+	affinity := NewSessionAffinitySelector(&QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}})
+	bound := quotaTestAuth("a-bound", 10)
+	other := quotaTestAuth("b-other", 50)
+	auths := []*Auth{bound, other}
+
+	first := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAI,
+		OriginalRequest: []byte(`{"messages":[{"role":"system","content":"stable"},{"role":"user","content":"first"}]}`),
+		Metadata:        map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "caller-quota"},
+	}
+	got, err := affinity.Pick(context.Background(), "codex", "gpt-test", first, auths)
+	if err != nil || got == nil || got.ID != bound.ID {
+		t.Fatalf("first Pick() = %v, %v; want a-bound", got, err)
+	}
+
+	exhaustOnPaidCredits(bound)
+	grown := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAI,
+		OriginalRequest: []byte(`{"messages":[{"role":"system","content":"stable"},{"role":"user","content":"first"},{"role":"assistant","content":"answer"},{"role":"user","content":"continue"}]}`),
+		Metadata:        map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "caller-quota"},
+	}
+	got, err = affinity.Pick(context.Background(), "codex", "gpt-test", grown, auths)
+	if err != nil || got == nil || got.ID != other.ID {
+		t.Fatalf("grown Pick() after bound exhaustion = %v, %v; want reselected b-other", got, err)
+	}
+}
+
+func TestQuotaAwareSchedulerMixedExhaustedTopTierFallsThrough(t *testing.T) {
+	codexHi := quotaTestAuthWithPriority("a-codex-hi-exhausted", 100, "10")
+	claudeLo := claudeQuotaTestAuth("b-claude-lo-healthy", 0.1)
+	claudeLo.Attributes = map[string]string{"priority": "0"}
+	scheduler := newSchedulerForTest(
+		&QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}},
+		codexHi, claudeLo,
+	)
+	got, provider, errPick := scheduler.pickMixed(context.Background(), []string{"codex", "claude"}, "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickMixed() error = %v, want lower-tier fall-through", errPick)
+	}
+	if got == nil || got.ID != claudeLo.ID || provider != "claude" {
+		t.Fatalf("pickMixed() = %v via %q, want b-claude-lo-healthy via claude", got, provider)
+	}
+}
+
+func TestSchedulerPick_QuotaAwareWebsocketPrefersLowerTier(t *testing.T) {
+	scheduler := newSchedulerForTest(
+		&QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}},
+		quotaSchedulerAuth("a-hi-http", 10, "10", false),
+		quotaSchedulerAuth("b-lo-ws", 10, "0", true),
+	)
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != "b-lo-ws" {
+		t.Fatalf("pickSingle() = %v, want websocket credential b-lo-ws from the lower tier", got)
+	}
+}
+
+func TestSchedulerPick_QuotaAwareWebsocketTierFallsBackToHTTP(t *testing.T) {
+	scheduler := newSchedulerForTest(
+		&QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}},
+		quotaSchedulerAuth("a-ws-exhausted", 100, "0", true),
+		quotaSchedulerAuth("b-http-healthy", 10, "0", false),
+	)
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v, want same-tier HTTP fallback", errPick)
+	}
+	if got == nil || got.ID != "b-http-healthy" {
+		t.Fatalf("pickSingle() = %v, want b-http-healthy when the tier's websocket credential is quota-exhausted", got)
+	}
+}
+
+func TestQuotaAwareStaleFiveHourExhaustedStaysExhausted(t *testing.T) {
+	now := time.Now()
+
+	codexGuarded := quotaTestAuth("a-codex-5h", 10)
+	codexGuarded.Quota.Signals["X-Codex-Primary-Used-Percent"] = "100"
+	codexGuarded.Quota.ObservedAt = now.Add(-20 * time.Minute)
+	if eval := evaluateQuota(codexGuarded, now, QuotaAwarePolicy{}.normalizedQuotaAwarePolicy()); eval.Class != quotaClassExhausted {
+		t.Fatalf("codex evaluateQuota() class = %v, want exhausted for stale 5h-exhausted snapshot with reset 2h out (%+v)", eval.Class, eval)
+	}
+
+	claudeGuarded := claudeQuotaTestAuth("b-claude-5h", 0.05)
+	claudeGuarded.Quota.Signals["Anthropic-Ratelimit-Unified-5h-Status"] = "rejected"
+	claudeGuarded.Quota.ObservedAt = now.Add(-20 * time.Minute)
+	if eval := evaluateQuota(claudeGuarded, now, QuotaAwarePolicy{}.normalizedQuotaAwarePolicy()); eval.Class != quotaClassExhausted {
+		t.Fatalf("claude evaluateQuota() class = %v, want exhausted for stale 5h-rejected snapshot with reset 2h out (%+v)", eval.Class, eval)
+	}
+
+	selector := &QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}}
+	healthy := quotaTestAuth("c-healthy", 50)
+	if got := pickQuota(t, selector, codexGuarded, healthy); got.ID != healthy.ID {
+		t.Fatalf("Pick() = %q, want healthy; stale 5h-exhausted credential must stay guarded until its reset", got.ID)
+	}
+	alone := &QuotaAwareSelector{Policy: QuotaAwarePolicy{Hysteresis: 0}}
+	if _, err := alone.Pick(context.Background(), "codex", "gpt-test", cliproxyexecutor.Options{}, []*Auth{codexGuarded}); err == nil {
+		t.Fatal("Pick() with only stale 5h-exhausted credential succeeded, want error")
 	}
 }

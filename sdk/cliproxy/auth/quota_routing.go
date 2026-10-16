@@ -216,13 +216,32 @@ func evaluateQuota(auth *Auth, now time.Time, policy QuotaAwarePolicy) quotaEval
 		}
 	}
 
+	// Short-window (5h) state, with its reset when one is known. The same
+	// stale-proven rule applies here as to the weekly window: a short window
+	// exhausted with a reset still in the future cannot have recovered, so
+	// the credential stays exhausted past stale-after; a short reset that
+	// has passed means the window has rolled over.
+	shortExhausted := (short != nil && short.usedPercent >= 100) || claudeFiveHourExhausted(signals)
+	var shortReset time.Time
+	shortResetKnown := false
+	if short != nil && short.usedPercent >= 100 && short.hasReset {
+		shortReset, shortResetKnown = short.resetAt, true
+	}
+	if !shortResetKnown && claudeFiveHourExhausted(signals) {
+		if reset, ok := claudeFiveHourReset(signals); ok {
+			shortReset, shortResetKnown = reset, true
+		}
+	}
+	shortExhaustedNow := shortExhausted && (fresh || !shortResetKnown || now.Before(shortReset))
+
 	// A stale snapshot is unknown telemetry, eligible only via the bounded
-	// fallback and probes. One exception: a weekly-exhausted snapshot whose
-	// reset is still in the future stays exhausted, because the window cannot
-	// have recovered before that reset. A snapshot taken before a reset that
-	// has since passed is the opposite case: the window has rolled over, so
-	// it is unknown.
-	staleProvenExhausted := !fresh && weeklyExhausted && weeklyResetKnown && now.Before(weeklyReset)
+	// fallback and probes. One exception: a snapshot proven exhausted (weekly
+	// or short window) whose reset is still in the future stays exhausted,
+	// because the window cannot have recovered before that reset. A snapshot
+	// taken before a reset that has since passed is the opposite case: the
+	// window has rolled over, so it is unknown.
+	staleProvenExhausted := !fresh && ((weeklyExhausted && weeklyResetKnown && now.Before(weeklyReset)) ||
+		(shortExhausted && shortResetKnown && now.Before(shortReset)))
 	if !fresh && !staleProvenExhausted {
 		return quotaEvaluation{Class: quotaClassUnknown, WeeklyResetAt: weeklyReset, Reason: "stale-telemetry"}
 	}
@@ -234,7 +253,7 @@ func evaluateQuota(auth *Auth, now time.Time, policy QuotaAwarePolicy) quotaEval
 	// The short-window (5h) guard applies to every class, including the
 	// credits tier: a credential at its short-window limit is not routed to
 	// until that window recovers, whatever its weekly state.
-	if (short != nil && short.usedPercent >= 100) || (fresh && claudeFiveHourExhausted(signals)) {
+	if shortExhaustedNow {
 		return quotaEvaluation{Class: quotaClassExhausted, WeeklyRemaining: weeklyRemaining, WeeklyResetAt: weeklyReset, Reason: "five-hour-exhausted"}
 	}
 
@@ -376,6 +395,19 @@ func claudeWeeklyWindow(signals map[string]string, observedAt time.Time) *quotaW
 // claudeWeeklyReset parses the Claude 7d reset signal (unix seconds).
 func claudeWeeklyReset(signals map[string]string) (time.Time, bool) {
 	raw, ok := claudeSignalValue(signals, "-7d-reset")
+	if !ok {
+		return time.Time{}, false
+	}
+	seconds, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || seconds <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(seconds, 0), true
+}
+
+// claudeFiveHourReset parses the Claude 5h reset signal (unix seconds).
+func claudeFiveHourReset(signals map[string]string) (time.Time, bool) {
+	raw, ok := claudeSignalValue(signals, "-5h-reset")
 	if !ok {
 		return time.Time{}, false
 	}

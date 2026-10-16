@@ -1408,6 +1408,18 @@ func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedule
 	}
 	m.promoteExpiredLocked(time.Now())
 	if strategy == schedulerStrategyQuotaAware {
+		// Preserve the cross-tier websocket preference the other strategies
+		// get from highestReadyPriorityLocked: a websocket-downstream request
+		// first walks every tier's websocket view (falling through tiers
+		// whose websocket credentials are all quota-exhausted), and only then
+		// walks the tiers' full views.
+		if preferWebsocket {
+			for _, priority := range m.priorityOrder {
+				if picked := m.pickWebsocketAtPriorityLocked(priority, predicate, quotaPolicy); picked != nil {
+					return picked
+				}
+			}
+		}
 		// A tier whose credentials are all quota-exhausted yields no pick but
 		// must not block lower tiers: exhausted credentials are never picked,
 		// so they never enter cooldown and the lower tier would otherwise
@@ -1455,6 +1467,24 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 		}
 	}
 	return 0, false
+}
+
+// pickWebsocketAtPriorityLocked returns the quota-aware pick from one
+// tier's websocket view only, or nil when that view has no quota-eligible
+// credential. The caller must ensure expired entries are already promoted.
+func (m *modelScheduler) pickWebsocketAtPriorityLocked(priority int, predicate func(*scheduledAuth) bool, quotaPolicy QuotaAwarePolicy) *Auth {
+	if m == nil {
+		return nil
+	}
+	bucket := m.readyByPriority[priority]
+	if bucket == nil {
+		return nil
+	}
+	picked := bucket.ws.pickQuotaAware(predicate, quotaPolicy)
+	if picked == nil || picked.auth == nil {
+		return nil
+	}
+	return picked.auth
 }
 
 // pickReadyAtPriorityLocked selects the next ready auth from a specific priority bucket.

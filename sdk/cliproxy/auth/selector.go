@@ -991,7 +991,9 @@ func (s *SessionAffinitySelector) fallbackAuthsFor(available []*Auth) []*Auth {
 // An established binding outranks credential priority: a bound credential that is still
 // available is reused even when a higher-priority credential recovers. Credential priority
 // applies to cold bindings, requests without a session, and genuine bound-credential
-// failover, so the fallback selector only ever receives the highest available priority tier.
+// failover, so the fallback selector only ever receives the highest available priority tier,
+// except with a quota-aware fallback, which receives every tier so its own tier
+// fall-through can serve a lower tier when the highest is quota-exhausted.
 //
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
@@ -1045,12 +1047,12 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		availabilityCandidates = positiveWeightAuths(auths)
 	}
 	if primaryID == "" {
-		fallbackAuths, errAvailable := getSelectorAvailableAuths(ctx, availabilityCandidates, provider, model, now)
+		available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
 		if errAvailable != nil {
 			return nil, errAvailable
 		}
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
-		return s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		return s.fallback.Pick(ctx, provider, model, opts, s.fallbackAuthsFor(available))
 	}
 
 	// A single availability pass serves both lookups: the bound credential is validated against
