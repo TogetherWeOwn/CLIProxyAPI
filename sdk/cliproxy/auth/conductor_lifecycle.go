@@ -86,6 +86,9 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, fmt.Errorf("register auth: %w", errWeight)
 	}
+	if errCredits := ValidateAuthCredits(auth); errCredits != nil {
+		return nil, fmt.Errorf("register auth: %w", errCredits)
+	}
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
@@ -192,6 +195,9 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	NormalizeCredentialMetadata(auth.Metadata)
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, fmt.Errorf("update auth: %w", errWeight)
+	}
+	if errCredits := ValidateAuthCredits(auth); errCredits != nil {
+		return nil, fmt.Errorf("update auth: %w", errCredits)
 	}
 	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, auth.ID)
 	if errMutation != nil {
@@ -459,6 +465,9 @@ func (m *Manager) Load(ctx context.Context) error {
 		if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 			continue
 		}
+		if errCredits := ValidateAuthCredits(auth); errCredits != nil {
+			continue
+		}
 		auth.EnsureIndex()
 		m.authEpochs[auth.ID] = max(m.authEpochs[auth.ID], auth.RegistrationEpoch) + 1
 		auth.RegistrationEpoch = m.authEpochs[auth.ID]
@@ -525,6 +534,9 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	}
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return fmt.Errorf("persist auth: %w", errWeight)
+	}
+	if errCredits := ValidateAuthCredits(auth); errCredits != nil {
+		return fmt.Errorf("persist auth: %w", errCredits)
 	}
 	if IsConfigAPIKeyAuth(auth) {
 		return nil
