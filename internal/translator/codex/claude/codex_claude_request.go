@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -587,6 +588,11 @@ func convertClaudeWebSearchToolToCodex(tool gjson.Result) []byte {
 	return out
 }
 
+// gatewayToolNamePattern matches gateway tool ids of the form
+// `[mcp_][app-gallery-]<server words>-<hex id...>_<tool>`, e.g.
+// `mcp_app-gallery-github-4a90142d-abbf-4715-95fe-93cef04b1eac-4727966b_add-issue-comment`.
+var gatewayToolNamePattern = regexp.MustCompile(`^(?:mcp_)?(?:app-gallery-)?([a-z][a-z0-9-]*?)-[0-9a-f]{6,}(?:-[0-9a-f]+)*_(.+)$`)
+
 // shortenNameIfNeeded applies a simple shortening rule for a single name.
 func shortenNameIfNeeded(name string) string {
 	const limit = 64
@@ -596,11 +602,20 @@ func shortenNameIfNeeded(name string) string {
 	if strings.HasPrefix(name, "mcp__") {
 		idx := strings.LastIndex(name, "__")
 		if idx > 0 {
-			cand := "mcp__" + name[idx+2:]
-			if len(cand) > limit {
-				return cand[:limit]
+			rest := name[idx+2:]
+			cand := "mcp__" + rest
+			if len(cand) <= limit {
+				return cand
 			}
-			return cand
+			// Plain truncation keeps only the shared server prefix, so every tool of a
+			// long-named server collapses to the same 64 characters and the model cannot
+			// tell them apart. Keep the server's words and the tool's own name instead.
+			if m := gatewayToolNamePattern.FindStringSubmatch(rest); m != nil {
+				if readable := "mcp__" + m[1] + "_" + m[2]; len(readable) <= limit {
+					return readable
+				}
+			}
+			return cand[:limit]
 		}
 	}
 	return name[:limit]
@@ -612,22 +627,7 @@ func buildShortNameMap(names []string) map[string]string {
 	used := map[string]struct{}{}
 	m := map[string]string{}
 
-	baseCandidate := func(n string) string {
-		if len(n) <= limit {
-			return n
-		}
-		if strings.HasPrefix(n, "mcp__") {
-			idx := strings.LastIndex(n, "__")
-			if idx > 0 {
-				cand := "mcp__" + n[idx+2:]
-				if len(cand) > limit {
-					cand = cand[:limit]
-				}
-				return cand
-			}
-		}
-		return n[:limit]
-	}
+	baseCandidate := shortenNameIfNeeded
 
 	makeUnique := func(cand string) string {
 		if _, ok := used[cand]; !ok {
