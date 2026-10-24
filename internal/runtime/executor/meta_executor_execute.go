@@ -96,6 +96,9 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 	body = helps.SanitizeMetaWebSearchTools(body)
 	body = helps.NormalizeCodexToolIntegerTypes(body, opts.Headers)
 
+	// The derived cache key is a built-in injection, so it runs before the user
+	// payload rules, which stay the final semantic barrier.
+	body = e.applyMetaPromptCacheKey(ctx, req, opts, body)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, e.Identifier(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	return &metaPreparedRequest{
 		applyPatch:      applyPatch,
