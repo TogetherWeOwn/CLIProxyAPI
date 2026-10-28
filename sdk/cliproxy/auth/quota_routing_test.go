@@ -644,6 +644,43 @@ func TestSchedulerPick_QuotaAwareWebsocketTierFallsBackToHTTP(t *testing.T) {
 	}
 }
 
+func TestQuotaAwareWebsocketTierFallsBackToHTTP(t *testing.T) {
+	for _, lowerTier := range []bool{false, true} {
+		for _, prevalidated := range []bool{false, true} {
+			t.Run(fmt.Sprintf("lowerTier=%v/prevalidated=%v", lowerTier, prevalidated), func(t *testing.T) {
+				selector := &QuotaAwareSelector{}
+				httpAuth := quotaSchedulerAuth("b-http-healthy", 10, "10", false)
+				auths := []*Auth{
+					quotaSchedulerAuth("a-ws-exhausted", 100, "10", true),
+					httpAuth,
+				}
+				if lowerTier {
+					auths = append(auths, quotaSchedulerAuth("c-lower-tier", 10, "0", true))
+				}
+				ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+				if prevalidated {
+					ctx = context.WithValue(ctx, prevalidatedAuthCandidatesKey{}, true)
+				}
+				got, err := selector.Pick(ctx, "codex", "gpt-test", cliproxyexecutor.Options{}, auths)
+				if err != nil || got == nil || got.ID != httpAuth.ID {
+					t.Fatalf("Pick() = %v, %v; want same-tier HTTP credential %q", got, err, httpAuth.ID)
+				}
+			})
+		}
+	}
+}
+
+func TestQuotaAwareWebsocketStillPrefersEligibleWebsocket(t *testing.T) {
+	selector := &QuotaAwareSelector{}
+	wsAuth := quotaSchedulerAuth("a-ws-healthy", 80, "0", true)
+	httpAuth := quotaSchedulerAuth("b-http-healthy", 10, "0", false)
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	got, err := selector.Pick(ctx, "codex", "gpt-test", cliproxyexecutor.Options{}, []*Auth{wsAuth, httpAuth})
+	if err != nil || got == nil || got.ID != wsAuth.ID {
+		t.Fatalf("Pick() = %v, %v; want eligible WebSocket credential %q despite greater HTTP quota", got, err, wsAuth.ID)
+	}
+}
+
 func TestQuotaAwareStaleFiveHourExhaustedStaysExhausted(t *testing.T) {
 	now := time.Now()
 

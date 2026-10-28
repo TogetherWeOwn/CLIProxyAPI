@@ -653,7 +653,14 @@ func (s *QuotaAwareSelector) Pick(ctx context.Context, provider, model string, o
 				tier = append(tier, candidate)
 			}
 		}
-		if picked := pickQuotaAwareAuth(preferCodexWebsocketAuths(ctx, provider, tier), now, s.Policy, state); picked != nil {
+		preferred := preferCodexWebsocketAuths(ctx, provider, tier)
+		picked := pickQuotaAwareAuth(preferred, now, s.Policy, state)
+		if picked == nil && len(preferred) < len(tier) {
+			// Exhausted WebSocket credentials must not hide eligible HTTP
+			// credentials in this tier or force a lower-priority pick.
+			picked = pickQuotaAwareAuth(tier, now, s.Policy, state)
+		}
+		if picked != nil {
 			return picked, nil
 		}
 	}
