@@ -152,6 +152,8 @@ type XAIConfig struct {
 type MetaConfig struct {
 	// ReasoningReplay controls account-safe replay of Muse reasoning across tool turns.
 	ReasoningReplay MetaReasoningReplayConfig `yaml:"reasoning-replay" json:"reasoning-replay"`
+	// PromptCacheKey controls the per-session prompt_cache_key sent to Meta.
+	PromptCacheKey MetaPromptCacheKeyConfig `yaml:"prompt-cache-key" json:"prompt-cache-key"`
 }
 
 // MetaReasoningReplayConfig replays a Muse model's own reasoning back to it on later
@@ -218,6 +220,21 @@ func matchModelGlob(pattern, value string) bool {
 		value = value[idx+len(part):]
 	}
 	return strings.HasSuffix(value, last)
+}
+
+// MetaPromptCacheKeyConfig sends a stable per-session prompt_cache_key to Meta so
+// the prompt cache warms in one call instead of several. The key is derived from
+// the downstream session identity the proxy already uses for affinity, so every
+// turn of one session names the same cache bucket and different sessions never
+// share one. A key the client sent itself is never overridden.
+// Canary by account with Auths: entries match an auth's label, email, ID or index
+// (case-insensitive); empty means every Meta auth once Enabled is true.
+type MetaPromptCacheKeyConfig struct {
+	// Enabled turns the feature on. Default false: no prompt_cache_key is set.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Auths limits the feature to the named auths for a canary. Empty or omitted
+	// means every Meta auth once enabled.
+	Auths []string `yaml:"auths,omitempty" json:"auths,omitempty"`
 }
 
 // DevinConfig configures provider-wide Devin request behavior.
@@ -420,11 +437,32 @@ type QuotaExceeded struct {
 	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
 }
 
+// QuotaAwareRoutingConfig tunes the "quota-aware" routing strategy.
+type QuotaAwareRoutingConfig struct {
+	// AllowPaidCredits permits weekly-exhausted credentials whose credits
+	// pool is classified "paid" (per-credential "credits" field) to be
+	// selected as a last resort. Default false: paid credits are never spent.
+	AllowPaidCredits bool `yaml:"allow-paid-credits,omitempty" json:"allow-paid-credits,omitempty"`
+
+	// StaleAfter bounds quota telemetry age, e.g. "15m". Snapshots older
+	// than this are unknown telemetry and manufacture no headroom.
+	// Default: 15m.
+	StaleAfter string `yaml:"stale-after,omitempty" json:"stale-after,omitempty"`
+
+	// Hysteresis is the remaining-weekly-fraction lead (0..1) a challenger
+	// needs before selection moves off the incumbent credential.
+	// Default: 0.02.
+	Hysteresis *float64 `yaml:"hysteresis,omitempty" json:"hysteresis,omitempty"`
+}
+
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first", "quota-aware".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// QuotaAware tunes the "quota-aware" strategy. Ignored otherwise.
+	QuotaAware QuotaAwareRoutingConfig `yaml:"quota-aware,omitempty" json:"quota-aware,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,

@@ -142,10 +142,27 @@ access:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
+  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, quota-aware
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
+  # quota-aware needs no plan labels or weights: it selects the eligible credential with
+  # the greatest remaining weekly quota fraction from passive telemetry, so used
+  # fractions equalize and larger plans serve proportionally more traffic. Credentials
+  # with exhausted weekly quota are only used through their credits pool: classify it
+  # per credential with a top-level "credits": "free" or "credits": "paid" field in the
+  # auth JSON. Free credits are used after plan quota, paced by greatest balance; paid
+  # credits are never spent unless allow-paid-credits is true. A bare upstream
+  # "has credits" signal without a proven balance is never treated as capacity.
+  # Coverage: quota-aware selection uses Codex primary/secondary windows and
+  # Claude (Anthropic unified 7d/5h) telemetry. Providers without a passive
+  # quota signal (for example meta) have no weekly fraction to equalize, so
+  # their credentials stay in the bounded unknown-telemetry fallback
+  # (round-robin with periodic probes) instead of quota-aware ordering.
+  quota-aware:
+    allow-paid-credits: false # default: false; paid credits are excluded unless allowed
+    stale-after: "15m" # telemetry older than this manufactures no headroom (default 15m)
+    hysteresis: 0.02 # remaining-fraction lead a challenger needs to move selection (default 0.02)
   # Enable universal session-sticky routing for all clients.
   # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
   # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
@@ -451,6 +468,15 @@ upstream:
       # requested name, including an oauth.model-alias, and the upstream model are tested).
       # Empty or omitted means every Meta model once enabled.
       # models: ["muse-canary*"]
+    # Send a stable per-session prompt_cache_key so the prompt cache warms in one call.
+    # The key is derived from the downstream session identity already used for affinity,
+    # so turns of one session share a bucket and sessions never share one. A key the
+    # client sent itself is never overridden. Hot-reloadable: edit + the watcher picks it up.
+    prompt-cache-key:
+      enabled: false # default false: no prompt_cache_key is set
+      # Canary by account: entries match an auth's label, email, ID or index
+      # (case-insensitive). Empty or omitted means every Meta auth once enabled.
+      # auths: ["pisnrzrs+meta5@two.gg"]
 
 # API-key upstreams are separate from access.api-keys (client authentication).
 # Each provider contains named groups: one base-url, shared settings, and a keys list.

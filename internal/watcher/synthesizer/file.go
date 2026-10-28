@@ -85,6 +85,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	if errWeight := coreauth.ValidateAuthWeight(&coreauth.Auth{Metadata: metadata}); errWeight != nil {
 		return nil, fmt.Errorf("invalid weight in %s: %w", filepath.Base(fullPath), errWeight)
 	}
+	if errCredits := coreauth.ValidateAuthCredits(&coreauth.Auth{Metadata: metadata}); errCredits != nil {
+		return nil, fmt.Errorf("invalid credits in %s: %w", filepath.Base(fullPath), errCredits)
+	}
 	t, _ := metadata["type"].(string)
 	provider := strings.ToLower(strings.TrimSpace(t))
 	if provider == "gemini" {
@@ -137,6 +140,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 				}
 				if errWeight := coreauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
 					return nil, fmt.Errorf("invalid plugin auth weight in %s: %w", filepath.Base(fullPath), errWeight)
+				}
+				if errCredits := coreauth.ApplyAuthCreditsMetadata(auth, metadata); errCredits != nil {
+					return nil, fmt.Errorf("invalid plugin auth credits in %s: %w", filepath.Base(fullPath), errCredits)
 				}
 				coreauth.ApplyAuthPriorityMetadata(auth, metadata)
 				if _, inherited := auth.Attributes[coreauth.AttributeFilePriority]; inherited {
@@ -217,6 +223,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	if errWeight := coreauth.ApplyAuthWeightMetadata(a, metadata); errWeight != nil {
 		return nil, fmt.Errorf("invalid auth weight in %s: %w", filepath.Base(fullPath), errWeight)
 	}
+	if errCredits := coreauth.ApplyAuthCreditsMetadata(a, metadata); errCredits != nil {
+		return nil, fmt.Errorf("invalid auth credits in %s: %w", filepath.Base(fullPath), errCredits)
+	}
 	// Read note from auth file.
 	if rawNote, ok := metadata["note"]; ok {
 		if note, isStr := rawNote.(string); isStr {
@@ -286,6 +295,9 @@ func compactPluginAuths(auths []*coreauth.Auth) []*coreauth.Auth {
 			continue
 		}
 		if errWeight := coreauth.ValidateAuthWeight(auth); errWeight != nil {
+			continue
+		}
+		if errCredits := coreauth.ValidateAuthCredits(auth); errCredits != nil {
 			continue
 		}
 		out = append(out, auth)
