@@ -629,10 +629,8 @@ func (s *QuotaAwareSelector) Pick(ctx context.Context, provider, model string, o
 		state = &quotaSelectionState{}
 		s.states[key] = state
 	}
-	// Priority tiers are preserved, but a tier whose credentials are all
-	// quota-exhausted must not block lower tiers: exhausted credentials are
-	// never picked, so they never cool down and the lower tier would stay
-	// unreachable until the weekly reset. Fall through tier by tier.
+	// Preserve priority order within each transport pass, falling through
+	// tiers whose credentials are all quota-exhausted.
 	priorities := make([]int, 0, len(available))
 	seenPriority := make(map[int]bool, len(available))
 	for _, candidate := range available {
@@ -646,16 +644,32 @@ func (s *QuotaAwareSelector) Pick(ctx context.Context, provider, model string, o
 	}
 	sort.Slice(priorities, func(i, j int) bool { return priorities[i] > priorities[j] })
 	now := time.Now()
-	for _, priority := range priorities {
-		tier := make([]*Auth, 0, len(available))
-		for _, candidate := range available {
-			if candidate != nil && authPriority(candidate) == priority {
-				tier = append(tier, candidate)
+	pickAcrossPriorities := func(candidates []*Auth) *Auth {
+		for _, priority := range priorities {
+			tier := make([]*Auth, 0, len(candidates))
+			for _, candidate := range candidates {
+				if candidate != nil && authPriority(candidate) == priority {
+					tier = append(tier, candidate)
+				}
+			}
+			if picked := pickQuotaAwareAuth(tier, now, s.Policy, state); picked != nil {
+				return picked
 			}
 		}
-		if picked := pickQuotaAwareAuth(preferCodexWebsocketAuths(ctx, provider, tier), now, s.Policy, state); picked != nil {
+		return nil
+	}
+	// Match the scheduler's cross-tier Codex WebSocket preference: exhaust
+	// every tier's WebSocket view before considering HTTP credentials. If none is
+	// quota-eligible, retry full tiers so exhausted WebSocket credentials
+	// cannot hide healthy HTTP credentials.
+	preferred := preferCodexWebsocketAuths(ctx, provider, available)
+	if len(preferred) < len(available) {
+		if picked := pickAcrossPriorities(preferred); picked != nil {
 			return picked, nil
 		}
+	}
+	if picked := pickAcrossPriorities(available); picked != nil {
+		return picked, nil
 	}
 	return nil, &Error{Code: "auth_unavailable", Message: "no auth available with plan quota or allowed credits"}
 }
