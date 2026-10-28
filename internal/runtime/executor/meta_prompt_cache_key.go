@@ -57,28 +57,18 @@ func metaPromptCacheKeyAuthMatches(entries []string, auth *cliproxyauth.Auth) bo
 	return false
 }
 
-// resolveMetaPromptCacheKey returns the prompt_cache_key to send for this request.
-// It applies only when the feature is enabled for the serving auth (an empty auth
-// list means every Meta auth); the session is the same identity the proxy already
-// uses for affinity, resolved into the context by helps.EnsureSessionContext.
-func (e *MetaExecutor) resolveMetaPromptCacheKey(ctx context.Context, auth *cliproxyauth.Auth) (string, bool) {
+// metaPromptCacheKeyEnabledFor reports whether key injection is enabled for the
+// serving auth. A list containing only blank entries allows all Meta auths.
+func (e *MetaExecutor) metaPromptCacheKeyEnabledFor(auth *cliproxyauth.Auth) bool {
 	if e == nil || e.cfg == nil || auth == nil || !e.cfg.Meta.PromptCacheKey.Enabled {
-		return "", false
+		return false
 	}
-	filtered := false
 	for _, entry := range e.cfg.Meta.PromptCacheKey.Auths {
 		if strings.TrimSpace(entry) != "" {
-			filtered = true
-			break
+			return metaPromptCacheKeyAuthMatches(e.cfg.Meta.PromptCacheKey.Auths, auth)
 		}
 	}
-	if filtered && !metaPromptCacheKeyAuthMatches(e.cfg.Meta.PromptCacheKey.Auths, auth) {
-		return "", false
-	}
-	if key := metaPromptCacheKeyForSession(util.SessionIDFromContext(ctx)); key != "" {
-		return key, true
-	}
-	return "", false
+	return true
 }
 
 // applyMetaPromptCacheKey sets body prompt_cache_key for this request. A key the
@@ -86,6 +76,9 @@ func (e *MetaExecutor) resolveMetaPromptCacheKey(ctx context.Context, auth *clip
 // wins, otherwise one from the client's own payload is carried over. It is a
 // no-op when the feature is off for the serving auth.
 func (e *MetaExecutor) applyMetaPromptCacheKey(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte, auth *cliproxyauth.Auth) []byte {
+	if !e.metaPromptCacheKeyEnabledFor(auth) {
+		return body
+	}
 	if key := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); key != "" {
 		return body
 	}
@@ -96,8 +89,8 @@ func (e *MetaExecutor) applyMetaPromptCacheKey(ctx context.Context, req cliproxy
 			}
 		}
 	}
-	key, ok := e.resolveMetaPromptCacheKey(ctx, auth)
-	if !ok {
+	key := metaPromptCacheKeyForSession(util.SessionIDFromContext(ctx))
+	if key == "" {
 		return body
 	}
 	return helps.SetStringIfDifferent(body, "prompt_cache_key", key)
