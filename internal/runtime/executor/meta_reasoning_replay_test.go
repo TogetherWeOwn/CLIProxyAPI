@@ -715,6 +715,42 @@ func TestMetaReasoningReplay_RetriesWhenTheRejectionIsAnErrorEvent(t *testing.T)
 	}
 }
 
+// A streaming request whose 200 body opens with the rejection as its first
+// error event must recover the same way: no chunk has reached the client yet,
+// so it is retried once without reasoning before the stream is handed out.
+func TestMetaReasoningReplay_StreamRetriesWhenTheRejectionIsTheFirstEvent(t *testing.T) {
+	var mu sync.Mutex
+	var bodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		if bytes.Contains(body, []byte(`"encrypted_content"`)) {
+			_, _ = w.Write([]byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"reasoning encrypted_content was not issued to this caller\"}}\n\n"))
+			return
+		}
+		writeMetaResponsesOK(w, "recovered")
+	}))
+	defer server.Close()
+	auth := &cliproxyauth.Auth{ID: "meta-a", Provider: "meta", Attributes: map[string]string{"api_key": "token-a", "base_url": server.URL}}
+	payload := museReplayHistoryPayload(t, signature.TagMetaReasoning(metaReasoningAccountKey(auth), museEnv("a", 1)))
+
+	got, err := museReplayStream(t, NewMetaExecutor(museReplayConfig(true)), auth, payload, "claude")
+	if err != nil {
+		t.Fatalf("the bootstrap rejection reached the caller: %v", err)
+	}
+	if !strings.Contains(got, "message_stop") {
+		t.Fatalf("stream did not complete after the retry, got %q", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 || !bytes.Contains(bodies[0], []byte(`"encrypted_content"`)) || bytes.Contains(bodies[1], []byte(`"encrypted_content"`)) {
+		t.Fatalf("upstream saw %d requests; want the replay, then a retry without any envelope", len(bodies))
+	}
+}
+
 func TestMetaReasoningReplay_ModelScope(t *testing.T) {
 	upstream := newMuseReplayUpstream(t, "a")
 	auth := upstream.auth("a")
