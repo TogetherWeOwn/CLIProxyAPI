@@ -876,6 +876,10 @@ upstream:
 #
 #   # Meta API keys (Muse Code)
 #   # Uses the native Meta executor targeting https://api.meta.ai/v1.
+#   # Every Meta request carries a stable per-session prompt_cache_key (no setting): it is
+#   # derived from the downstream session identity already used for affinity, so turns of
+#   # one session share a cache bucket and sessions never share one. A key the client sent
+#   # itself is never overridden.
 #
 #   meta:
 #     - name: meta-1
