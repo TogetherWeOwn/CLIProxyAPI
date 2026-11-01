@@ -40,13 +40,19 @@ type metaPreparedRequest struct {
 // with every reasoning envelope removed, and prepares that body. It only fires
 // when envelopes were actually forwarded and Meta rejected them as foreign.
 func (p *metaPreparedRequest) retryWithoutReplay(ctx context.Context, statusCode int, errBody []byte) bool {
-	if p.replayRetried || p.replay.stats == nil || p.replay.stats.kept == 0 || !isMetaReasoningNotIssued(statusCode, errBody) {
+	if !p.canRetryWithoutReplay() || !isMetaReasoningNotIssued(statusCode, errBody) {
 		return false
 	}
 	p.replayRetried = true
 	p.body = p.replay.withoutReplay().sanitizeRequest(ctx, p.body)
 	helps.LogWithRequestID(ctx).Warnf("meta reasoning replay: Meta rejected %d replayed reasoning envelope(s) as not issued to this caller; retrying once without reasoning", p.replay.stats.kept)
 	return true
+}
+
+// canRetryWithoutReplay reports whether the one-shot retry is still available:
+// it has not run yet and this attempt forwarded at least one envelope.
+func (p *metaPreparedRequest) canRetryWithoutReplay() bool {
+	return !p.replayRetried && p.replay.stats != nil && p.replay.stats.kept > 0
 }
 
 func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*metaPreparedRequest, error) {
