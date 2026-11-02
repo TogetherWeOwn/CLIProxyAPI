@@ -402,6 +402,9 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		} else if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
 		}
+		// Credential files do not store passive quota observations, so reloading one
+		// must not erase the live snapshot. The newest observation wins.
+		auth.Quota = mergeQuotaObservation(auth.Quota, existing.Quota)
 		if isFileSnapshot || (credChanged && mode == updateModeReplace && existing.Quota.Exceeded && existing.Quota.NextRecoverAt.After(now) && !auth.Quota.NextRecoverAt.After(now)) {
 			if (auth.Status == "" || auth.Status == StatusActive) && existing.Status != "" {
 				auth.Status = existing.Status

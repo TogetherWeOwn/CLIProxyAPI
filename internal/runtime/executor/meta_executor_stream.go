@@ -192,6 +192,9 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			eventData := bytes.TrimSpace(trimmedLine[len(dataTag):])
 			eventType := gjson.GetBytes(eventData, "type").String()
 			if isMetaSubscriptionUsageEvent(eventType, eventData) {
+				// Record the subscription usage passively, then keep filtering
+				// the event so it never reaches the client (fork residual).
+				helps.ObserveMetaSubscriptionUsage(ctx, eventData)
 				pendingEventLine = nil
 				filteringSubscriptionUsage = false
 				skipFilteredBlankLine = true

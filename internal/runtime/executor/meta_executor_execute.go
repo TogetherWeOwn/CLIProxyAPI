@@ -175,6 +175,10 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 			}
 			return resp, wrapMetaUpstreamError(httpResp.StatusCode, data)
 		}
+		// Meta sends subscription usage after response.completed, which is where the
+		// translation below stops reading. Record it passively; the event itself is
+		// still filtered so it never reaches the client (fork residual).
+		helps.ObserveMetaSubscriptionUsageSSE(ctx, data)
 		upstreamUsage = helps.StreamUsageBuffer{}
 		out, errEvent = e.translateMetaCompleted(ctx, req, prepared, data, &upstreamUsage)
 		if errEvent != nil {
