@@ -28,6 +28,32 @@ as a substitute for the accepted production binaries.
   digest is structurally required; verifying/authenticating the accepted drill
   and policy belongs to supervisor admission. Test caps are synthetic, not a
   measured operating policy. There is intentionally no default allocation.
+- `host_recovery/journal.py`: immutable restricted attempt intent and separately
+  durable arm point; exact stopped/no-restart daemon-object registration before
+  candidate-start eligibility. Registration/terminal uncertainty never replaces
+  the original intent or grants a start. Recovery revokes forward eligibility.
+  Reopening a journal always fences forward work, including when a terminal file
+  is visible. **Settlement/archival and new admission after supervisor restart are
+  not implemented**; this intentionally conservative latch is not yet a complete
+  usable supervisor lifecycle.
+- `host_recovery/restore.py`: bounded whole-root restoration of original bytes,
+  uid/gid/modes, with an explicit accepted list of candidate-only additions.
+  Unknown entries, type changes, unsafe links/metadata and tampered baselines
+  refuse restoration before mutation. Reserved deterministic staging names allow
+  retry after partial writes/fsync/rename failures. A final independent rescan
+  checks the complete tree. One ownership domain and owner-accessible directories
+  per root are supported; unsupported access is refused, never relaxed. This
+  does **not** verify image/replay/plugin semantics or stop any writers.
+- `host_recovery/coordinator.py`: component forward/recovery ordering, injected
+  manager/daemon boundaries, registration-before-start, strict post-check and
+  restoration-oracle acknowledgment shapes, original versus recovery errors,
+  inclusive deadline accounting and independent alert attempts. Calls receive
+  phase deadlines and are checked afterwards; the concrete manager must enforce
+  them while calls are running. An observed manager failure timestamp is charged
+  from that event, not from delayed detection. No blocking-call watchdog,
+  persistent service loop, resume/continuation, actual manager, listener or
+  executable post-check implementation exists here yet. Mock acknowledgments
+  are **not** complete host/package/start-fence evidence.
 - Diagnostic HTTP ingress → executor → plugin metadata bridge, using the
   existing metadata ABI without a provider-kit change. See the carrier below.
 
@@ -49,7 +75,7 @@ request logging, credential selection and request building:
 | `X-CPA-Recovery-Parent-Request-Id` | `parent_request_id` |
 | `X-CPA-Recovery-Turn` | integer `turn` |
 
-IDs are 1–64 ASCII bytes, starting with an alphanumeric character and containing
+IDs are 1–128 ASCII bytes, matching the producer carrier contract, starting with an alphanumeric character and containing
 only alphanumerics, `-`, `_`, `.`, `:`. Turn is exactly `1` or `2`; turn 1 has no
 parent, turn 2 requires a distinct parent request ID. No trimming, comma folding,
 duplicate headers, unknown diagnostic fields, or partial envelopes are accepted.
@@ -97,9 +123,11 @@ human acknowledgment. It is **not yet an alert listener or preflight handshake**
 2. Narrow daemon boundary, immutable object IDs registered durably before start,
    ambiguous-create reconciliation, daemon/reboot restart prevention and complete
    cgroup **plus daemon-object** quiescence before restore.
-3. Full write-set conversion, partial/idempotent restoration, complete independent
-   bytes/metadata/config/Compose/image/replay/no-plugin oracle before old start,
-   durable terminal state handling and independent listener challenge/receipt.
+3. Full write-set conversion and integration of the tree-restoration component
+   across every approved root; complete independent config/Compose/image/replay/
+   no-plugin oracle before old start; safe journal settlement, supervisor resume
+   and separately identified bounded recovery continuations; actual independent
+   listener challenge/receipt. Strict mock receipt shapes do not prove semantics.
 4. Actual strict source YAML/Compose + frozen-rendered Compose, schema/policy,
    authenticated approval, interpolation/tool identity, artifact dual hashes and
    preflight/stopped revalidation. The historical r3 comparator is not that

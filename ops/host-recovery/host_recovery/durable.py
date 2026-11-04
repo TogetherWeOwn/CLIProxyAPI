@@ -117,7 +117,7 @@ def read_file(parent, name, limit=MAX_FILE_BYTES):
         os.close(fd)
 
 
-def atomic_write(parent, name, raw, *, uid=None, gid=None, mode=0o600, fault=None):
+def atomic_write(parent, name, raw, *, uid=None, gid=None, mode=0o600, fault=None, stage_name=None):
     """Acknowledge only after content, rename, directory fsync and readback.
 
     Any exception, including one after rename, means uncertain persistence. Never
@@ -132,7 +132,9 @@ def atomic_write(parent, name, raw, *, uid=None, gid=None, mode=0o600, fault=Non
         raise Rejected("unsafe-file-mode")
     uid = os.geteuid() if uid is None else uid
     gid = os.getegid() if gid is None else gid
-    stage = ".recovery-stage-" + secrets.token_hex(16)
+    stage = component(stage_name) if stage_name is not None else ".recovery-stage-" + secrets.token_hex(16)
+    if stage == name:
+        raise Rejected("stage-must-differ-from-destination")
     hook = fault or (lambda _: None)
     hook("create")
     fd = os.open(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,

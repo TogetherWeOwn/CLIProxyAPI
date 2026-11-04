@@ -159,6 +159,28 @@ is not downtime; loopback timings are not production timings. Host/PID1 loss,
 daemon unavailability, uninterruptible I/O and permanent host loss are external
 availability/recovery failures, not locally guaranteed bounded completion.
 
+## Component checkpoint: not operational recovery
+
+The source now includes a durable intent/arm/object journal, whole-root restoration
+and an injected-boundary ordering coordinator. These are **not** the host adapter.
+The coordinator's named boolean check/oracle acknowledgments are interface tests,
+not executable evidence of the retained checks above. Its Python calls cannot
+interrupt a wedged operation; actual manager/cgroup enforcement remains required.
+
+The journal never overwrites the original intent with a terminal file. On reopen,
+any retained intent fences forward work, including a terminal-looking prior file.
+There is no automatic latch retirement or new attempt admission after restart yet.
+Do not delete state or bypass that refusal to make the partial package usable.
+A reviewed settlement/resume/continuation protocol is still required.
+
+Tree restoration only operates after externally proved quiescence. Pre-admission
+must reserve its deterministic staging paths in every root's accepted write set,
+and list every candidate-only path permitted for removal. It independently rescans
+all original bytes/uid/gid/modes after restoration. It refuses unknown entries,
+unsafe metadata, type substitutions or unsupported directory access rather than
+removing unrelated files or relaxing permissions. This tree oracle does not verify
+original images, replay or plugin absence; the full pre-start oracle remains due.
+
 ## Gates still closed
 
 Actual disposable systemd/cgroup/daemon package drills and all transition,

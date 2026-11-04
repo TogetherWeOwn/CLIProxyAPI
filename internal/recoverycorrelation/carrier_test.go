@@ -51,13 +51,33 @@ func TestConsumeValidTwoTurnsAndStrip(t *testing.T) {
 	}
 }
 
+func TestConsumeIdentifierBoundsMatchProducerContract(t *testing.T) {
+	for _, header := range []string{
+		"X-CPA-Recovery-Attempt-Id", "X-CPA-Recovery-Probe-Id",
+		"X-CPA-Recovery-Request-Id", "X-CPA-Recovery-Parent-Request-Id",
+	} {
+		for _, length := range []int{1, 64, 65, 128, 129} {
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			req.Header = validHeaders()
+			req.Header.Set(header, strings.Repeat("x", length))
+			metadata := Metadata(Consume(req).Context())
+			if (metadata != nil) != (length <= 128) {
+				t.Fatalf("header %s length %d: metadata accepted = %v", header, length, metadata != nil)
+			}
+			if metadata != nil && len(metadata) != 5 {
+				t.Fatalf("carrier must have exactly five fields: %v", metadata)
+			}
+		}
+	}
+}
+
 func TestConsumeInvalidEnvelopeIgnoredButAlwaysStripped(t *testing.T) {
 	tests := map[string]func(http.Header){
 		"missing":             func(h http.Header) { h.Del("X-CPA-Recovery-Probe-Id") },
 		"duplicate":           func(h http.Header) { h.Add("X-CPA-Recovery-Request-Id", "other") },
 		"case duplicate":      func(h http.Header) { h["x-cpa-recovery-request-id"] = []string{"other"} },
 		"unknown":             func(h http.Header) { h.Set("X-CPA-Recovery-Auth", "not-auth") },
-		"long":                func(h http.Header) { h.Set("X-CPA-Recovery-Probe-Id", strings.Repeat("x", 65)) },
+		"long":                func(h http.Header) { h.Set("X-CPA-Recovery-Probe-Id", strings.Repeat("x", 129)) },
 		"unicode":             func(h http.Header) { h.Set("X-CPA-Recovery-Request-Id", "request-λ") },
 		"whitespace":          func(h http.Header) { h.Set("X-CPA-Recovery-Request-Id", "request with space") },
 		"injection":           func(h http.Header) { h.Set("X-CPA-Recovery-Request-Id", "request\r\ninjected") },

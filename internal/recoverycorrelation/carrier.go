@@ -80,7 +80,7 @@ func Consume(req *http.Request) *http.Request {
 }
 
 func identifier(value string) bool {
-	if len(value) == 0 || len(value) > 64 {
+	if len(value) == 0 || len(value) > 128 {
 		return false
 	}
 	for i := range value {
