@@ -95,8 +95,21 @@ as a substitute for the accepted production binaries.
   boot or cgroup; uncertainty revokes the instance. It supplies `observe_owner`
   only, not the independent fence or dispatch boundary. Tests use **scripted
   manager/cgroup reads**, including real local-helper and separate-process checks.
-  Accepted manifest/command trust, worker-side bootstrap and runnable service
-  wiring remain due; no units, start permissions or credentials are introduced.
+  Accepted manifest/command trust and runnable service wiring remain due; no
+  units, start permissions or credentials are introduced.
+- `host_recovery/worker_bootstrap.py`: one-shot manager-bound worker claim client.
+  It requires an independently accepted request/intent pin and unit bindings,
+  verifies its own numeric owner/MainPID/cgroup, and discovers the original
+  supervisor MainPID only as a connection hint. Before sending and after receiving
+  a claim, the connection-bound pidfd must remain live around repeated pinned
+  manager/cgroup/boot/request observations. The received worker invocation must
+  match the client's independent observations. A replacement supervisor, changed
+  worker, lost reply or expired original reserve refuses without retry. **This
+  acquires identity only, not restoration/start permission.** Package/manifest
+  authentication and restricted bootstrap loading, persistent service wiring,
+  complete host fence and recovery execution remain due. Real local IPC tests
+  still use **scripted manager/cgroup/fence boundaries**, not installed-systemd
+  or daemon recovery evidence.
 - `host_recovery/restore.py`: bounded whole-root restoration of original bytes,
   uid/gid/modes, with an explicit accepted list of candidate-only additions.
   Unknown entries, type changes, unsafe links/metadata and tampered baselines

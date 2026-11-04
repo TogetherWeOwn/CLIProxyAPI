@@ -182,8 +182,10 @@ class WorkerListener:
 class WorkerClient:
     """One claim, no automatic retry. Its reply is identity evidence only."""
     def __init__(self, path, *, supervisor_uid, supervisor_pid, supervisor_owner, request_id, intent_sha256,
-                 clock=time.monotonic):
+                 clock=time.monotonic, verify_identity=None):
         validate_owner(supervisor_owner)
+        if verify_identity is not None and not callable(verify_identity):
+            raise Rejected("worker-client-verifier-required")
         if (type(path) is not str or not os.path.isabs(path) or type(supervisor_uid) is not int or supervisor_uid <= 0
                 or type(supervisor_pid) is not int or not 1 <= supervisor_pid <= 2147483647
                 or type(request_id) is not str or HASH.fullmatch(request_id) is None
@@ -192,6 +194,19 @@ class WorkerClient:
         self.path, self.uid, self.pid = path, supervisor_uid, supervisor_pid
         self.owner, self.request_id, self.intent_sha256 = copy.deepcopy(supervisor_owner), request_id, intent_sha256
         self.clock, self.attempted = clock, False
+        self.verify_identity = verify_identity
+
+    def _verify_identity(self, session, deadline):
+        if self.verify_identity is None:
+            return None
+        if not session.alive():
+            raise Rejected("worker-peer-unconfirmed")
+        result = self.verify_identity(peer=copy.deepcopy(session.peer), peer_alive=session.alive, deadline=deadline)
+        validate_worker(result, self.request_id, self.owner["boot_id"], os.getpid())
+        if not session.alive():
+            raise Rejected("worker-peer-unconfirmed")
+        Deadline(self.clock, deadline).remaining()
+        return copy.deepcopy(result)
 
     def claim(self, *, deadline):
         if self.attempted:
@@ -210,6 +225,7 @@ class WorkerClient:
                 sock.connect(f"/proc/self/fd/{fd}/{name}")
                 session = PeerSession(sock, uid=self.uid, pid=self.pid, clock=self.clock)
                 try:
+                    observed = self._verify_identity(session, deadline)
                     session.reply({"schema": "host-recovery-worker-request-v1", "request_id": self.request_id,
                                    "nonce": nonce}, deadline)
                     value = session.receive(deadline)
@@ -224,6 +240,10 @@ class WorkerClient:
                             or value["restoration_permission"] is not False or value["start_permission"] is not False):
                         raise Rejected("worker-claim-reply-unconfirmed")
                     validate_worker(value["worker"], self.request_id, self.owner["boot_id"], os.getpid())
+                    if self.verify_identity is not None:
+                        after = self._verify_identity(session, deadline)
+                        if canonical(after) != canonical(observed) or canonical(value["worker"]) != canonical(observed):
+                            raise Rejected("worker-manager-claim-mismatch")
                     timer.remaining()
                     return value
                 finally:

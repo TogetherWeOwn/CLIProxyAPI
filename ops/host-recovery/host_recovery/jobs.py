@@ -111,17 +111,22 @@ class SystemdRecoveryJobs:
     def observe(self, request_id, *, deadline):
         return self._observe(request_id, deadline=deadline)[0]
 
-    def observe_worker(self, request_id, *, pid, deadline):
+    def observe_worker(self, request_id, *, pid, deadline, uid=None, gid=None):
         """Match the connected worker to the pinned unit's running MainPID.
 
-        The caller holds a live pidfd and verifies kernel connection AND message
-        credentials around this call. Descendants, a caller-supplied invocation,
-        environment variables and a reused PID are not worker authentication.
+        For a foreign PID, the caller holds a live pidfd and verifies kernel
+        connection AND message credentials around this call. Self-bootstrap may
+        observe its own calling PID; optional numeric uid/gid must match the unit.
+        Descendants, environment identity and reused PIDs are not authentication.
         """
         timer = Deadline(self.clock, deadline)
         timer.remaining()
         before = self.read_process_cgroup(pid)
         value, row = self._observe(request_id, deadline=deadline)
+        if uid is not None or gid is not None:
+            if (any(type(item) is not int or not 1 <= item <= 2147483647 for item in (uid, gid))
+                    or row["User"] != str(uid) or row["Group"] != str(gid)):
+                raise Rejected("recovery-worker-numeric-owner-mismatch")
         result = {**value, "pid": pid, "cgroup": before}
         validate_worker(result, request_id, value["boot_id"], pid)
         if row["MainPID"] != str(pid) or row["ControlGroup"] != before or self.read_process_cgroup(pid) != before:

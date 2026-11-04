@@ -88,7 +88,7 @@ class SystemdSupervisorIdentity:
         self.last_clock = value
         return value
 
-    def _row(self, *, deadline):
+    def _row(self, *, deadline, pid):
         timer = Deadline(self._now, deadline)
         timer.remaining()
         binding = self.binding
@@ -111,11 +111,16 @@ class SystemdSupervisorIdentity:
                 or static["ExecStart"]["ignore_errors"] != "no"):
             raise Rejected("supervisor-bootstrap-unit-semantics")
         if (row["ActiveState"] != "active" or row["SubState"] != "running" or row["Job"] != "0"
-                or row["MainPID"] != str(os.getpid()) or INVOCATION.fullmatch(row["InvocationID"]) is None
+                or re.fullmatch(r"[1-9][0-9]{0,9}", row["MainPID"]) is None
+                or int(row["MainPID"]) > 2147483647
+                or pid is not None and row["MainPID"] != str(pid)
+                or INVOCATION.fullmatch(row["InvocationID"]) is None
                 or not cgroup_path(row["ControlGroup"])):
             raise Rejected("supervisor-bootstrap-mainpid-unconfirmed")
         timer.remaining()
-        return {"invocation_id": row["InvocationID"], "cgroup": row["ControlGroup"], "pid": os.getpid(),
+        # pid=None is discovery only. Foreign-process authority additionally needs
+        # a live connection-bound pidfd around repeated manager/cgroup observations.
+        return {"invocation_id": row["InvocationID"], "cgroup": row["ControlGroup"], "pid": int(row["MainPID"]),
                 "uid": binding.uid, "gid": binding.gid}
 
     def _observe(self, *, deadline):
@@ -127,10 +132,10 @@ class SystemdSupervisorIdentity:
         if type(boot) is not str or BOOT.fullmatch(boot) is None:
             raise Rejected("supervisor-bootstrap-boot-required")
         group = self.read_process_cgroup(os.getpid())
-        before = self._row(deadline=deadline)
+        before = self._row(deadline=deadline, pid=os.getpid())
         if group != before["cgroup"] or self.read_process_cgroup(os.getpid()) != group:
             raise Rejected("supervisor-bootstrap-cgroup-changed")
-        after = self._row(deadline=deadline)
+        after = self._row(deadline=deadline, pid=os.getpid())
         if (before != after or self.boot_id() != boot or self.read_process_cgroup(os.getpid()) != group):
             raise Rejected("supervisor-bootstrap-identity-changed")
         timer.remaining()

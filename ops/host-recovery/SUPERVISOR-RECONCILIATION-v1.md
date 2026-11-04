@@ -245,7 +245,8 @@ request/intent digest, checks kernel connection/message identity, and verifies t
 exact reply including its own peer identity and nonce. The installed worker must
 obtain those bootstrap identities from a separately authenticated manager/broker
 path, **not environment variables, an arbitrary caller, or this socket reply**.
-That bootstrap/service wiring is not implemented. Private endpoint ownership is
+The manager-bound acquisition subset below does not load/authenticate the accepted
+package/request or wire the installed service. Private endpoint ownership is
 same-uid; hostile same-uid/root code or a compromised manager is not defended here.
 No new credential, privilege grant or broad mutation API is introduced.
 
@@ -305,7 +306,8 @@ that boundary. This adapter implements neither `fence` nor `enqueue_recovery`.
 The supervisor integration negative proves that valid self-identity cannot bypass
 an unacknowledged independent fence. Worker-side acquisition of its expected
 supervisor/request/intent identity, persistent service bootstrap/wiring, complete
-host fence and actual installed-manager compatibility remain unimplemented.
+host fence and actual installed-manager compatibility remain due. The worker-side
+manager acquisition subset below does not implement the trusted package loader.
 
 The tests use synthetic manager/cgroup replies and mocked kernel boot reads.
 A real local executable checks fixed read-only argv transport. A separate Python
@@ -314,6 +316,56 @@ its manager/cgroup data are still scripted. These are component receipts, **not
 systemd ownership authentication, service installation, recovery or downtime
 proof**. The initial integration fixture mixed installation IDs and failed before
 reconciliation; that raw red is retained alongside the corrected fixture result.
+
+## Worker-side manager-bound acquisition subset
+
+`worker_bootstrap.SystemdWorkerBootstrap` acquires one identity claim from the
+original request owner. Its caller must supply the independently accepted request,
+intent pin, installation/attempt and supervisor/worker unit bindings. The request
+is copied, digest/schema/budget checked and cross-bound on every observation. This
+is **not an authenticated package loader or a journal path API**: matching hashes
+and arbitrary constructor arguments do not approve a manifest or manager transport.
+
+The worker uses its actual calling PID and effective numeric UID/GID, not inherited
+environment identity. Its pinned digest-instance unit must be running with no Job,
+the same kernel unified cgroup and stable invocation. The supervisor and worker
+must have distinct PIDs, cgroups and invocations. Initial pinned supervisor MainPID
+discovery supplies **only a connection hint**, not foreign-process authority.
+
+`WorkerClient` now accepts an explicit trusted identity verifier; the manager-bound
+adapter always supplies it. The connection's kernel peer and `SO_PEERPIDFD` must be
+live before any claim request. Before sending and after receiving, repeated pinned
+supervisor MainPID/invocation/cgroup observations and independent own-worker reads
+must agree with the discovered identity, accepted request and boot. The final
+claim's complete worker identity must match those independent observations. This
+uses the existing connection-bound handle, never `pidfd_open(numeric_pid)` or a
+reusable numeric PID alone. The original self-supervisor bootstrap remains own-PID
+only; its shared private manager-row reader now also supports discovery/rechecks.
+
+A replacement supervisor is not adopted, even for the same unit/attempt. Any query,
+peer, clock, boot, package-pin or invocation uncertainty refuses without retry.
+The client exhausts before its first query; a failed reply is not replay authority.
+All reads and IPC share the minimum of the caller deadline and original request
+reserve. Returning a claim grants neither restoration nor service startup and
+cannot retire the durable latch. The legacy direct `WorkerClient` still requires
+an externally trusted caller to obtain its supplied PID/owner/request/intent pins;
+omitting its optional verifier is not the manager-bound bootstrap path.
+
+Tests cover the actual separate-process Linux socket/pidfd/credential exchange
+with independent **scripted** manager/cgroup observations on both sides. They
+prove refusal before request after manager replacement, and refusal after a durable
+claim/reply when supervisor identity changes or the server's well-formed worker
+invocation differs from the client's independently observed one. A refusal after
+claim persistence leaves the original intent/claim unresolved; it grants no retry.
+The first extra invocation-mismatch fixture accidentally mixed two server observer
+invocations and was correctly refused before reply; its red full-suite receipt is
+retained alongside the corrected fixture's green run. These are not installed
+systemd compatibility, complete fencing, daemon recovery or availability results.
+
+Trusted restricted request/manifest loading, runnable persistent service/unit
+wiring, privilege broker, complete host fence, recovery execution/outcome oracle,
+reboot continuations and full disposable package matrix remain required. No host
+operation, new credential, broad privilege or release-pin change occurs here.
 
 ## Original-clock accounting
 
