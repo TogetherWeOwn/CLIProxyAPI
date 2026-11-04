@@ -61,6 +61,7 @@ class AttemptCoordinator:
         self.resume_records = None
         self.resume_entries = None
         self.active_phase = "admission"
+        self.failure_since = None
         self.result = {"outcome": "fenced", "production_acceptance": False}
 
     def admit(self, intent):
@@ -154,6 +155,7 @@ class AttemptCoordinator:
             # Unknown failure time is not zero detection overhead. Charge from t0,
             # including the detection cap; a late restart may already be too late.
             self.meter.trigger_recovery(arm["monotonic"])
+            self.meter.events[-1]["failure_time_basis"] = "original_arm_lower_bound"
             self._confirmed(self._call("recovery", "detection", "recovery_preflight", intent))
         except Exception:
             self.recovery_attempted = True
@@ -167,6 +169,8 @@ class AttemptCoordinator:
         self.active_phase = phase
         self._resume_current()
         deadline = self.meter.phase_deadline(direction, phase)
+        if direction == "forward":
+            self.failure_since = self.meter.now()
         result = getattr(self.boundary, method)(*copy.deepcopy(args), deadline=deadline)
         self._resume_current()
         self.meter.check(deadline)
@@ -194,6 +198,7 @@ class AttemptCoordinator:
             # reconcile by the preassigned ownership ID, not a guessed short ID.
             self.active_phase = "candidate-start"
             deadline = self.meter.phase_deadline("forward", "candidate-start")
+            self.failure_since = self.meter.now()
             try:
                 self.boundary.create_candidate(copy.deepcopy(intent), deadline=deadline)
             except AmbiguousCreate:
@@ -217,6 +222,7 @@ class AttemptCoordinator:
                 raise Rejected("candidate-postchecks-incomplete")
             self.active_phase = "persistence"
             deadline = self.meter.phase_deadline("forward", "persistence")
+            self.failure_since = self.meter.now()
             log.finish("candidate_verified", receipt)
             self.meter.check(deadline)
             # This only authorizes the current invocation's verified running
@@ -239,7 +245,17 @@ class AttemptCoordinator:
             # A missing timestamp is not evidence of zero detection overhead.
             self.active_phase = "detection"
             if self.meter.failure_at is None or failure_at is not None:
-                self.meter.trigger_recovery(self.meter.now() if failure_at is None else failure_at)
+                basis = "manager_observed"
+                if failure_at is None:
+                    # A callback may fail long before returning control. Charge
+                    # its entire uncertain interval, not zero detection time.
+                    failure_at = self.meter.arm["monotonic"]
+                    basis = "original_arm_lower_bound"
+                    if self.original_cause.startswith("forward-") and self.failure_since is not None:
+                        failure_at = self.failure_since
+                        basis = "forward_boundary_entry_lower_bound"
+                self.meter.trigger_recovery(failure_at)
+                self.meter.events[-1]["failure_time_basis"] = basis
             self._confirmed(self._call("recovery", "detection", "fence", intent))
             self._confirmed(self._call("recovery", "quiescence", "quiesce", intent))
             self._confirmed(self._call("recovery", "restore", "validate_recovery", intent))

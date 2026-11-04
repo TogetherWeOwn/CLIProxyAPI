@@ -151,6 +151,21 @@ work deadline, not when recovery code notices. Quiescence, child collection,
 restore, verification/start, persistence and alert are all inside the recovery
 reserve/total. Repeated triggers/phases must not reset deadlines.
 
+The ordering coordinator charges an unobserved forward failure conservatively
+from entry to the last attempted boundary, including create and terminal
+persistence. It must not start the detection clock when the callback finally
+returns or raises. Without such a boundary, explicit recovery uses the original
+arm as its conservative lower bound. `recovery-trigger.failure_time_basis` states
+`manager_observed`, `forward_boundary_entry_lower_bound`, or
+`original_arm_lower_bound`. For lower-bound events, `failure_at` is the accounting
+anchor and `detection_seconds` is charged uncertain elapsed time, **not a measured
+failure timestamp or measured detection latency**. The shared work-deadline clamp
+still applies. A missed detection cap keeps recovery unresolved/start fenced and
+attempts the independent alert; it cannot manufacture an on-time restoration.
+These component checks do not enforce deadlines on a running/wedged operation or
+qualify actual phase caps; manager-enforced execution and measured drills remain
+required.
+
 On expiry, forbid promotion; escalate and continue only safe bounded recovery.
 Never force old start over unverified state. Deadline miss/unresolved safe recovery
 keeps start fenced. A later continuation is separately identified, not an on-time

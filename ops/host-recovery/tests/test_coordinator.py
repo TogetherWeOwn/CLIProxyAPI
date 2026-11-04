@@ -307,6 +307,84 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(event["failure_at"], 1002)
         self.assertEqual(event["detection_seconds"], 16)
 
+    def test_unknown_failure_time_charges_from_forward_boundary_entry(self):
+        self.admit()
+        def stopped():
+            self.boundary.overrides.pop("quiesce")
+            self.time = 1002
+            return True
+        self.boundary.overrides["quiesce"] = stopped
+        reached = []
+        def delayed():
+            reached.append("revalidate")
+            self.time = 1005
+            raise OSError(errno.EIO, "injected")
+        self.boundary.overrides["revalidate"] = delayed
+        result = self.engine.forward()
+        event = next(e for e in result["timing_events"] if e["phase"] == "recovery-trigger")
+        self.assertEqual(reached, ["revalidate"])
+        self.assertEqual(event["failure_at"], 1002)
+        self.assertEqual(event["detection_seconds"], 3)
+        self.assertEqual(event["failure_time_basis"], "forward_boundary_entry_lower_bound")
+
+    def test_delayed_generic_failure_cannot_reset_detection_cap(self):
+        self.admit()
+        def delayed():
+            self.time = 1025
+            raise OSError(errno.EIO, "injected")
+        self.boundary.overrides["revalidate"] = delayed
+        result = self.engine.forward()
+        self.assertIn("revalidate", self.boundary.calls)
+        self.assertEqual(result["outcome"], "recovery_unresolved")
+        self.assertNotIn("restore", self.boundary.calls)
+        self.assertNotIn("start-old", self.boundary.calls)
+        self.assertEqual(len(self.notices), 1)
+
+    def test_delayed_ambiguous_create_cannot_reset_detection_cap(self):
+        self.admit()
+        def delayed():
+            self.time = 1025
+            raise coordinator.AmbiguousCreate()
+        self.boundary.overrides["create"] = delayed
+        result = self.engine.forward()
+        self.assertIn("create", self.boundary.calls)
+        self.assertEqual(result["outcome"], "recovery_unresolved")
+        self.assertNotIn("owned", self.boundary.calls)
+        self.assertNotIn("restore", self.boundary.calls)
+        self.assertNotIn("start-old", self.boundary.calls)
+        self.assertTrue(result["start_fenced"])
+
+    def test_delayed_terminal_fsync_cannot_reset_detection_cap(self):
+        self.admit()
+        reached = []
+        def delayed(point):
+            if point == "directory-fsync":
+                reached.append(point)
+                self.log.fault = None
+                self.time = 1025
+                raise OSError(errno.ENOSPC, "injected")
+        def postchecks():
+            self.log.fault = delayed
+            return {"object_id": "a" * 64, "image_id": "f" * 64,
+                    "checks": dict.fromkeys(coordinator.CHECKS, True)}
+        self.boundary.overrides["postchecks"] = postchecks
+        result = self.engine.forward()
+        self.assertEqual(reached, ["directory-fsync"])
+        self.assertEqual(result["outcome"], "recovery_unresolved")
+        self.assertTrue(result["journal_uncertain"])
+        self.assertNotIn("restore", self.boundary.calls)
+        self.assertNotIn("start-old", self.boundary.calls)
+        self.assertTrue(result["alert"]["transport_delivered"])
+
+    def test_explicit_recovery_without_failure_observation_charges_original_arm(self):
+        self.admit()
+        self.time = 1005
+        result = self.engine.recover()
+        event = next(e for e in result["timing_events"] if e["phase"] == "recovery-trigger")
+        self.assertEqual(event["failure_at"], 1000)
+        self.assertEqual(event["detection_seconds"], 5)
+        self.assertEqual(event["failure_time_basis"], "original_arm_lower_bound")
+
     def test_unmetered_quiescence_overrun_cannot_reach_restore(self):
         self.admit()
         self.boundary.overrides["postchecks"] = None
