@@ -42,7 +42,25 @@ A matching dictionary, digest, claim or scripted boundary cannot replace them.
 The worker never writes a supervisor journal terminal or settles the installation.
 Execution-mode failures before bootstrap or outside the engine still attempt the
 independently provided alert transport even if alert-receipt persistence fails.
+A normal engine notice does not suppress a distinct later claim/report/context-exit
+failure: only identical notices are deduplicated. The original recovery failure
+notice is retained alongside a later result-handoff failure notice.
 Identity-only invocation has no configured alert route and claims no notification.
+
+The final lease observation rechecks the live peer after potentially blocking
+snapshot reads. Unchanged bytes cannot authorize the next operation after the
+supervisor disconnects during those reads. The bootstrap likewise checks the
+provided connection/process liveness callback after its trailing snapshot; final
+non-authorizing receipts retain the transport's separate receipt-only semantics.
+
+Embedding callers must supply and retain an explicitly owned command transport;
+there is no internally created `LocalCommands` whose pending-helper cleanup owner
+can disappear on an exception. That external owner calls `reap()` for pending
+helpers, including after uncertain exits, without charging an unmetered wait to
+recovery. The identity CLI owns its transport for its whole process lifetime,
+performs a nonblocking reap in `finally`, and then exits (unreaped children are
+reparented by the kernel). This does not prove helper descendants or daemon jobs
+are quiescent, nor is `main()` a long-lived embedding API.
 
 `claim_worker.py` is an actual identity-only process entry point intended for an
 independently installed/pinned manager unit. It requires every argument explicitly:
@@ -78,6 +96,14 @@ refusal, no later scripted start, no evidence/result, and a retained claim. The
 first fixture used inconsistent scripted cgroups and refused before recovery; its
 initial negative was not restoration fault coverage. Corrected tests assert the
 reached boundary. No product-red/fix claim is made for that fixture correction.
+
+Review regressions additionally reach loss of the scripted peer during the trailing
+content read, suppression of a later handoff failure after a normal engine notice,
+and missing command lifecycle ownership. These fail at the earlier source and pass
+after correction. A real synthetic helper emits a readiness marker, then an injected
+clock deadline kills it; the external command owner retains the pending process,
+waits/reaps it in test synchronization and empties its pending list. This is helper
+lifecycle evidence, not cgroup/daemon quiescence or an extra recovery wait allowance.
 
 Not proved or supplied: persistent supervisor execution/service units, complete
 boot/internal-restart/start/writer/pending-operation fence, authenticated operational

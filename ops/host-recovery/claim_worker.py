@@ -11,7 +11,7 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from host_recovery.commands import Deadline
+from host_recovery.commands import Deadline, LocalCommands
 from host_recovery.durable import canonical
 from host_recovery.installation import DirectoryApproval
 from host_recovery.launch import load_launch
@@ -34,6 +34,7 @@ def main(argv=None):
     parser.add_argument("--endpoint-inode", type=int, required=True)
     parser.add_argument("--deadline", type=float, required=True, help="Absolute original local monotonic deadline")
     args = parser.parse_args(argv)
+    commands = LocalCommands(time.monotonic)
     try:
         timer = Deadline(time.monotonic, args.deadline)
         timer.remaining()
@@ -41,7 +42,7 @@ def main(argv=None):
         endpoint = DirectoryApproval(args.endpoint, args.endpoint_device, args.endpoint_inode,
                                      approval.supervisor.uid, approval.supervisor.gid, 0o700)
         timer.remaining()
-        result = run_worker(approval, endpoint=endpoint, deadline=args.deadline)
+        result = run_worker(approval, endpoint=endpoint, deadline=args.deadline, commands=commands)
         timer.remaining()
         raw = canonical({**result, "launch_sha256": args.sha256})
         if os.write(sys.stdout.fileno(), raw) != len(raw):
@@ -50,6 +51,10 @@ def main(argv=None):
     except Exception:
         sys.stderr.write("host-recovery-worker: unavailable\n")
         return 1
+    finally:
+        # Never add an unmetered wait. This single-process CLI then exits; the
+        # embedding API instead requires a caller-owned transport/reaping loop.
+        commands.reap()
 
 
 if __name__ == "__main__":

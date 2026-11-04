@@ -8,10 +8,11 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from host_recovery import alert, durable, installation, jobs, worker_runtime
+from host_recovery import alert, commands, durable, installation, jobs, worker_runtime
 from test_installation import approve
 import test_launch
 
@@ -48,6 +49,7 @@ class WorkerRuntimeTests(unittest.TestCase):
         self.calls, self.notices, self.captured = [], [], []
         self.before_peer, self.after_claim = lambda: None, lambda: None
         self.peer_ok = True
+        self.after_peer_check = lambda: None
         test = self
 
         class Bootstrap:
@@ -70,7 +72,11 @@ class WorkerRuntimeTests(unittest.TestCase):
                 self._verify_peer(peer={}, peer_alive=lambda: True, deadline=deadline)
                 if recovery_provider is not None:
                     test.provider = recovery_provider
-                    self.report = recovery_provider(test.claim, deadline=deadline, check=lambda **kw: test.peer_ok)
+                    def check(**kwargs):
+                        result = test.peer_ok
+                        test.after_peer_check()
+                        return result
+                    self.report = recovery_provider(test.claim, deadline=deadline, check=check)
                     self.result_receipt = {"observed": True, "start_permission": False}
                 test.after_claim()
                 return copy.deepcopy(test.claim)
@@ -98,7 +104,8 @@ class WorkerRuntimeTests(unittest.TestCase):
 
     def run_worker(self, execute=False, **changes):
         args = dict(endpoint=approve(self.endpoint), deadline=self.deadline,
-                    clock=lambda: self.now, boot_id=lambda: self.boot)
+                    clock=lambda: self.now, boot_id=lambda: self.boot,
+                    commands=SimpleNamespace(run=lambda *args, **kwargs: b""))
         if execute:
             args.update(boundary=self.boundary, evidence=approve(self.evidence), persist_alert=lambda _: None,
                         transport_alert=lambda notice: self.notices.append(notice) or True)
@@ -226,6 +233,93 @@ class WorkerRuntimeTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     self.run_worker()
             self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+        self.assertEqual(self.captured, [])
+
+    def test_peer_loss_during_trailing_snapshot_refuses_before_authorization(self):
+        actual = worker_runtime.load_content
+        armed, reached = False, []
+        def after_peer():
+            nonlocal armed
+            if self.peer_ok:
+                armed = True
+        def capture(*args, **kwargs):
+            nonlocal armed
+            result = actual(*args, **kwargs)
+            if armed:
+                armed = False
+                reached.append("closed-during-trailing-content-read")
+                self.peer_ok = False
+            return result
+        self.after_peer_check = after_peer
+        with patch.object(worker_runtime, "load_content", side_effect=capture):
+            with self.assertRaises(durable.Rejected):
+                self.run_worker(execute=True)
+        self.assertEqual(reached, ["closed-during-trailing-content-read"])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(list(self.evidence.iterdir()), [])
+        self.assertTrue(self.notices)
+
+    def test_normal_engine_notice_does_not_hide_later_handoff_failure(self):
+        self.after_claim = lambda: (self.installation.content / "settings.json").write_bytes(b"changed")
+        with self.assertRaises(durable.Rejected):
+            self.run_worker(execute=True)
+        self.assertEqual([n["recovery_error"] for n in self.notices],
+                         [None, "supervisor-worker-result-unconfirmed"])
+        self.assertTrue(all(n["start_fenced"] for n in self.notices))
+        self.assertFalse((self.installation.journal / "recovery-outcome.json").exists())
+
+    def test_later_report_failure_preserves_original_recovery_error_notice(self):
+        def fail_restore(name):
+            if name == "restore_complete":
+                raise OSError(errno.EIO, "synthetic restore failure")
+        self.override = fail_restore
+        def lost_report():
+            raise durable.Rejected("synthetic-report-receipt-lost")
+        self.after_claim = lost_report
+        with self.assertRaises(durable.Rejected):
+            self.run_worker(execute=True)
+        self.assertEqual([n["recovery_error"] for n in self.notices],
+                         ["recovery-restore-failed", "supervisor-worker-result-unconfirmed"])
+        self.assertNotIn("start_old", self.calls)
+
+    def test_external_command_owner_retains_and_reaps_timed_out_helper(self):
+        now = 1005.
+        owned = commands.LocalCommands(lambda: now)
+        actual_read = os.read
+        reached = []
+        def read(fd, size):
+            nonlocal now
+            value = actual_read(fd, size)
+            if value:
+                reached.append(value)
+                now = 1007.
+            return value
+        test = self
+        class TimeoutBootstrap(self.bootstrap):
+            def claim(self, path, **kwargs):
+                with patch.object(commands.os, "read", side_effect=read):
+                    owned.run((sys.executable, "-I", "-c",
+                               "import os,signal;os.write(1,b'ready');signal.pause()"), deadline=1006.)
+                test.fail("helper did not reach injected deadline")
+        self.bootstrap = TimeoutBootstrap
+        def cleanup():
+            for process in owned.pending:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=5)
+            owned.reap()
+        self.addCleanup(cleanup)
+        with self.assertRaises(commands.CommandUncertain):
+            self.run_worker(commands=owned)
+        self.assertEqual(reached, [b"ready"])
+        self.assertEqual(len(owned.pending), 1)
+        self.assertEqual(owned.pending[0].wait(timeout=5), -9)
+        owned.reap()
+        self.assertEqual(owned.pending, [])
+
+    def test_embedding_requires_explicit_command_cleanup_owner(self):
+        with self.assertRaisesRegex(durable.Rejected, "command-owner-required"):
+            self.run_worker(commands=None)
         self.assertEqual(self.captured, [])
 
     def test_pre_bootstrap_read_and_alert_receipt_faults_still_attempt_transport(self):

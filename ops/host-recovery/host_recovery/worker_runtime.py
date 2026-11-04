@@ -11,7 +11,7 @@ import os
 import time
 
 from .bootstrap import kernel_boot_id
-from .commands import Deadline, LocalCommands
+from .commands import Deadline
 from .durable import Rejected, canonical, decode, digest, notify, read_file
 from .installation import DirectoryApproval, open_approved_directory
 from .launch import LaunchApproval
@@ -42,6 +42,9 @@ def run_worker(approval, *, endpoint, deadline, boundary=None, evidence=None,
     WorkerRecovery requires its independent operational authorization and complete
     fence/oracle contracts. Scripted boundaries remain component evidence. No
     service install, forward operation, journal terminal or settlement is provided.
+    commands must have an external lifecycle owner. For LocalCommands that owner
+    retains the transport and reaps pending helpers after every uncertain exit;
+    this operation cannot add an unmetered process wait to the recovery reserve.
     """
     if (not isinstance(approval, LaunchApproval) or not isinstance(endpoint, DirectoryApproval)
             or endpoint.mode != 0o700
@@ -54,30 +57,32 @@ def run_worker(approval, *, endpoint, deadline, boundary=None, evidence=None,
                       or (evidence.uid, evidence.gid) != (os.geteuid(), os.getegid())
                       or not callable(persist_alert) or not callable(transport_alert)):
         raise Rejected("worker-runtime-execution-boundaries-required")
-    alerted = False
+    if commands is None or not callable(getattr(commands, "run", None)):
+        raise Rejected("worker-runtime-command-owner-required")
+    attempted_notices = set()
+    failure = {"code": "recovery-resume-inputs-failed"}
 
     def alert_transport(notice):
-        nonlocal alerted
-        alerted = True
+        attempted_notices.add(digest(canonical(notice)))
         return transport_alert(notice)
 
     try:
         return _run_worker(approval, endpoint=endpoint, deadline=deadline, boundary=boundary, evidence=evidence,
             persist_alert=persist_alert, transport_alert=alert_transport if execution else None,
-            clock=clock, boot_id=boot_id, commands=commands)
+            clock=clock, boot_id=boot_id, commands=commands, failure=failure)
     except Exception:
-        # Protected-input/connection/context-exit failures can happen before or
-        # after WorkerRecovery exists. Storage must never gate independent alert.
-        if execution and not alerted:
-            notify({"schema": "host-recovery-notice-v1", "attempt_id": approval.recovery.attempt_id,
-                    "original_cause": "supervisor-restart-recovery-required",
-                    "recovery_error": "recovery-resume-inputs-failed", "outcome": "recovery_unresolved",
-                    "start_fenced": True}, persist_alert, alert_transport)
+        # A normal engine notice cannot report a later handoff/context-exit
+        # failure. Deduplicate only the same notice, never every prior attempt.
+        notice = {"schema": "host-recovery-notice-v1", "attempt_id": approval.recovery.attempt_id,
+                  "original_cause": "supervisor-restart-recovery-required",
+                  "recovery_error": failure["code"], "outcome": "recovery_unresolved", "start_fenced": True}
+        if execution and digest(canonical(notice)) not in attempted_notices:
+            notify(notice, persist_alert, alert_transport)
         raise
 
 
 def _run_worker(approval, *, endpoint, deadline, boundary, evidence, persist_alert, transport_alert,
-                clock, boot_id, commands):
+                clock, boot_id, commands, failure):
     execution = boundary is not None
     roots = [approval.installation.content, approval.installation.journal, endpoint]
     if execution:
@@ -85,7 +90,7 @@ def _run_worker(approval, *, endpoint, deadline, boundary, evidence, persist_ale
     _separate(roots)
     timer = Deadline(clock, deadline)
     timer.remaining()
-    transport = LocalCommands(clock) if commands is None else commands
+    transport = commands
     active, failed = True, False
     with ExitStack() as stack:
         directories = [stack.enter_context(open_approved_directory(root)) for root in roots]
@@ -125,9 +130,13 @@ def _run_worker(approval, *, endpoint, deadline, boundary, evidence, persist_ale
 
         class PinnedBootstrap(SystemdWorkerBootstrap):
             def _verify_peer(self, *, peer, peer_alive, deadline):
+                nonlocal failed
                 current(deadline=deadline)
                 result = super()._verify_peer(peer=peer, peer_alive=peer_alive, deadline=deadline)
                 current(deadline=deadline)
+                if peer_alive() is not True:
+                    failed = True
+                    raise Rejected("worker-runtime-peer-unconfirmed")
                 return result
 
         try:
@@ -149,11 +158,18 @@ def _run_worker(approval, *, endpoint, deadline, boundary, evidence, persist_ale
                         current(deadline=deadline)
                         if check(deadline=deadline) is not True:
                             raise Rejected("worker-runtime-peer-unconfirmed")
-                        return current(deadline=deadline)
+                        current(deadline=deadline)
+                        # Snapshot reads may block after the prior peer check.
+                        # The last authority observation must be live connection
+                        # validation, not unchanged bytes from an owner that died.
+                        if check(deadline=deadline) is not True:
+                            raise Rejected("worker-runtime-peer-unconfirmed")
+                        return True
                     return engine(claim, deadline=deadline, check=lease)
 
             path = os.path.join(endpoint_root.approval.path, "claim-" + approval.job.request_id + ".sock")
             kwargs = {} if provider is None else {"recovery_provider": provider}
+            failure["code"] = "supervisor-worker-result-unconfirmed" if execution else "supervisor-worker-claim-unconfirmed"
             claim = worker.claim(path, deadline=end, **kwargs)
             current(deadline=end)
             result = {"schema": "host-recovery-worker-runtime-v1", "request_id": approval.job.request_id,
