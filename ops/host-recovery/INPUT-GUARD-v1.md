@@ -1,18 +1,20 @@
 # Strict YAML exact-delta guard v1
 
-**Comparison component only. Not wired into admission, stopped revalidation or
-recovery startup. Not a Compose renderer, application/plugin schema validator,
-authenticated policy loader or complete start oracle.** Existing recovery and
-replay acceptance remain unavailable. No host inputs, credentials, containers or
-service-manager operations are used by these tests.
+**Read-only comparison and opt-in coordinator barrier composition only. Not a
+runnable host supervisor, Compose renderer, application/plugin schema validator,
+authenticated policy loader or complete recovery/start oracle.** Existing recovery
+and replay acceptance remain unavailable. Tests execute the built guard with
+synthetic inputs; no live config, credentials, containers or service-manager
+operations are used.
 
 ## Purpose and interface
 
 `inputguard/guard.go` reuses the repository's existing pinned `gopkg.in/yaml.v3`
 parser to compare actual YAML bytes rather than treating a synthetic JSON fixture
-as YAML validation. It has no executable entrypoint, filesystem or network access.
-This is a small source-level dependency for the eventual restricted guard helper;
-no helper binary, installation default or release identity is created here.
+as YAML validation. The library has no filesystem or network access. The separate
+`inputguard/cmd` helper uses stdin/stdout only, with no arguments or environment
+configuration. Test builds are disposable development output, not installed helpers
+or new accepted release identities.
 
 - `SemanticHash` computes a typed, deterministic semantic SHA256 for one supported
   YAML value. This is a provisioning aid, not approval or attestation.
@@ -75,6 +77,79 @@ memory or execution-time guarantees for the parser. Production helper containmen
 and inclusive deadline enforcement remain required. Errors contain fixed codes,
 not parser diagnostics, keys, values, filenames, hashes or source contents.
 
+## Restricted helper protocol and coordinator composition
+
+Build the repository-owned development helper with
+`go build -o <disposable-output> ./ops/host-recovery/inputguard/cmd`. There are no
+installation commands or live defaults. The helper accepts exactly one bounded
+JSON object on stdin:
+
+- `schema`: `host-recovery-input-request-v1`.
+- `config`, `compose_source`, `frozen_rendered_compose`: mandatory pair objects.
+- Each pair requires `before`, `after` (canonical padded standard base64 of the
+  captured YAML bytes), `before_sha256`, `after_sha256` (independently approved raw
+  pins), and `changes` (an array, including an explicit empty array when unchanged).
+- Each change requires `path` (literal string array), `before`, `after` (semantic
+  hashes, or empty string for absence). The earlier nonoverlap/path limits apply.
+
+Unknown, missing, duplicate, differently cased and null fields, trailing documents,
+invalid/noncanonical base64 and over-limit requests refuse. Maximum request size is
+36 MiB, covering six 4 MiB YAML documents and policy. Receipt stdout is a single
+fixed `host-recovery-input-result-v1` object with `matched: true|false` and
+`start_authorized: false`. Exit zero requires a matching bundle and a complete
+receipt write; any other exit/output is not confirmation. Parser diagnostics,
+input values, hashes and paths are never included. There is no provisioning or
+semantic-hash command and no schema/rendering claim in this receipt.
+
+`host_recovery/input_gate.py` supplies opt-in composition:
+
+1. `InputApproval` binds the original intent, serialized request, executable digest
+   and numeric helper owner. These pins must come from independently authenticated
+   provisioning; the data class and hashes do not supply it.
+2. `ExactInputGate` borrows an already-open protected helper descriptor. Every call
+   checks regular/single-link metadata, protected mode, owner, size, digest and
+   unchanged inode signature. Execution uses `/proc/self/fd/<fd>`, not a reopened
+   path. The caller's required `check()` must revalidate the installation lock,
+   supervisor ownership, original protected path/handle identities and writer
+   fence. No root/same-uid-hostile defense or namespace attestation is claimed.
+3. The required `snapshot(intent, deadline=...)` captures actual source and frozen
+   render bytes through protected descriptors at each barrier. It must not return
+   cached proposal bytes as proof of current input. The gate checks the approved
+   request digest before dispatch and recaptures after the helper reply. The test
+   implementation uses descriptor-relative synthetic files; an authenticated
+   operational source/render snapshot implementation remains due.
+4. Nonblocking full-duplex stdin/stdout avoids request/output pipe deadlocks.
+   Request bytes never enter argv, the environment, logs or receipts. Only the
+   helper descriptor is passed, environment is minimal and cwd is `/`. Output is
+   capped at 4096 bytes and must match the exact positive receipt, exit zero and
+   complete input delivery. Partial/extra/authorizing receipts, broken pipes,
+   overflow, helper failure or deadline/clock uncertainty refuse with a fixed code.
+5. `GuardedBoundary` first retains the existing underlying preflight or stopped
+   revalidation check, then requires fresh exact-input comparison. Admission
+   failure reaches no intent/arm/stop. A stopped failure follows the coordinator's
+   existing recovery path without forward mutation/candidate start. Existing
+   listener/schema checks cannot be replaced by a comparison result. Recovery
+   methods delegate unchanged so bad candidate input does not prevent restoration;
+   they still require the separate complete baseline/start oracle.
+
+Preflight takes an explicit external deadline, before the durable arm. Stopped
+validation receives the original forward revalidation phase deadline; capture,
+helper hashing, I/O, post-reply recapture and revalidation share it. Failed helpers
+are killed without an extra unmetered wait; pending children need `reap()` and
+independent manager/group reconciliation. Helper death is not complete quiescence.
+Callbacks/kernel operations can still wedge: checks before/after cannot implement
+a hard-real-time manager watchdog or cancel daemon operations. Operational manager
+containment, authenticated provisioning and complete host fencing remain required.
+
+Real built-helper tests prove descriptor/pipe comparison and ordering against a
+scripted host boundary only, not installed-systemd/daemon recovery. They include
+source drift after arm, semantic mismatch despite valid raw pins, helper replacement,
+source/helper changes during verification, actual stalled/overflowing/early-exit
+helpers, malformed receipts, EIO/ENOSPC read injection and alert-receipt disk failure
+with an independent transport attempt. No live input, actual Compose rendering,
+application/plugin schema, archive/extracted-library check, producer or external
+alert sink is exercised.
+
 ## Evidence and remaining integration
 
 Repository-owned synthetic YAML tests cover exact additions/removals/replacements,
@@ -94,7 +169,8 @@ Still required before this can become an operational barrier:
 3. Validate the actual config, full approved plugin stanza, Compose and plugin
    schemas. The generic YAML subset and exact delta are not those schemas.
 4. Bind artifact availability plus both plugin archive and extracted-library hashes.
-5. Wire all checks into preflight **and** stopped revalidation and the independent
+5. Supply the operational boundary to the opt-in preflight **and** stopped
+   revalidation composition and wire every other required guard, plus the separate
    complete restoration/start oracle, under original inclusive phase deadlines.
 6. Exercise the pinned helper inside the approved disposable manager/daemon/full-
    recovery matrix, including persistence faults, source/renderer replacement and

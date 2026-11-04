@@ -210,11 +210,17 @@ as a substitute for the accepted production binaries.
   YAML parser. Exact old/new semantic hashes and independent raw-byte pins compare
   config, Compose source and frozen-rendered Compose without wildcard exclusions.
   Tests preserve unrelated plugin/alias maps and service images, reject ambiguous
-  YAML and verify exact inverse plugin/replay changes. **Not wired into admission,
-  stopped revalidation or recovery startup; no renderer, schema validation,
-  authenticated policy, dual-artifact verification or start authority is supplied.**
-  These are pure-Go synthetic-input/race/fuzz components, not host recovery proof.
-  See [strict subset, policy and remaining integration](INPUT-GUARD-v1.md).
+  YAML and verify exact inverse plugin/replay changes. A bounded stdin-only Go
+  helper now accepts exact JSON/base64 bundle requests and emits fixed receipts.
+  `host_recovery/input_gate.py` executes an independently pinned, open helper inode
+  with bounded full-duplex pipe I/O and original inclusive deadlines. An opt-in
+  `GuardedBoundary` composes fresh comparison with preflight and stopped forward
+  revalidation, preserving existing listener/schema checks and the independent
+  recovery path. Actual built-helper/coordinator tests use synthetic protected
+  descriptors and **scripted manager/fence/schema boundaries**. No runnable host
+  supervision, actual renderer, schema validation, authenticated approval/pin
+  provisioning, dual-artifact verification or recovery/start authority is supplied.
+  See [strict subset, protocol and composition limits](INPUT-GUARD-v1.md).
 - `host_recovery/coordinator.py`: component forward/recovery ordering, injected
   manager/daemon boundaries, registration-before-start, strict post-check and
   restoration-oracle acknowledgment shapes, original versus recovery errors,
