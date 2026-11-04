@@ -222,11 +222,16 @@ as a substitute for the accepted production binaries.
   host-owned config documents using the actual application types/pure validators,
   without runtime normalization, secret hashing or path loading. Unknown/mistyped
   source groups cannot hide behind expansion/overrides. Its distinct receipt
-  prevents a comparison-only helper downgrade. Plugin-owned options and Compose
-  schemas/rendering remain unvalidated. No runnable host supervision, authenticated
-  approval/pin provisioning or recovery/start authority is supplied. See
-  [strict subset and protocol](INPUT-GUARD-v1.md) and
-  [application validation scope](APPLICATION-GUARD-v1.md).
+  prevents a comparison-only helper downgrade. The separate `composecmd` helper
+  and `ComposeInputGate` add actual pinned compose-go single-file interpolation,
+  schema/model loading and correspondence to both frozen models, without daemon,
+  file discovery or ambient environment. Missing values, nested defaults, unsupported
+  multi-file features and incorrect frozen models refuse. This is not the Docker
+  CLI config command or full runtime/graph/plugin validation. No runnable host
+  supervision, authenticated approval/pin provisioning or recovery/start authority
+  is supplied. See [strict subset and protocol](INPUT-GUARD-v1.md),
+  [application validation scope](APPLICATION-GUARD-v1.md) and
+  [Compose renderer scope](COMPOSE-GUARD-v1.md).
 - `host_recovery/input_snapshot.py`: reusable protected seven-file capture for the
   exact-input gate: three before/after source/frozen-render pairs and an independent
   delta policy, all bound to the original intent and external raw pins. The shared
@@ -239,6 +244,12 @@ as a substitute for the accepted production binaries.
   validation, authenticated provisioning or installation-role mapping. Reading a
   frozen file does not prove its renderer/input correspondence. See
   [capture interface and remaining prerequisites](INPUT-SNAPSHOT-v1.md).
+- `host_recovery/compose_snapshot.py`: wraps that capture with two protected JSON
+  interpolation maps and a fixed renderer/project identity. Retained environment
+  descriptors enclose base capture/recapture; final byte rehashes refuse observed
+  drift. All nine files have separate role identities. Same-lock capture and fresh
+  rendering compose at both forward barriers. Real files/built helpers still use
+  **scripted manager/fence/oracle boundaries**, not installed host recovery.
 - `host_recovery/artifacts.py`: protected, original-intent-bound archive and installed
   library availability/dual hashes plus streamed exact ZIP-member correspondence.
   Opened descriptors are retained; both files are rehashed after parsing and path/

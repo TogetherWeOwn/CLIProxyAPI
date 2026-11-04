@@ -179,6 +179,17 @@ class ApplicationInputGate(ExactInputGate):
                b'"application_validated":true,"start_authorized":false}\n')
 
 
+class ComposeInputGate(ExactInputGate):
+    """Require actual pinned single-file Compose rendering plus application checks.
+
+    The snapshot includes protected explicit before/after interpolation inputs.
+    This validates model correspondence, not Docker CLI compatibility, plugin
+    options, authenticated installation roles or a complete recovery/start oracle.
+    """
+    receipt = (b'{"schema":"host-recovery-compose-result-v1","matched":true,'
+               b'"application_validated":true,"compose_validated":true,"start_authorized":false}\n')
+
+
 class GuardedBoundary:
     """Compose the comparison with existing preflight/stopped checks, not replace them.
 
