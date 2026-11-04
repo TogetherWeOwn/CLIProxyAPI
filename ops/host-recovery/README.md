@@ -8,6 +8,16 @@ as a substitute for the accepted production binaries.
 
 ## Implemented so far
 
+- `host_recovery/worker_runtime.py` and `claim_worker.py`: protected original-input
+  loading → manager-bound identity → optional separately authorized recovery/result
+  composition, without acquiring a second installation lock. Repeated protected
+  snapshots bracket peer/phase checks and final receipts; partial execution setup,
+  drift, clock/peer loss and escaped validators refuse. The runnable CLI permits
+  **identity only**, exits unresolved even after a claim, and cannot load execution
+  authority from a file/flag. Real separate-process IPC/evidence tests still use
+  **scripted manager/cgroup/fence/authority/oracle boundaries**. Operational execution
+  entrypoints, persistent supervisor and complete host fence remain unfinished.
+  See [worker runtime and limits](WORKER-RUNTIME-v1.md).
 - `host_recovery/worker_recovery.py`: opt-in original-request worker execution
   through the existing manager-bound claim/result connection, with independent
   recovery authorization and a per-operation revocable live peer/phase check.
