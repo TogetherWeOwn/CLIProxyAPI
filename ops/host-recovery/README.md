@@ -81,7 +81,11 @@ as a substitute for the accepted production binaries.
   retains its installation lock and rechecks owner/fence/request/arm/invocation
   around a durable once-only worker claim, then acknowledges identity only.
   **Restoration and service-start permissions remain false.** Lost replies,
-  persistence faults, peer loss and restart do not recreate claims. Same-uid/root
+  persistence faults, peer loss and restart do not recreate claims. Explicit
+  observation-only reopen can inspect a validated historical claim and its manager
+  invocation, never revive/authenticate the old peer, redispatch or settle recovery.
+  A replacement supervisor cannot claim an unclaimed original-owner request.
+  Same-uid/root
   hostility is outside this private-endpoint boundary. The worker must bootstrap
   its expected supervisor PID/owner/request/intent from a trusted manager path,
   not environment assertions or a socket reply; that service wiring remains due.

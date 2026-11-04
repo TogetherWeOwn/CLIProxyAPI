@@ -222,7 +222,12 @@ bootstrap of supervisor PID/owner/request/intent; no environment assertion or
 socket reply can supply that authority. Service wiring, the complete fence and
 recovery execution/oracle remain missing. Real IPC/SIGKILL tests use scripted
 manager/fence/cgroup replies, not installed units or daemon recovery. Unsupported
-kernels refuse rather than falling back to a reusable numeric PID.
+kernels refuse rather than falling back to a reusable numeric PID. Explicit
+observation-only reopen can now inspect a complete validated historical claim and
+its original worker invocation. It cannot prove the old peer is alive, replay an
+acknowledgment, create a replacement claim, settle an outcome or clear the fence.
+The original request owner is mandatory for new claims. Do not delete records or
+restart a worker to turn historical identity evidence into execution authority.
 Supervisor alert fixed codes now agree with the local transport schema; the real
 IPC regression proves volatile admission despite failed receipt persistence,
 not external notification or operational admission readiness.

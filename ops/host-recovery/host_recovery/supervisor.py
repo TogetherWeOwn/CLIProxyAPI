@@ -88,6 +88,7 @@ class RecoverySupervisor:
         self.pending_request = None
         self.worker_attempted = False
         self.worker_claim = None
+        self.reopened_claim = False
         self.job = None
         self.manager, self.clock, self.boot_id = manager, clock, boot_id
         self.persist_alert, self.transport_alert = persist_alert, transport_alert
@@ -153,6 +154,11 @@ class RecoverySupervisor:
             if observe_existing:
                 self.pending_request = self._pending_request()
                 self.pending_sha256 = digest(canonical(self.pending_request))
+                if "reconcile-worker.json" in self.initial_entries:
+                    self.worker_claim = self._saved_claim(self.pending_request)
+                    self.reopened_claim = True
+                    # Reading a prior claim never recreates its live peer/session.
+                    self.worker_attempted = True
                 self.state = "recovery_dispatch_pending"
         except Exception as failure:
             self._fail(failure, "supervisor-state-unavailable")
@@ -160,10 +166,12 @@ class RecoverySupervisor:
     def _pending_request(self):
         allowed = {"reconcile-request.json", "reconcile-enqueued.json", "reconcile-observed.json", "reconcile-worker.json"}
         names = {name for name in self.initial_entries if name.startswith(("reconcile-", ".stage-reconcile-"))}
-        if "reconcile-worker.json" in names and (self.worker_claim is None
-                or canonical(private_record(self.fd, "reconcile-worker.json")) != canonical(self.worker_claim)):
-            # A saved claim is not replay authority after loss of the live broker.
-            raise Rejected("supervisor-dispatch-reconciliation-required")
+        if "reconcile-worker.json" in names:
+            if self.worker_claim is None:
+                if not self.observe_existing or self.pending_request is not None:
+                    raise Rejected("supervisor-dispatch-reconciliation-required")
+            elif canonical(private_record(self.fd, "reconcile-worker.json")) != canonical(self.worker_claim):
+                raise Rejected("supervisor-dispatch-reconciliation-required")
         if "reconcile-request.json" not in names or not names <= allowed:
             raise Rejected("supervisor-dispatch-reconciliation-required")
         request = private_record(self.fd, "reconcile-request.json")
@@ -192,6 +200,40 @@ class RecoverySupervisor:
             if canonical(receipt) != canonical(expected):
                 raise Rejected("supervisor-pending-enqueue-receipt")
         return request
+
+    def _saved_claim(self, request):
+        """Validate historical identity evidence, never revive its connected peer.
+
+        This path is observation-only. A numeric historical PID is not used for a
+        signal, pidfd_open or an authentication decision. Manager observations can
+        corroborate the saved unit invocation, not prove that peer is still alive.
+        """
+        claim = private_record(self.fd, "reconcile-worker.json")
+        fields = {"schema", "request_id", "intent_sha256", "supervisor_owner", "worker", "peer", "nonce",
+                  "restoration_permission", "start_permission"}
+        if (type(claim) is not dict or set(claim) != fields
+                or claim["schema"] != "host-recovery-worker-claim-v1"
+                or claim["request_id"] != request["request_id"] or claim["intent_sha256"] != self.intent_sha256
+                or canonical(claim["supervisor_owner"]) != canonical(request["owner"])
+                or not identity(claim["nonce"]) or claim["restoration_permission"] is not False
+                or claim["start_permission"] is not False):
+            raise Rejected("supervisor-dispatch-reconciliation-required")
+        peer = claim["peer"]
+        if (type(peer) is not dict or set(peer) != {"pid", "uid", "gid"}
+                or any(type(v) is not int or not 0 <= v <= 2147483647 for v in peer.values())
+                or peer["pid"] == 0 or peer["uid"] == 0):
+            raise Rejected("supervisor-dispatch-reconciliation-required")
+        worker = claim["worker"]
+        validate_worker(worker, request["request_id"], self.owner["boot_id"], peer["pid"])
+        if (worker["unit"] == self.owner["unit"]
+                or worker["invocation_id"] in (self.owner["invocation_id"], request["owner"]["invocation_id"])):
+            raise Rejected("supervisor-separate-recovery-owner-unconfirmed")
+        bound = {"schema": "host-recovery-job-binding-v1", "request_id": request["request_id"],
+                 "unit": worker["unit"], "boot_id": worker["boot_id"], "invocation_id": worker["invocation_id"]}
+        if ("reconcile-observed.json" not in self.initial_entries
+                or canonical(private_record(self.fd, "reconcile-observed.json")) != canonical(bound)):
+            raise Rejected("supervisor-worker-binding-changed")
+        return copy.deepcopy(claim)
 
     def _now(self):
         value = self.clock()
@@ -454,6 +496,7 @@ class RecoverySupervisor:
         retry an ambiguous claim or infer restoration/start permission from it.
         """
         if (self.closed or self.worker_attempted or self.error is not None or self.pending_request is None
+                or canonical(self.pending_request["owner"]) != canonical(self.owner)
                 or self.state not in ("recovery_enqueued", "recovery_dispatch_pending", "recovery_job_running")):
             raise Rejected("supervisor-worker-claim-not-authorized")
         self.worker_attempted = True
@@ -514,4 +557,5 @@ class RecoverySupervisor:
                 "forward_allowed": False, "start_permission": False,
                 "recovery_completed": False, "installation_start_fence_proven": False,
                 "production_acceptance": False, "alert": copy.deepcopy(self.alert),
+                "saved_claim_observed": self.reopened_claim, "saved_peer_liveness_proven": False,
                 "job": copy.deepcopy(self.job), "watch": copy.deepcopy(self.watch)}

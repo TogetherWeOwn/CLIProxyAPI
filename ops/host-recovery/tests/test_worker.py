@@ -134,7 +134,10 @@ class WorkerClaimTests(unittest.TestCase):
         with supervisor.recovery_owner(str(self.case.root), owner=self.case.owner, manager=self.case.manager,
                 clock=lambda: self.case.now, boot_id=lambda: self.case.boot, persist_alert=lambda _: None,
                 transport_alert=lambda _: True, observe_existing=True) as reopened:
-            self.assertEqual(reopened.error, "supervisor-dispatch-reconciliation-required")
+            self.assertIsNone(reopened.error)
+            self.assertTrue(reopened.status()["saved_claim_observed"])
+            self.assertFalse(reopened.status()["saved_peer_liveness_proven"])
+            self.assertTrue(reopened.worker_attempted)
 
     def test_no_claim_before_dispatch_or_after_close(self):
         with self.case.open() as process:
@@ -406,9 +409,12 @@ with supervisor.recovery_owner(sys.argv[3],owner=owner,manager=ScriptedManager()
         self.assertEqual(self.read(client), b"Rejected\n")
         self.assertEqual(client.wait(timeout=5), 2)
         with supervisor.recovery_owner(str(self.case.case.root), owner=self.case.case.owner,
-                manager=self.case.case.manager, clock=lambda: self.case.case.now, boot_id=lambda: "boot-a",
+                manager=self.case.case.manager, clock=time.monotonic, boot_id=lambda: "boot-a",
                 persist_alert=lambda _: None, transport_alert=lambda _: True, observe_existing=True) as reopened:
-            self.assertEqual(reopened.error, "supervisor-dispatch-reconciliation-required")
+            self.assertIsNone(reopened.error)
+            self.assertTrue(reopened.status()["saved_claim_observed"])
+            self.assertFalse(reopened.status()["saved_peer_liveness_proven"])
+            self.assertTrue(reopened.worker_attempted)
         self.assertEqual(self.case.case.enqueues(), [])
 
     def test_wrong_expected_supervisor_pid_or_intent_reply_is_not_accepted(self):

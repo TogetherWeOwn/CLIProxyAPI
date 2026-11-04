@@ -236,9 +236,10 @@ and after repeated worker observations. It durably writes/readbacks
 `reconcile-worker.json` once before acknowledging the nonce/peer/request/intent/
 supervisor/worker identity. All claim-write EIO/ENOSPC stages refuse acknowledgment.
 An in-place binding/claim change, peer loss or expiry after persistence also refuses.
-A saved claim after supervisor death is **not replay authority**: even explicit
-observation-only reopen refuses and requires future outcome reconciliation. No
-endpoint/state deletion or second claim is a supported retry path.
+A saved claim after supervisor death is **not replay authority**. Explicit
+observation-only reopen can inspect the historical claim as described below;
+it cannot revive its peer or settle an outcome. No endpoint/state deletion or
+second claim is a supported retry path.
 
 `WorkerClient` independently pins the expected supervisor UID/PID/owner and exact
 request/intent digest, checks kernel connection/message identity, and verifies the
@@ -269,6 +270,42 @@ They do not install units, contact a daemon, prove complete quiescence, restore 
 start anything. Real-version manager compatibility and the full package matrix
 remain due. Initial red supervisor-to-alert schema receipts are retained alongside
 the corrected local-IPC result, not retroactively labeled passing.
+
+## Historical claim observation after broker loss
+
+Explicit `observe_existing=True` can now reopen a complete saved identity claim
+under the same installation lock. Default reopen still refuses prior dispatch.
+The claim must have its exact schema, request/intent pins, original request-owner
+identity, strict false permissions, bounded nonce/peer fields and matching saved
+worker unit/boot/invocation binding. Missing binding, unknown/staged records,
+changed claim bytes, unsafe permissions and read uncertainty remain unresolved.
+Every observation rechecks the original request/arm and claim alongside the existing
+owner/fence/job checks. Neither a new original arm nor redispatch is allowed.
+
+The historical peer PID is **not** authenticated or looked up with `pidfd_open`.
+Observing the same pinned manager invocation corroborates only the unit identity,
+not liveness of the old connected process, receipt delivery, completed recovery or
+baseline readiness. Status distinguishes `saved_claim_observed` from the always
+false `saved_peer_liveness_proven`. Inactive/exited workers remain unverified;
+replacement/lost manager invocations refuse. No peer claim is replayed, rewritten
+or acknowledged, even when the old reply may never have arrived. This does not
+implement worker adoption, outcome settlement or startup-fence retirement.
+
+A new claim now also requires the current supervisor owner to equal the **original
+request owner**, including invocation. Previously the injected supervisor API could
+write an identity-only claim after a replacement supervisor reopened an unclaimed
+request, although the manager-bound worker client already refused replacement.
+A retained before/after regression reproduces that mismatch using the prior source
+and proves the new refusal. Neither source version grants restoration/start in that
+case. Constructor dictionaries and scripted manager rows still do not authenticate
+an installation, manager, approval or complete fence.
+
+The updated actual SIGKILL-before-reply regression leaves the durable claim readable
+but cannot recreate it. Its reopen clock now advances with the real monotonic clock
+used for dispatch, rather than using the fixture's earlier frozen sample. Additional
+negatives cover claim/schema/peer/binding tamper, EIO/ENOSPC reads and failed alert
+receipt persistence. All manager/fence boundaries remain **scripted component
+fixtures**, not installed-systemd, daemon, reboot recovery or downtime evidence.
 
 ## Supervisor self-identity bootstrap subset
 
