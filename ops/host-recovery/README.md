@@ -8,6 +8,17 @@ as a substitute for the accepted production binaries.
 
 ## Implemented so far
 
+- `host_recovery/broker.py:dispatch_claim`: opt-in same-supervisor/installation-lock
+  composition binds its private listener before one-shot pinned recovery-unit
+  enqueue, then receives/persists the original worker claim/result and requires
+  fresh independent result observation. Explicit dispatch cannot acknowledge an
+  unused/partial lease. Lost replies, worker death, endpoint/owner/clock drift and
+  storage faults retain ambiguous state without retry. Actual fast-peer IPC/flock
+  and reached EIO/ENOSPC tests use **scripted manager/cgroup/fence/oracle boundaries**,
+  not installed-systemd/Docker/full recovery. No restore/start permission,
+  settlement, new admission, authenticated provisioning or persistent service is
+  supplied. The caller retains the lock after return. See [broker composition and
+  limits](BROKER-v1.md).
 - `host_recovery/deployment.py`: explicit intent/image/projection-pinned read-only
   old-container command, full Config/HostConfig and effective-mount correspondence.
   Repeated stopped/deployment observations follow fence revalidation; no raw

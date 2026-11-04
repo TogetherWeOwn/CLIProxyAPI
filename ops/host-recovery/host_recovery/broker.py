@@ -1,20 +1,21 @@
-"""Pinned calling-manager to one worker identity exchange, not recovery execution.
+"""Same-owner worker broker, with an explicit one-shot recovery-unit dispatch path.
 
-The original request must already exist and belong to this supervisor invocation.
-The existing installation lock is borrowed, never reacquired or handed to the
-worker. The complete fence and independent alert transport are explicit trusted
-boundaries; this composition neither implements nor authenticates them. No live
-entrypoint/default, service installation, dispatch, restore or start grant exists.
+serve_claim observes an existing original-owner request; dispatch_claim prepares
+its endpoint before enqueuing a new one. Both borrow the existing installation
+lock, never reacquiring or handing it to the worker. The complete fence, recovery
+execution authority and independent oracle remain explicit trusted boundaries.
+No live entrypoint/default, service installation, restore or start grant exists.
 """
 import copy
 import os
 import time
 
 from .bootstrap import kernel_boot_id
-from .commands import LocalCommands
-from .durable import Rejected, canonical, notify
+from .commands import Deadline, LocalCommands
+from .dispatch import SystemdRecoveryDispatch, validate_request
+from .durable import Rejected, canonical, digest, notify
 from .installation import DirectoryApproval, open_approved_directory
-from .jobs import SystemdRecoveryJobs
+from .jobs import RecoveryJobBinding, SystemdRecoveryJobs
 from .launch import LaunchApproval, _calling_session
 from .supervisor import RecoverySupervisor
 from .worker import WorkerListener
@@ -56,6 +57,111 @@ class _ClaimJobs:
 
     def observe_worker(self, request_id, *, pid, deadline):
         return self.jobs.observe_worker(request_id, pid=pid, deadline=deadline, uid=self.uid, gid=self.gid)
+
+
+def dispatch_claim(process, *, endpoint, binding, systemctl, deadline, result_oracle, commands=None):
+    """Enqueue and receive one worker on the same live supervisor and lock.
+
+    Call only inside recovery_owner (or an equivalently retained protected
+    installation session). Unlike serve_claim, this starts the explicitly pinned
+    recovery unit. The private listener is ready before that one enqueue, so a
+    fast worker cannot race broker startup. The binding must independently match
+    the exact shortened plan; nothing learns approved pins from manager output.
+
+    This does not load/provision installation authority, implement the complete
+    fence, grant the worker restore/start permission, settle the installation or
+    install a persistent service. The manager and result oracle retain their
+    existing independently trusted contracts. The caller keeps the lock after
+    return; neither a successful result nor an error authorizes new admission.
+    """
+    if (not isinstance(process, RecoverySupervisor) or not isinstance(endpoint, DirectoryApproval)
+            or not isinstance(binding, RecoveryJobBinding) or endpoint.mode != 0o700
+            or (endpoint.uid, endpoint.gid) != (os.geteuid(), os.getegid())
+            or not callable(result_oracle)):
+        raise Rejected("broker-explicit-boundaries-required")
+    if (process.closed or process.error is not None or process.attempted or process.observe_existing
+            or process.plan is None or process.pending_request is not None):
+        raise Rejected("broker-unclaimed-original-request-required")
+    listener = None
+    try:
+        timer = Deadline(process._now, deadline)
+        timer.remaining()
+        end = min(deadline, process.plan["deadline"])
+        timer.deadline = end
+        request = copy.deepcopy(process.plan)
+        request["deadline"] = end
+        request.pop("request_id")
+        request["request_id"] = digest(canonical(request))
+        validate_request(request, binding, process.boot_id(), process._now())
+        journal_path = os.readlink(f"/proc/self/fd/{process.fd}")
+        if os.path.commonpath((journal_path, endpoint.path)) == journal_path:
+            raise Rejected("broker-separate-endpoint-required")
+        transport = LocalCommands(process._now) if commands is None else commands
+        with open_approved_directory(endpoint) as directory:
+            def current():
+                timer.remaining()
+                directory.validate()
+                process._current(end)
+                directory.validate()
+                timer.remaining()
+
+            def authorize(value, *, deadline, phase):
+                directory.validate()
+                result = process.authorize_dispatch(value, deadline=deadline, phase=phase)
+                directory.validate()
+                timer.remaining()
+                return result
+
+            current()
+            path = os.path.join(endpoint.path, "claim-" + binding.request_id + ".sock")
+            listener = WorkerListener(path, worker_uid=endpoint.uid, clock=process._now)
+            current()
+            dispatch = SystemdRecoveryDispatch(systemctl=systemctl, commands=transport, binding=binding,
+                authorize=authorize, boot_id=process.boot_id, clock=process._now)
+            status = process.reconcile(deadline=end, dispatch=dispatch)
+            if (status["state"] != "recovery_enqueued" or process.error is not None
+                    or canonical(process.pending_request) != canonical(request)):
+                raise Rejected("broker-claim-unconfirmed")
+            current()
+            jobs = SystemdRecoveryJobs(systemctl=systemctl, commands=transport, binding=binding,
+                                      boot_id=process.boot_id, clock=process._now)
+
+            class EndpointJobs(_ClaimJobs):
+                def observe(self, request_id, *, deadline):
+                    directory.validate()
+                    value = super().observe(request_id, deadline=deadline)
+                    directory.validate()
+                    return value
+
+                def observe_worker(self, request_id, *, pid, deadline):
+                    directory.validate()
+                    value = super().observe_worker(request_id, pid=pid, deadline=deadline)
+                    directory.validate()
+                    return value
+
+            claim = listener.accept_once(supervisor=process,
+                observer=EndpointJobs(jobs, endpoint.uid, endpoint.gid), deadline=end, result_oracle=result_oracle)
+            current()
+            if (process.result_observed is not True or process.error is not None
+                    or canonical(process._saved_claim(request)) != canonical(claim)
+                    or canonical(process._pending_request()) != canonical(request)):
+                raise Rejected("broker-claim-unconfirmed")
+            process._saved_result()
+        # Validate durable records after the last external endpoint/manager read.
+        process._records_current()
+        if (canonical(process._pending_request()) != canonical(request)
+                or canonical(process._saved_claim(request)) != canonical(claim)):
+            raise Rejected("broker-claim-unconfirmed")
+        process._saved_result()
+        timer.remaining()
+        return process.status()
+    except Exception:
+        if process.error is None:
+            process._fail(Rejected("supervisor-worker-result-unconfirmed"), "supervisor-worker-result-unconfirmed")
+        raise Rejected("broker-claim-unconfirmed") from None
+    finally:
+        if listener is not None:
+            listener.close()
 
 
 def serve_claim(approval, *, endpoint, deadline, fence, persist_alert, transport_alert,

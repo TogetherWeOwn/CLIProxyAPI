@@ -289,13 +289,15 @@ class RecoverySupervisor:
         self._records_current()
         timer.remaining()
 
-    def reconcile(self, *, deadline):
+    def reconcile(self, *, deadline, dispatch=None):
         """One bounded enqueue attempt; never interpret acknowledgment as recovery.
 
         deadline can shorten but cannot extend the original inclusive reserve.
         Failures before/after the durable request are latched in this invocation.
         On restart, the saved request forbids another enqueue. No automatic retry,
         terminal result, restoration permission or service-start grant is issued.
+        An explicit dispatch keeps observation/fencing on this same owner while
+        using its ordered live lease for enqueue; all three phases are mandatory.
         """
         if (self.closed or self.attempted or self.plan is None or self.error is not None
                 or self.observe_existing):
@@ -319,11 +321,13 @@ class RecoverySupervisor:
             self.dispatch_request = copy.deepcopy(request)
             self.dispatch_phase = "observe"
             try:
-                receipt = self.manager.enqueue_recovery(copy.deepcopy(request), deadline=end)
+                sender = self.manager if dispatch is None else dispatch
+                receipt = sender.enqueue_recovery(copy.deepcopy(request), deadline=end)
                 # Legacy injected managers remain an external trusted boundary.
-                # Once the narrow lease is used, all three phases must complete;
-                # swallowing a denied/partial lease cannot fabricate an ACK.
-                if self.dispatch_phase not in ("observe", "complete"):
+                # Explicit dispatch must complete every phase, even if it never
+                # entered the lease. A matching ACK is not a lease substitute.
+                allowed = ("observe", "complete") if dispatch is None else ("complete",)
+                if self.dispatch_phase not in allowed:
                     raise Rejected("supervisor-dispatch-lease-incomplete")
             finally:
                 self.dispatch_request = None

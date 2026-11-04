@@ -5,7 +5,52 @@ broker, complete host fence, recovery execution/outcome oracle or production
 acceptance.** No service is installed or started by its tests. No credential,
 permission, live configuration or release pin changes are provided.
 
-## Composition and trust
+## Same-owner dispatch and result composition
+
+`host_recovery/broker.py:dispatch_claim` adds an opt-in enqueue-to-result path
+inside an **already retained** `recovery_owner` or equivalent protected installation
+session. It does not reacquire the lock or close the borrowed supervisor. The
+caller must keep the same installation lock through the entire call and after its
+return while the installation remains unresolved.
+
+- Require an independently approved same-UID/GID private endpoint, exact
+  `RecoveryJobBinding` for the shortened original plan, explicit manager executable
+  and independent result oracle. This path cannot obtain approval from a current
+  manager row, a journal digest or a worker's result.
+- Bind/listen on `claim-<request-digest>.sock` **before enqueue**. Existing endpoints
+  refuse; they are never unlinked or replaced. Endpoint ancestry is revalidated
+  around each dispatch authorization and worker observation.
+- Use the same supervisor's durable request and ordered observe → enqueue →
+  acknowledge lease through `SystemdRecoveryDispatch`. An explicit dispatcher
+  cannot fabricate an acknowledgment without completing all three lease phases.
+  The legacy injected-manager interface remains a trusted component-test boundary.
+- Receive the original worker's kernel-peer claim and result on that listener,
+  persist/read back both, then require the existing fresh independent result
+  observation. Final records, owner/fence, deadline and endpoint validation must
+  succeed before returning `recovery_result_observed_unsettled`.
+- A lost enqueue reply, failed persistence, missing/dead worker, changed owner or
+  endpoint, expired/cross-boot clock or failed oracle closes the listener, retains
+  ambiguous socket/journal evidence and escalates without retry. Independent alert
+  transport is attempted even when alert-receipt persistence fails.
+
+This starts **only the pinned recovery worker unit**, not an old/candidate service.
+The worker's identity claim still grants no restoration/start authority. A result
+acknowledgment does not settle the installation or authorize new admission. The
+caller supplies authentic installation/package/manager/fence authority; this
+function is not an installed persistent entrypoint, approved provisioning,
+recovery executor, complete host fence or complete independent result oracle.
+The existing `serve_claim` path below remains observation-only/no-enqueue.
+
+Tests join the real request journal, flock, dispatch state machine, strict manager
+parser and separate-process seqpacket/pidfd/result exchange. A synchronized fast
+worker connects before the scripted enqueue reply. Worker SIGKILL and reached
+EIO/ENOSPC faults across request/enqueue/claim/result/observation persistence retain
+the latch and attempt independent transport. **Manager, cgroup, complete-fence,
+recovery evidence and readiness replies are scripted.** No installed systemd,
+Docker, reboot, full recovery, external alert, measured phase cap or availability
+acceptance is established by this composition.
+
+## Existing-request composition and trust
 
 `host_recovery/broker.py:serve_claim` connects the existing calling-supervisor
 bootstrap, approved content/original-request loading, installation-directory lock,
