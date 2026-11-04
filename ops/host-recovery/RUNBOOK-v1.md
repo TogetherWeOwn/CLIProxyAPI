@@ -177,7 +177,18 @@ The journal never overwrites the original intent with a terminal file. On reopen
 any retained intent fences forward work, including a terminal-looking prior file.
 There is no automatic latch retirement or new attempt admission after restart yet.
 Do not delete state or bypass that refusal to make the partial package usable.
-A reviewed settlement/resume/continuation protocol is still required.
+The recovery-only restart owner now preserves the original arm and installation
+lock through durable request-before-dispatch. Unknown failure time is charged
+conservatively from the original arm, not restart detection. Cross-boot, regressed,
+missing or expired clock evidence remains unresolved and requires a separately
+bounded continuation; no fresh budget is granted. A staged/durable recovery request
+never automatically redispatches after lost reply or process death, even with an
+enqueue acknowledgment. Manager reconciliation of that request is still required.
+Enqueue acknowledgment is not quiescence, restoration or permission to start.
+[Restart ownership source](SUPERVISOR-RECONCILIATION-v1.md) uses injected manager and
+complete-fence boundaries; it is not an installed persistent service or executable
+reboot recovery. A reviewed settlement/full-resume/continuation protocol is still
+required.
 
 Tree restoration only operates after externally proved quiescence. Pre-admission
 must reserve its deterministic staging paths in every root's accepted write set,

@@ -1,0 +1,222 @@
+"""Recovery-only restart ownership and dispatch; not an installed supervisor.
+
+The context retains the installation lock across manager observation, durable
+request, dispatch and status. The manager and complete start fence are injected
+boundaries, NOT implemented or authenticated by a matching dictionary here.
+No start, restore, admission, settlement or privilege operation exists.
+
+A reopened terminal-looking journal still requires recovery. With no durable
+failure timestamp, charge the reserve conservatively from the original arm.
+Cross-boot, expired or missing arm evidence needs a separately approved bounded
+continuation; never manufacture a fresh 300-second budget on restart. A durable
+request with an absent/lost reply must be reconciled by the manager, not retried.
+"""
+import copy
+from contextlib import contextmanager
+import os
+import stat
+
+from .budget import positive
+from .commands import Deadline
+from .durable import Rejected, canonical, decode, digest, installation_lock, notify, read_file
+from .journal import Journal, identity
+from .manager import INVOCATION, UNIT
+
+
+def validate_owner(owner):
+    fields = {"installation_id", "attempt_id", "unit", "invocation_id", "boot_id"}
+    if (type(owner) is not dict or set(owner) != fields
+            or any(not identity(value) for value in owner.values())
+            or UNIT.fullmatch(owner["unit"]) is None
+            or INVOCATION.fullmatch(owner["invocation_id"]) is None):
+        raise Rejected("supervisor-manager-owner-required")
+
+
+def private_record(fd, name):
+    raw, info = read_file(fd, name, limit=65536)
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        raise Rejected("supervisor-private-record-required")
+    return decode(raw)
+
+
+@contextmanager
+def recovery_owner(path, *, owner, manager, clock, boot_id, persist_alert, transport_alert, fault=None):
+    """Hold one installation lock until the caller exits, including after dispatch.
+
+    manager.observe_owner must return the actual independently inspected current
+    manager owner. manager.fence must enforce *all* starts/writers and pending
+    daemon operations, not merely report empty cgroups or restart=no. Its strict
+    True is a required boundary acknowledgment, not proof of implementation.
+    manager.enqueue_recovery must address only the separate pinned recovery unit,
+    with request_id as its durable idempotency identity, and bound its local wait
+    by deadline. Its returned receipt is enqueue acknowledgment only.
+    """
+    validate_owner(owner)
+    with installation_lock(path, owner) as (fd, bound_owner):
+        instance = RecoverySupervisor(fd, owner=bound_owner, manager=manager, clock=clock,
+                                      boot_id=boot_id, persist_alert=persist_alert,
+                                      transport_alert=transport_alert, fault=fault)
+        try:
+            yield instance
+        finally:
+            # A reference retained outside the context cannot dispatch after the
+            # fd/lock is released (or reused for an unrelated directory).
+            instance.closed = True
+
+
+class RecoverySupervisor:
+    """One recovery request per retained journal, never a forward-work owner.
+
+    Construct through recovery_owner. A manager must reconcile requests left by
+    a dead supervisor; this class deliberately refuses automatic redispatch even
+    if the previous enqueue receipt claims success. It never clears the latch.
+    """
+    def __init__(self, fd, *, owner, manager, clock, boot_id, persist_alert, transport_alert, fault=None):
+        self.fd, self.owner = fd, copy.deepcopy(owner)
+        self.manager, self.clock, self.boot_id = manager, clock, boot_id
+        self.persist_alert, self.transport_alert = persist_alert, transport_alert
+        self.closed = False
+        self.attempted = False
+        self.last_clock = None
+        self.alert = None
+        self.state = "fenced"
+        self.error = None
+        self.log = None
+        self.intent_sha256 = None
+        self.plan = None
+        self.arm_sha256 = None
+        self.initial_entries = set()
+        try:
+            self.initial_entries = set(os.listdir(fd))
+            self.log = Journal(fd, fault=fault)
+            if self.log.intent is None:
+                raise Rejected("supervisor-recovery-intent-required")
+            value = self.log.intent
+            if (value["attempt_id"] != owner["attempt_id"]
+                    or value["installation_id"] != owner["installation_id"]
+                    or owner["boot_id"] != boot_id()):
+                raise Rejected("supervisor-intent-owner-mismatch")
+            self.log.revoke_forward()
+            self.intent_sha256 = digest(canonical(value))
+            # Both final and staged records are evidence of a possible enqueue.
+            # Neither a terminal receipt nor a new invocation clears that fact.
+            if any(name.startswith(("reconcile-", ".stage-reconcile-")) for name in self.initial_entries):
+                raise Rejected("supervisor-dispatch-reconciliation-required")
+            arm_record = private_record(fd, "arm.json")
+            self.arm_sha256 = digest(canonical(arm_record))
+            if (set(arm_record) != {"schema", "arm", "intent_sha256"}
+                    or arm_record["schema"] != "host-recovery-arm-v1"
+                    or arm_record["intent_sha256"] != self.intent_sha256):
+                raise Rejected("supervisor-arm-pin-mismatch")
+            arm = arm_record["arm"]
+            if (type(arm) is not dict or set(arm) != {"boot_id", "monotonic"}
+                    or arm["boot_id"] != value["owner"]["boot_id"] or not positive(arm["monotonic"])):
+                raise Rejected("supervisor-arm-schema")
+            if arm["boot_id"] != owner["boot_id"]:
+                raise Rejected("supervisor-cross-boot-continuation-required")
+            now = self._now()
+            if now < arm["monotonic"]:
+                raise Rejected("supervisor-clock-continuation-required")
+            deadline = min(arm["monotonic"] + value["budget"]["recovery_seconds"],
+                           arm["monotonic"] + value["budget"]["total_seconds"])
+            if now >= deadline:
+                raise Rejected("supervisor-expired-continuation-required")
+            self.plan = {"schema": "host-recovery-reconcile-request-v1",
+                         "attempt_id": value["attempt_id"], "intent_sha256": self.intent_sha256,
+                         "owner": copy.deepcopy(owner), "original_arm": arm,
+                         "failure_lower_bound": arm["monotonic"], "deadline": deadline,
+                         "detection_upper_bound_seconds": now - arm["monotonic"],
+                         "forward_allowed": False, "production_acceptance": False}
+            self.plan["request_id"] = digest(canonical(self.plan))
+            self.state = "recovery_required"
+        except Exception as failure:
+            self._fail(failure, "supervisor-state-unavailable")
+
+    def _now(self):
+        value = self.clock()
+        if (self.boot_id() != self.owner["boot_id"] or not positive(value)
+                or self.last_clock is not None and value < self.last_clock):
+            raise Rejected("supervisor-clock-continuation-required")
+        self.last_clock = value
+        return value
+
+    def _fail(self, failure, fallback):
+        self.state = "recovery_unresolved"
+        # Do not serialize exception messages from filesystem/manager boundaries.
+        allowed = {"supervisor-recovery-intent-required", "supervisor-intent-owner-mismatch",
+                   "supervisor-dispatch-reconciliation-required", "supervisor-arm-pin-mismatch",
+                   "supervisor-arm-schema", "supervisor-cross-boot-continuation-required",
+                   "supervisor-clock-continuation-required", "supervisor-expired-continuation-required"}
+        self.error = str(failure) if isinstance(failure, Rejected) and str(failure) in allowed else fallback
+        notice = {"schema": "host-recovery-notice-v1", "attempt_id": self.owner["attempt_id"],
+                  "original_cause": "supervisor-restart-recovery-required", "recovery_error": self.error,
+                  "outcome": self.state, "start_fenced": True}
+        self.alert = notify(notice, self.persist_alert, self.transport_alert)
+
+    def _current(self, deadline):
+        if self.closed:
+            raise Rejected("supervisor-owner-closed")
+        timer = Deadline(self._now, deadline)
+        timer.remaining()
+        current = private_record(self.fd, "intent.json")
+        if (digest(canonical(current)) != self.intent_sha256 or self.log.uncertain
+                or digest(canonical(private_record(self.fd, "arm.json"))) != self.arm_sha256
+                or set(os.listdir(self.fd)) != self.initial_entries):
+            raise Rejected("supervisor-state-changed")
+        actual = self.manager.observe_owner(copy.deepcopy(self.owner), deadline=deadline)
+        if type(actual) is not dict or actual != self.owner:
+            raise Rejected("supervisor-manager-owner-unconfirmed")
+        if self.manager.fence(copy.deepcopy(self.log.intent), deadline=deadline) is not True:
+            raise Rejected("supervisor-complete-fence-unconfirmed")
+        after = self.manager.observe_owner(copy.deepcopy(self.owner), deadline=deadline)
+        if type(after) is not dict or after != self.owner:
+            raise Rejected("supervisor-manager-owner-unconfirmed")
+        timer.remaining()
+
+    def reconcile(self, *, deadline):
+        """One bounded enqueue attempt; never interpret acknowledgment as recovery.
+
+        deadline can shorten but cannot extend the original inclusive reserve.
+        Failures before/after the durable request are latched in this invocation.
+        On restart, the saved request forbids another enqueue. No automatic retry,
+        terminal result, restoration permission or service-start grant is issued.
+        """
+        if self.closed or self.attempted or self.plan is None or self.error is not None:
+            raise Rejected("supervisor-reconciliation-not-authorized")
+        self.attempted = True
+        try:
+            if not positive(deadline):
+                raise Rejected("supervisor-deadline-required")
+            end = min(deadline, self.plan["deadline"])
+            self._current(end)
+            request = copy.deepcopy(self.plan)
+            request["deadline"] = end
+            # Rebind the correlation digest to the exact shortened request.
+            request.pop("request_id")
+            request["request_id"] = digest(canonical(request))
+            self.log._write("reconcile-request.json", request)
+            self.initial_entries.add("reconcile-request.json")
+            # Recheck after persistence: a slow fsync, owner loss or a newly
+            # pending start must not be followed by an out-of-budget enqueue.
+            self._current(end)
+            receipt = self.manager.enqueue_recovery(copy.deepcopy(request), deadline=end)
+            Deadline(self._now, end).remaining()
+            expected = {"request_id": request["request_id"], "accepted": True,
+                        "separate_recovery_owner": True}
+            if (type(receipt) is not dict or set(receipt) != set(expected)
+                    or any(type(receipt[key]) is not type(item) or receipt[key] != item
+                           for key, item in expected.items())):
+                raise Rejected("supervisor-enqueue-unconfirmed")
+            self.log._write("reconcile-enqueued.json", receipt)
+            Deadline(self._now, end).remaining()
+            self.state = "recovery_enqueued"
+        except Exception as failure:
+            self._fail(failure, "supervisor-dispatch-unconfirmed")
+        return self.status()
+
+    def status(self):
+        return {"schema": "host-recovery-supervisor-status-v1", "state": self.state,
+                "error": self.error, "owner_closed": self.closed,
+                "forward_allowed": False, "start_permission": False,
+                "recovery_completed": False, "installation_start_fence_proven": False,
+                "production_acceptance": False, "alert": copy.deepcopy(self.alert)}

@@ -11,10 +11,11 @@ FIFO and one writer. Startup precedes decisions. Inference and shutdown do not
 wait for sink I/O. Saturation disables admission and preserves the admitted prefix;
 a terminal `replay-producer-failure-v1` is only best-effort when the sink resumes.
 Partial/error writes stop output. The corrected immutable handoff reports source
-`92854b15dd514adbcd75ede4e6c4b588c1772f60`, package ZIP SHA256
-`4be82eaf1a9c793f4cd831e7cca8dd099ab9b73339bde7386f8e315bb3192969`,
+`c54c8c86989032f269ebfb49e95c6fb16fb9f2db`, source tree
+`11dbe1a400a5c834c42aec651699fcd4fb29df3d`, package ZIP SHA256
+`eaa9cf0281e979e26cc2d72a7a32a238bb133c4d0681ecb1b216cb5a45c52439`,
 extracted library SHA256
-`1243649bf9e1b8a0d650b7ae9108bcbffb869e2356aa5ea68b810612166ea920`,
+`bb306f57220b1906713766597b57041b0be68a9db51b63b8c33c45f06827c281`,
 and schema SHA256
 `a7a0a411df5cc4e28d693936f8f2dafd15a5853bc9e6d7c38997af322d60efd7`.
 These are producer-reported integration references, not independently verified
@@ -22,6 +23,15 @@ artifacts, accepted release pins, merged/review approval or a drain boundary.
 No corrected package was installed or executed by this checkpoint. Reverify exact
 source/schema/package correspondence during integration; never mix generations
 of chunked artifacts. The historical fixture below is not that build.
+
+This QA-corrected producer is reported to use raw syscall writes so EPIPE reaches
+sticky failure handling rather than process-terminating SIGPIPE, and to check both
+pre/post-build Git status exits before publishing a package. These are reported
+component/packaging fixes, not independent reruns here. The bounded metadata/event
+contract and schema are unchanged; no flush RPC/health attestation was added.
+Version 0.2.4 remains unreleased development output, not a replacement production
+pin. Integration use remains gated on producer review/merge and separate artifact,
+integration and release checks. Surviving a broken pipe never validates evidence.
 
 Consequently, none of these establish complete evidence:
 

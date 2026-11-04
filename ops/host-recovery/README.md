@@ -36,6 +36,17 @@ as a substitute for the accepted production binaries.
   is visible. **Settlement/archival and new admission after supervisor restart are
   not implemented**; this intentionally conservative latch is not yet a complete
   usable supervisor lifecycle.
+- `host_recovery/supervisor.py`: recovery-only restart ownership/dispatch source.
+  A context retains the installation lock across strict owner/fence boundary
+  acknowledgments, durable request-before-enqueue and receipt persistence. Missing,
+  malformed, changed, cross-boot or expired arm evidence never gets a fresh budget.
+  Unknown failure time is conservatively charged from the original arm. A staged
+  or durable dispatch request, including an acknowledged one, requires manager
+  reconciliation instead of automatic redispatch after process loss. A real
+  separate-process SIGKILL/lock test uses **scripted manager callbacks**, not a
+  systemd recovery unit. No actual persistent service loop, installed fence,
+  recovery execution, cross-boot continuation, settlement or start grant exists.
+  See [restart ownership and limits](SUPERVISOR-RECONCILIATION-v1.md).
 - `host_recovery/restore.py`: bounded whole-root restoration of original bytes,
   uid/gid/modes, with an explicit accepted list of candidate-only additions.
   Unknown entries, type changes, unsafe links/metadata and tampered baselines
