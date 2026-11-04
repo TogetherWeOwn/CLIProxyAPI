@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from host_recovery import bootstrap, broker, durable, jobs, launch, manager, worker
+from host_recovery import bootstrap, broker, durable, jobs, launch, manager, outcomes, worker
 import test_bootstrap
 from test_installation import approve
 import test_launch
@@ -79,13 +79,22 @@ class BrokerTests(unittest.TestCase):
         self.listeners.append(value)
         def close():
             value.closed = True
-        def accept_once(*, supervisor, observer, deadline):
+        def accept_once(*, supervisor, observer, deadline, result_oracle=None):
             self.locked()
             self.process = supervisor
             self.on_accept(supervisor)
             result = supervisor.claim_worker(peer={"pid": self.pid, "uid": os.geteuid(), "gid": os.getegid()},
                 nonce="fixture-nonce", observer=observer, peer_alive=lambda: True, deadline=deadline)
             self.after_reply(supervisor)
+            if result_oracle is not None:
+                report = {"schema": "host-recovery-worker-result-v1", "request_id": supervisor.pending_request["request_id"],
+                          "intent_sha256": supervisor.intent_sha256, "claim_sha256": durable.digest(durable.canonical(result)),
+                          "outcome": "baseline_restored", "evidence_sha256": "e" * 64}
+                supervisor.record_worker_result(report, peer=result["peer"], observer=observer,
+                                                peer_alive=lambda: True, deadline=deadline)
+                state = supervisor.observe_result(observer=observer, oracle=result_oracle, deadline=deadline)
+                if not state["worker_result_observed"]:
+                    raise durable.Rejected("synthetic-result-refused")
             return result
         value.close, value.accept_once = close, accept_once
         return value
@@ -126,6 +135,33 @@ class BrokerTests(unittest.TestCase):
         raw = durable.canonical(result)
         for secret in (str(self.installation.root), "fixture-nonce", "synthetic/worker", '"peer"'):
             self.assertNotIn(secret.encode(), raw)
+
+    def test_result_oracle_composes_same_lock_and_does_not_settle_installation(self):
+        original = self.original()
+        calls = []
+        def oracle(intent, report, *, deadline):
+            self.locked()
+            calls.append(deadline)
+            return outcomes.expected_oracle(intent, report)
+        result = self.serve(result_oracle=oracle)
+        self.assertEqual(result["operation"], "claim_and_result")
+        self.assertEqual(result["state"], "result_observed_unsettled")
+        self.assertTrue(result["worker_result_observed"])
+        self.assertFalse(result["installation_settled"])
+        self.assert_no_grants(result)
+        self.assertEqual(calls, [1170.0])
+        self.assertEqual(original, self.original())
+        self.unlocked()
+
+    def test_result_oracle_refusal_cannot_return_claim_only_success(self):
+        with self.assertRaises(durable.Rejected):
+            self.serve(result_oracle=lambda *args, **kw: True)
+        self.assertFalse(self.process.status()["worker_result_observed"])
+        self.assertTrue(self.process.closed)
+        self.assertTrue(self.notices)
+        self.assertTrue((self.installation.journal / "reconcile-result.json").exists())
+        self.assertFalse((self.installation.journal / "reconcile-result-observed.json").exists())
+        self.unlocked()
 
     def test_caller_deadline_never_extends_original_request(self):
         self.assert_no_grants(self.serve(deadline=9999))

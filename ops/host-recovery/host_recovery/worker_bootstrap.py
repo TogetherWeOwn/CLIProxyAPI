@@ -51,6 +51,7 @@ class SystemdWorkerBootstrap:
             read_process_cgroup=read_process_cgroup)
         self.attempted = False
         self.worker, self.discovered, self.end = None, None, None
+        self.result_receipt = None
 
     @classmethod
     def from_journal(cls, fd, *, approval, supervisor_owner, systemctl, commands,
@@ -114,7 +115,9 @@ class SystemdWorkerBootstrap:
         Deadline(self.clock, deadline).remaining()
         return copy.deepcopy(self.worker)
 
-    def claim(self, path, *, deadline):
+    def claim(self, path, *, deadline, result_provider=None):
+        if result_provider is not None and not callable(result_provider):
+            raise Rejected("worker-result-provider-required")
         if self.attempted:
             raise Rejected("worker-bootstrap-exhausted")
         self.attempted = True
@@ -130,4 +133,8 @@ class SystemdWorkerBootstrap:
         client = WorkerClient(path, supervisor_uid=self.discovered["uid"], supervisor_pid=self.discovered["pid"],
             supervisor_owner=self.request["owner"], request_id=self.binding.request_id,
             intent_sha256=self.intent_sha256, clock=self.clock, verify_identity=self._verify_peer)
-        return client.claim(deadline=self.end)
+        if result_provider is None:
+            return client.claim(deadline=self.end)
+        result = client.claim(deadline=self.end, result_provider=result_provider)
+        self.result_receipt = copy.deepcopy(client.result_receipt)
+        return result

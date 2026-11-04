@@ -59,7 +59,7 @@ class _ClaimJobs:
 
 
 def serve_claim(approval, *, endpoint, deadline, fence, persist_alert, transport_alert,
-                clock=time.monotonic, boot_id=kernel_boot_id, commands=None, fault=None):
+                clock=time.monotonic, boot_id=kernel_boot_id, commands=None, fault=None, result_oracle=None):
     """Serve one original-owner identity claim using pinned manager/input readers.
 
     endpoint is an independently approved private directory, owned by the calling
@@ -74,10 +74,15 @@ def serve_claim(approval, *, endpoint, deadline, fence, persist_alert, transport
     The returned secret-free receipt means a local claim reply was sent, not that
     the peer received/accepted it or recovery ran. Context-exit validation must
     succeed before the receipt is returned. Failure leaves original durable state.
+    Optional result_oracle extends the same connection to a durable worker report
+    and fresh independent result observation. It must implement the RESULTS-v1
+    contract; a scripted callback is not that oracle. No settlement/start grant is
+    added, and a failed result exchange cannot return identity-only success.
     """
     if (not isinstance(approval, LaunchApproval) or not isinstance(endpoint, DirectoryApproval)
             or endpoint.mode != 0o700
-            or not all(callable(value) for value in (fence, persist_alert, transport_alert))):
+            or not all(callable(value) for value in (fence, persist_alert, transport_alert))
+            or result_oracle is not None and not callable(result_oracle)):
         raise Rejected("broker-explicit-boundaries-required")
     alerted = False
 
@@ -89,7 +94,7 @@ def serve_claim(approval, *, endpoint, deadline, fence, persist_alert, transport
     try:
         return _serve_claim(approval, endpoint=endpoint, deadline=deadline, fence=fence,
             persist_alert=persist_alert, transport_alert=alert_transport, clock=clock,
-            boot_id=boot_id, commands=commands, fault=fault)
+            boot_id=boot_id, commands=commands, fault=fault, result_oracle=result_oracle)
     except Exception:
         # Bootstrap/readback/context-exit failures can precede or outlive the
         # supervisor object. They still need independent transport on disk failure.
@@ -102,7 +107,7 @@ def serve_claim(approval, *, endpoint, deadline, fence, persist_alert, transport
 
 
 def _serve_claim(approval, *, endpoint, deadline, fence, persist_alert, transport_alert,
-                 clock, boot_id, commands, fault):
+                 clock, boot_id, commands, fault, result_oracle):
     transport = LocalCommands(clock) if commands is None else commands
     with _calling_session(approval, deadline=deadline, clock=clock, boot_id=boot_id, commands=transport) as session:
         if (endpoint.uid, endpoint.gid) != (approval.supervisor.uid, approval.supervisor.gid):
@@ -129,7 +134,7 @@ def _serve_claim(approval, *, endpoint, deadline, fence, persist_alert, transpor
                 jobs = SystemdRecoveryJobs(systemctl=approval.systemctl, commands=transport,
                     binding=approval.job, clock=clock, boot_id=boot_id)
                 claim = listener.accept_once(supervisor=process, observer=_ClaimJobs(jobs, endpoint.uid, endpoint.gid),
-                                             deadline=session.deadline)
+                                             deadline=session.deadline, result_oracle=result_oracle)
                 process._current(session.deadline)
                 if canonical(process._saved_claim(process.pending_request)) != canonical(claim):
                     raise Rejected("broker-saved-claim-changed")
@@ -138,7 +143,10 @@ def _serve_claim(approval, *, endpoint, deadline, fence, persist_alert, transpor
                           "operation": "claim", "state": "identity_reply_sent_only",
                           "claim_recorded": True, "claim_reply_sent": True,
                           "peer_acknowledgment_verified": False, "restoration_permission": False,
-                          "recovery_completed": False}
+                          "recovery_completed": False,
+                          "worker_result_observed": process.result_observed, "installation_settled": False}
+                if result_oracle is not None:
+                    result.update(operation="claim_and_result", state="result_observed_unsettled")
             except Exception:
                 if process.error is None:
                     process._fail(Rejected("supervisor-worker-claim-unconfirmed"),
@@ -154,5 +162,10 @@ def _serve_claim(approval, *, endpoint, deadline, fence, persist_alert, transpor
         if (set(os.listdir(process.fd)) != process.initial_entries
                 or canonical(process._saved_claim(process.pending_request)) != canonical(claim)):
             raise Rejected("broker-saved-claim-changed")
+        process._records_current()
+        if canonical(process._pending_request()) != canonical(session.inputs.request):
+            raise Rejected("broker-original-request-changed")
+        if result_oracle is not None:
+            process._saved_result()
         session.timer.remaining()
     return result

@@ -24,6 +24,7 @@ from .durable import Rejected, canonical, decode, digest, installation_lock, not
 from .journal import Journal, identity
 from .jobs import recovery_unit, validate_observation, validate_worker
 from .manager import INVOCATION, UNIT
+from .outcomes import expected_oracle, validate_result
 
 
 def validate_owner(owner):
@@ -89,6 +90,11 @@ class RecoverySupervisor:
         self.worker_attempted = False
         self.worker_claim = None
         self.reopened_claim = False
+        self.result_attempted = False
+        self.result_observation_attempted = False
+        self.worker_result = None
+        self.result_observed = False
+        self.result_observation = None
         self.job = None
         self.manager, self.clock, self.boot_id = manager, clock, boot_id
         self.persist_alert, self.transport_alert = persist_alert, transport_alert
@@ -159,12 +165,18 @@ class RecoverySupervisor:
                     self.reopened_claim = True
                     # Reading a prior claim never recreates its live peer/session.
                     self.worker_attempted = True
+                if "reconcile-result.json" in self.initial_entries:
+                    self.worker_result = self._saved_result()
+                    self.result_attempted = True
+                elif "reconcile-result-observed.json" in self.initial_entries:
+                    raise Rejected("supervisor-worker-result-unconfirmed")
                 self.state = "recovery_dispatch_pending"
         except Exception as failure:
             self._fail(failure, "supervisor-state-unavailable")
 
     def _pending_request(self):
-        allowed = {"reconcile-request.json", "reconcile-enqueued.json", "reconcile-observed.json", "reconcile-worker.json"}
+        allowed = {"reconcile-request.json", "reconcile-enqueued.json", "reconcile-observed.json", "reconcile-worker.json",
+                   "reconcile-result.json", "reconcile-result-observed.json"}
         names = {name for name in self.initial_entries if name.startswith(("reconcile-", ".stage-reconcile-"))}
         if "reconcile-worker.json" in names:
             if self.worker_claim is None:
@@ -245,6 +257,7 @@ class RecoverySupervisor:
 
     def _fail(self, failure, fallback):
         self.state = "recovery_unresolved"
+        self.result_observed = False
         # Do not serialize exception messages from filesystem/manager boundaries.
         self.error = str(failure) if isinstance(failure, Rejected) and str(failure) in SUPERVISOR_ERRORS else fallback
         notice = {"schema": "host-recovery-notice-v1", "attempt_id": self.owner["attempt_id"],
@@ -252,16 +265,19 @@ class RecoverySupervisor:
                   "outcome": self.state, "start_fenced": True}
         self.alert = notify(notice, self.persist_alert, self.transport_alert)
 
-    def _current(self, deadline):
-        if self.closed:
-            raise Rejected("supervisor-owner-closed")
-        timer = Deadline(self._now, deadline)
-        timer.remaining()
+    def _records_current(self):
         current = private_record(self.fd, "intent.json")
         if (digest(canonical(current)) != self.intent_sha256 or self.log.uncertain
                 or digest(canonical(private_record(self.fd, "arm.json"))) != self.arm_sha256
                 or set(os.listdir(self.fd)) != self.initial_entries):
             raise Rejected("supervisor-state-changed")
+
+    def _current(self, deadline):
+        if self.closed:
+            raise Rejected("supervisor-owner-closed")
+        timer = Deadline(self._now, deadline)
+        timer.remaining()
+        self._records_current()
         actual = self.manager.observe_owner(copy.deepcopy(self.owner), deadline=deadline)
         if type(actual) is not dict or actual != self.owner:
             raise Rejected("supervisor-manager-owner-unconfirmed")
@@ -270,6 +286,7 @@ class RecoverySupervisor:
         after = self.manager.observe_owner(copy.deepcopy(self.owner), deadline=deadline)
         if type(after) is not dict or after != self.owner:
             raise Rejected("supervisor-manager-owner-unconfirmed")
+        self._records_current()
         timer.remaining()
 
     def reconcile(self, *, deadline):
@@ -551,6 +568,145 @@ class RecoverySupervisor:
                 self._fail(failure, "supervisor-worker-claim-unconfirmed")
             raise Rejected("supervisor-worker-claim-unconfirmed") from None
 
+    def _saved_result(self):
+        if self.worker_claim is None:
+            raise Rejected("supervisor-worker-result-unconfirmed")
+        claim = self._saved_claim(self.pending_request)
+        if canonical(claim) != canonical(self.worker_claim):
+            raise Rejected("supervisor-worker-result-unconfirmed")
+        result = private_record(self.fd, "reconcile-result.json")
+        validate_result(result, self.pending_request, claim)
+        if self.worker_result is not None and canonical(result) != canonical(self.worker_result):
+            raise Rejected("supervisor-worker-result-unconfirmed")
+        if "reconcile-result-observed.json" in self.initial_entries:
+            value = private_record(self.fd, "reconcile-result-observed.json")
+            fields = {"schema", "request_id", "result_sha256", "owner", "monotonic", "oracle"}
+            if (type(value) is not dict or set(value) != fields
+                    or value["schema"] != "host-recovery-result-observation-v1"
+                    or value["request_id"] != self.pending_request["request_id"]
+                    or value["result_sha256"] != digest(canonical(result))
+                    or not positive(value["monotonic"]) or value["monotonic"] > self._now()
+                    or not self.pending_request["original_arm"]["monotonic"] <= value["monotonic"] < self.pending_request["deadline"]
+                    or canonical(value["oracle"]) != canonical(expected_oracle(self.log.intent, result))
+                    or result["outcome"] != "baseline_restored"):
+                raise Rejected("supervisor-worker-result-unconfirmed")
+            validate_owner(value["owner"])
+            if any(value["owner"][key] != self.owner[key] for key in
+                   ("installation_id", "attempt_id", "unit", "boot_id")):
+                raise Rejected("supervisor-worker-result-unconfirmed")
+            if self.result_observation is not None and canonical(value) != canonical(self.result_observation):
+                raise Rejected("supervisor-worker-result-unconfirmed")
+            self.result_observation = copy.deepcopy(value)
+        return copy.deepcopy(result)
+
+    def record_worker_result(self, result, *, peer, observer, peer_alive, deadline):
+        """Record one connected original worker's report, not an outcome verdict.
+
+        Kernel connection/message credentials and a live pidfd must be supplied by
+        the broker. An identity claim grants no restore/start authority. A worker
+        report cannot stand in for independent baseline/readiness verification.
+        """
+        if (self.closed or self.error is not None or self.result_attempted or self.worker_claim is None
+                or self.pending_request is None or self.reopened_claim
+                or canonical(self.pending_request["owner"]) != canonical(self.owner)):
+            raise Rejected("supervisor-worker-result-unconfirmed")
+        self.result_attempted = True
+        try:
+            if not positive(deadline) or canonical(peer) != canonical(self.worker_claim["peer"]):
+                raise Rejected("supervisor-worker-result-unconfirmed")
+            end = min(deadline, self.pending_request["deadline"])
+            result = copy.deepcopy(result)
+            validate_result(result, self.pending_request, self.worker_claim)
+
+            def current():
+                self._current(end)
+                if (canonical(self._pending_request()) != canonical(self.pending_request)
+                        or canonical(self._saved_claim(self.pending_request)) != canonical(self.worker_claim)
+                        or peer_alive() is not True):
+                    raise Rejected("supervisor-worker-result-unconfirmed")
+                value = observer.observe_worker(self.pending_request["request_id"], pid=peer["pid"], deadline=end)
+                validate_worker(value, self.pending_request["request_id"], self.owner["boot_id"], peer["pid"])
+                if canonical(value) != canonical(self.worker_claim["worker"]) or peer_alive() is not True:
+                    raise Rejected("supervisor-worker-result-unconfirmed")
+                self._current(end)
+                if (canonical(self._pending_request()) != canonical(self.pending_request)
+                        or canonical(self._saved_claim(self.pending_request)) != canonical(self.worker_claim)
+                        or peer_alive() is not True):
+                    raise Rejected("supervisor-worker-result-unconfirmed")
+                Deadline(self._now, end).remaining()
+
+            current()
+            self.log._write("reconcile-result.json", result)
+            self.initial_entries.add("reconcile-result.json")
+            self.worker_result = copy.deepcopy(result)
+            current()
+            self._saved_result()
+            self.state = "recovery_result_recorded_unverified"
+            return copy.deepcopy(result)
+        except Exception:
+            self._fail(Rejected("supervisor-worker-result-unconfirmed"), "supervisor-worker-result-unconfirmed")
+            raise Rejected("supervisor-worker-result-unconfirmed") from None
+
+    def observe_result(self, *, observer, oracle, deadline):
+        """Corroborate a saved report without reviving a peer or settling the latch.
+
+        The independently authenticated oracle must inspect the referenced raw
+        evidence AND current complete baseline/image/replay/no-plugin/readiness.
+        A report, successful exit or old observation receipt is never sufficient.
+        On restart a fresh oracle is required; no report is redispatched/replaced.
+        """
+        if (self.closed or self.error is not None or self.result_observation_attempted
+                or self.worker_result is None or not callable(oracle)):
+            raise Rejected("supervisor-worker-result-unconfirmed")
+        self.result_observation_attempted = True
+        self.result_observed = False
+        try:
+            if not positive(deadline):
+                raise Rejected("supervisor-worker-result-unconfirmed")
+            end = min(deadline, self.pending_request["deadline"])
+            report = self._saved_result()
+            if report["outcome"] != "baseline_restored":
+                raise Rejected("supervisor-worker-result-unconfirmed")
+
+            def current():
+                self._current(end)
+                if (canonical(self._pending_request()) != canonical(self.pending_request)
+                        or canonical(self._saved_result()) != canonical(report)):
+                    raise Rejected("supervisor-worker-result-unconfirmed")
+                job = copy.deepcopy(observer.observe(self.pending_request["request_id"], deadline=end))
+                validate_observation(job, self.pending_request["request_id"], self.owner["boot_id"])
+                worker = self.worker_claim["worker"]
+                if (job["invocation_id"] != worker["invocation_id"] or job["job_id"] != 0
+                        or job["state"] not in ("running", "inactive_unverified")):
+                    raise Rejected("supervisor-worker-result-unconfirmed")
+                self._current(end)
+                if (canonical(self._pending_request()) != canonical(self.pending_request)
+                        or canonical(self._saved_result()) != canonical(report)):
+                    raise Rejected("supervisor-worker-result-unconfirmed")
+                return job
+
+            before = current()
+            receipt = oracle(copy.deepcopy(self.log.intent), copy.deepcopy(report), deadline=end)
+            expected = expected_oracle(self.log.intent, report)
+            if canonical(receipt) != canonical(expected) or canonical(current()) != canonical(before):
+                raise Rejected("supervisor-worker-result-unconfirmed")
+            observed = self._now()
+            if "reconcile-result-observed.json" not in self.initial_entries:
+                value = {"schema": "host-recovery-result-observation-v1", "request_id": self.pending_request["request_id"],
+                         "result_sha256": digest(canonical(report)), "owner": copy.deepcopy(self.owner),
+                         "monotonic": observed, "oracle": expected}
+                self.log._write("reconcile-result-observed.json", value)
+                self.initial_entries.add("reconcile-result-observed.json")
+                self.result_observation = copy.deepcopy(value)
+            if canonical(current()) != canonical(before):
+                raise Rejected("supervisor-worker-result-unconfirmed")
+            Deadline(self._now, end).remaining()
+            self.result_observed = True
+            self.state = "recovery_result_observed_unsettled"
+        except Exception:
+            self._fail(Rejected("supervisor-worker-result-unconfirmed"), "supervisor-worker-result-unconfirmed")
+        return self.status()
+
     def status(self):
         return {"schema": "host-recovery-supervisor-status-v1", "state": self.state,
                 "error": self.error, "owner_closed": self.closed,
@@ -558,4 +714,6 @@ class RecoverySupervisor:
                 "recovery_completed": False, "installation_start_fence_proven": False,
                 "production_acceptance": False, "alert": copy.deepcopy(self.alert),
                 "saved_claim_observed": self.reopened_claim, "saved_peer_liveness_proven": False,
+                "worker_result_recorded": self.worker_result is not None,
+                "worker_result_observed": self.result_observed, "installation_settled": False,
                 "job": copy.deepcopy(self.job), "watch": copy.deepcopy(self.watch)}

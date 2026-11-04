@@ -52,6 +52,18 @@ as a substitute for the accepted production binaries.
   persistent manager service, installed fence, recovery execution, cross-boot
   continuation, settlement or start grant exists.
   See [restart ownership and limits](SUPERVISOR-RECONCILIATION-v1.md).
+- `host_recovery/outcomes.py` and the supervisor/worker/broker result path: optional
+  one-shot report on the same claimed kernel-peer connection. Original request,
+  intent, claim and evidence digests are persisted before a result acknowledgment;
+  a fresh independently provisioned baseline/readiness oracle is required before
+  recording observation. Restart can inspect saved reports but cannot revive the
+  peer, replay receipts, redispatch or reuse an old observation as verification.
+  `worker_result_observed` is separate from recovery completion/settlement/start
+  permission, which remain **false**. Same-lock manager/file rechecks surround
+  persistence and external callbacks. Actual peer/process-death/SIGKILL/flock and
+  storage-fault tests still use **scripted manager/fence/oracle boundaries**. No
+  operational worker, full fence, oracle or settlement implementation is supplied.
+  See [result protocol and limits](RESULTS-v1.md).
 - `host_recovery/jobs.py` and explicit supervisor observation mode: read-only
   observation of a pinned `cpa-recovery@<request-digest>.service` instance after
   ambiguous dispatch. Preserve the original request/arm and bind the first observed

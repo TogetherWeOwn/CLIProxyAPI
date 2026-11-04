@@ -28,7 +28,8 @@ SUPERVISOR_ERRORS = frozenset((
     "supervisor-expired-continuation-required", "supervisor-watch-stopped", "supervisor-watch-expired",
     "supervisor-worker-outcome-unverified", "supervisor-watch-observation-limit",
     "supervisor-state-unavailable", "supervisor-dispatch-unconfirmed", "supervisor-watch-unconfirmed",
-    "supervisor-job-observation-unconfirmed", "supervisor-worker-claim-unconfirmed"))
+    "supervisor-job-observation-unconfirmed", "supervisor-worker-claim-unconfirmed",
+    "supervisor-worker-result-unconfirmed"))
 CAUSES = {
     "original_cause": frozenset(("admission-persistence-or-clock-failed", "explicit-recovery-request",
                                   "forward-stop-failed", "forward-revalidate-failed", "forward-mutate-failed",

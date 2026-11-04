@@ -21,10 +21,11 @@ import uuid
 
 from .alert import MAX_PACKET, peer, send
 from .commands import Deadline
-from .durable import Rejected, canonical, decode, directory
+from .durable import Rejected, canonical, decode, digest, directory
 from .inventory import HASH
 from .jobs import validate_worker
 from .journal import identity
+from .outcomes import validate_result
 from .supervisor import validate_owner
 
 
@@ -134,20 +135,23 @@ class WorkerListener:
             self.sock.close()
             raise
 
-    def accept_once(self, *, supervisor, observer, deadline):
+    def accept_once(self, *, supervisor, observer, deadline, result_oracle=None):
+        if result_oracle is not None and not callable(result_oracle):
+            raise Rejected("worker-result-oracle-required")
         if self.attempted or self.closed:
             raise Rejected("worker-listener-exhausted")
         self.attempted = True
         if supervisor.pending_request is None or supervisor.closed or supervisor.error is not None:
             raise Rejected("worker-live-supervisor-required")
         try:
-            return self._accept_once(supervisor=supervisor, observer=observer, deadline=deadline)
+            return self._accept_once(supervisor=supervisor, observer=observer, deadline=deadline, result_oracle=result_oracle)
         except Exception:
+            code = "supervisor-worker-result-unconfirmed" if result_oracle is not None else "supervisor-worker-claim-unconfirmed"
             if supervisor.error is None:
-                supervisor._fail(Rejected("supervisor-worker-claim-unconfirmed"), "supervisor-worker-claim-unconfirmed")
-            raise Rejected("supervisor-worker-claim-unconfirmed") from None
+                supervisor._fail(Rejected(code), code)
+            raise Rejected(code) from None
 
-    def _accept_once(self, *, supervisor, observer, deadline):
+    def _accept_once(self, *, supervisor, observer, deadline, result_oracle):
         Deadline(self.clock, deadline).remaining()
         end = min(deadline, supervisor.pending_request["deadline"])
         timer = Deadline(self.clock, end)
@@ -170,6 +174,18 @@ class WorkerListener:
                 claim = supervisor.claim_worker(peer=session.peer, nonce=request["nonce"], observer=observer,
                                                 peer_alive=session.alive, deadline=end)
                 session.reply(claim, end)
+                if result_oracle is not None:
+                    result = session.receive(end)
+                    supervisor.record_worker_result(result, peer=session.peer, observer=observer,
+                                                    peer_alive=session.alive, deadline=end)
+                    status = supervisor.observe_result(observer=observer, oracle=result_oracle, deadline=end)
+                    if status["worker_result_observed"] is not True:
+                        raise Rejected("supervisor-worker-result-unconfirmed")
+                    if not session.alive():
+                        raise Rejected("supervisor-worker-result-unconfirmed")
+                    session.reply({"schema": "host-recovery-worker-result-receipt-v1",
+                                   "result_sha256": digest(canonical(result)), "observed": True,
+                                   "installation_settled": False, "start_permission": False}, end)
                 return claim
             finally:
                 session.close()
@@ -195,6 +211,7 @@ class WorkerClient:
         self.owner, self.request_id, self.intent_sha256 = copy.deepcopy(supervisor_owner), request_id, intent_sha256
         self.clock, self.attempted = clock, False
         self.verify_identity = verify_identity
+        self.result_receipt = None
 
     def _verify_identity(self, session, deadline):
         if self.verify_identity is None:
@@ -208,7 +225,16 @@ class WorkerClient:
         Deadline(self.clock, deadline).remaining()
         return copy.deepcopy(result)
 
-    def claim(self, *, deadline):
+    def claim(self, *, deadline, result_provider=None):
+        """Optionally report evidence on the same live connection after identity.
+
+        result_provider(claim, deadline=...) returns only outcome/evidence_sha256.
+        It must obtain recovery authority separately: the claim grants none. No
+        retry occurs after a provider failure, lost report or ambiguous receipt.
+        The original inclusive deadline covers the entire exchange and provider.
+        """
+        if result_provider is not None and not callable(result_provider):
+            raise Rejected("worker-result-provider-required")
         if self.attempted:
             raise Rejected("worker-client-exhausted")
         self.attempted = True
@@ -245,6 +271,29 @@ class WorkerClient:
                         if canonical(after) != canonical(observed) or canonical(value["worker"]) != canonical(observed):
                             raise Rejected("worker-manager-claim-mismatch")
                     timer.remaining()
+                    if result_provider is not None:
+                        supplied = result_provider(copy.deepcopy(value), deadline=deadline)
+                        if type(supplied) is not dict or set(supplied) != {"outcome", "evidence_sha256"}:
+                            raise Rejected("worker-result-provider-schema")
+                        result = {"schema": "host-recovery-worker-result-v1", "request_id": self.request_id,
+                                  "intent_sha256": self.intent_sha256, "claim_sha256": digest(canonical(value)),
+                                  **supplied}
+                        validate_result(result, {"request_id": self.request_id, "intent_sha256": self.intent_sha256}, value)
+                        if self.verify_identity is not None:
+                            if canonical(self._verify_identity(session, deadline)) != canonical(observed):
+                                raise Rejected("worker-manager-claim-mismatch")
+                        session.reply(result, deadline)
+                        receipt = session.receive(deadline)
+                        expected = {"schema": "host-recovery-worker-result-receipt-v1",
+                                    "result_sha256": digest(canonical(result)), "observed": True,
+                                    "installation_settled": False, "start_permission": False}
+                        if canonical(receipt) != canonical(expected):
+                            raise Rejected("worker-result-receipt-unconfirmed")
+                        if self.verify_identity is not None:
+                            if canonical(self._verify_identity(session, deadline)) != canonical(observed):
+                                raise Rejected("worker-manager-claim-mismatch")
+                        timer.remaining()
+                        self.result_receipt = copy.deepcopy(receipt)
                     return value
                 finally:
                     session.close()
