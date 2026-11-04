@@ -269,6 +269,52 @@ start anything. Real-version manager compatibility and the full package matrix
 remain due. Initial red supervisor-to-alert schema receipts are retained alongside
 the corrected local-IPC result, not retroactively labeled passing.
 
+## Supervisor self-identity bootstrap subset
+
+`bootstrap.SystemdSupervisorIdentity` supplies the read-only `observe_owner`
+boundary for the calling supervisor. It learns boot/invocation identity from
+kernel and pinned manager reads, not `INVOCATION_ID`, `MAINPID`, worker input or a
+socket reply. The actual effective numeric UID/GID must match the accepted
+non-root binding. Both manager snapshots must report this process as the running
+MainPID, no pending Job, identical invocation/cgroup and pinned unit/fragment/
+command/sandbox settings. The supported persistent-unit policy is `Type=exec`,
+`Restart=on-failure`, whole-control-group termination, no delegation/capabilities,
+strict filesystem protection and no ignored command errors. Symbolic User/Group
+resolution is not supported in this subset; it requires explicit numeric owners.
+
+The kernel unified-cgroup membership is read before, between and after queries;
+boot continuity and the caller's inclusive deadline are rechecked. Boot reads
+accept only one bounded canonical kernel UUID line. Static command telemetry is
+projected as described above. Output contains identity only, not command strings,
+write-set paths, environment, credentials or business payloads.
+
+Bootstrap is one-shot. Later observations require the exact originally bound
+installation/attempt/unit/invocation/boot and process/cgroup. Changed manager
+identity, lost replies, altered pins, pending jobs, migration, clock regression,
+expiry or uncertain reads permanently revoke this object. Returning to old
+values does not repair it. Bootstrap never opens/clears a journal, renews an arm,
+settles recovery or grants restoration/start. A replacement object cannot clear
+the durable installation latch. No arbitrary-PID lookup or PID-reuse-sensitive
+foreign-process bootstrap is supplied; the calling process cannot reuse its own
+PID while performing these reads.
+
+**Trust remains explicit:** accepted manifest/pins and local manager-command
+transport must come from a separately reviewed trusted package boundary. A hash,
+matching scripted output or an arbitrary caller's binding does not authenticate
+that boundary. This adapter implements neither `fence` nor `enqueue_recovery`.
+The supervisor integration negative proves that valid self-identity cannot bypass
+an unacknowledged independent fence. Worker-side acquisition of its expected
+supervisor/request/intent identity, persistent service bootstrap/wiring, complete
+host fence and actual installed-manager compatibility remain unimplemented.
+
+The tests use synthetic manager/cgroup replies and mocked kernel boot reads.
+A real local executable checks fixed read-only argv transport. A separate Python
+process uses its actual own PID/UID/GID despite forged environment identity, but
+its manager/cgroup data are still scripted. These are component receipts, **not
+systemd ownership authentication, service installation, recovery or downtime
+proof**. The initial integration fixture mixed installation IDs and failed before
+reconciliation; that raw red is retained alongside the corrected fixture result.
+
 ## Original-clock accounting
 
 A restart cannot invent the original failure instant. Without a durable, trusted

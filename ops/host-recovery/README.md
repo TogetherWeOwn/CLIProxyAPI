@@ -87,6 +87,16 @@ as a substitute for the accepted production binaries.
   not environment assertions or a socket reply; that service wiring remains due.
   Real Linux IPC, descriptor-transfer and process-SIGKILL tests use **scripted
   manager/fence/cgroup observations**, not installed manager/daemon recovery.
+- `host_recovery/bootstrap.py`: read-only calling-supervisor identity bootstrap.
+  Two fixed manager queries bracket kernel boot/cgroup observations; the pinned
+  non-root numeric UID/GID, command/sandbox, running MainPID and invocation must
+  agree. The MainPID must be this calling process, never an arbitrary target PID
+  or environment assertion. Reobservation cannot adopt a replacement invocation,
+  boot or cgroup; uncertainty revokes the instance. It supplies `observe_owner`
+  only, not the independent fence or dispatch boundary. Tests use **scripted
+  manager/cgroup reads**, including real local-helper and separate-process checks.
+  Accepted manifest/command trust, worker-side bootstrap and runnable service
+  wiring remain due; no units, start permissions or credentials are introduced.
 - `host_recovery/restore.py`: bounded whole-root restoration of original bytes,
   uid/gid/modes, with an explicit accepted list of candidate-only additions.
   Unknown entries, type changes, unsafe links/metadata and tampered baselines
