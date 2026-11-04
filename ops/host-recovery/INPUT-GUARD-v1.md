@@ -115,9 +115,12 @@ semantic-hash command and no schema/rendering claim in this receipt.
 3. The required `snapshot(intent, deadline=...)` captures actual source and frozen
    render bytes through protected descriptors at each barrier. It must not return
    cached proposal bytes as proof of current input. The gate checks the approved
-   request digest before dispatch and recaptures after the helper reply. The test
-   implementation uses descriptor-relative synthetic files; an authenticated
-   operational source/render snapshot implementation remains due.
+   request digest before dispatch and recaptures after the helper reply.
+   `ProtectedInputSnapshot` now supplies reusable private, independently pinned
+   seven-file source/policy capture with retained descriptors and final byte
+   rehashes. See [capture interface and limits](INPUT-SNAPSHOT-v1.md). Trusted
+   actual-input role mapping, authenticated provisioning and real rendering remain
+   due; its tests use synthetic files, not live installation inputs.
 4. Nonblocking full-duplex stdin/stdout avoids request/output pipe deadlocks.
    Request bytes never enter argv, the environment, logs or receipts. Only the
    helper descriptor is passed, environment is minimal and cwd is `/`. Output is

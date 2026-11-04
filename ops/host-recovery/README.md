@@ -221,6 +221,18 @@ as a substitute for the accepted production binaries.
   supervision, actual renderer, schema validation, authenticated approval/pin
   provisioning or recovery/start authority is supplied by the YAML helper.
   See [strict subset, protocol and composition limits](INPUT-GUARD-v1.md).
+- `host_recovery/input_snapshot.py`: reusable protected seven-file capture for the
+  exact-input gate: three before/after source/frozen-render pairs and an independent
+  delta policy, all bound to the original intent and external raw pins. The shared
+  `protected_file.py` reader retains no-follow descriptors through final byte
+  rehash and path/root checks. Every barrier and post-helper check captures fresh
+  bytes under the caller's same installation lock, writer boundary and deadline.
+  Private files, distinct objects, bounded bytes, policy envelope, replacement,
+  storage faults and boundary/clock uncertainty fail closed. Built-helper tests
+  use **synthetic files and scripted host boundaries**, not real rendering, schema
+  validation, authenticated provisioning or installation-role mapping. Reading a
+  frozen file does not prove its renderer/input correspondence. See
+  [capture interface and remaining prerequisites](INPUT-SNAPSHOT-v1.md).
 - `host_recovery/artifacts.py`: protected, original-intent-bound archive and installed
   library availability/dual hashes plus streamed exact ZIP-member correspondence.
   Opened descriptors are retained; both files are rehashed after parsing and path/

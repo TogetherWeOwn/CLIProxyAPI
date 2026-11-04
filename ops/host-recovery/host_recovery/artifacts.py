@@ -15,9 +15,10 @@ import struct
 import zipfile
 
 from .commands import Deadline
-from .durable import Rejected, canonical, digest, signature
+from .durable import Rejected, canonical, digest
 from .installation import DirectoryApproval, open_approved_directory
-from .loading import NAME, metadata, owner, pin, relative
+from .loading import NAME, owner, pin, relative
+from .protected_file import ProtectedFile as _File
 
 MAX_ARCHIVE = 64 * 1024 * 1024
 MAX_LIBRARY = 128 * 1024 * 1024
@@ -51,59 +52,6 @@ class PluginArtifactApproval:
             if type(name) is not str or NAME.fullmatch(name) is None or name in (".", ".."):
                 raise Rejected("artifact-file-name-required")
         relative(self.library_member)
-
-
-class _File:
-    """Borrow a protected root; never reopen the artifact after its hash check."""
-    def __init__(self, root, name, approval, limit, current):
-        self.root, self.name, self.approval = root, name, approval
-        self.current, self.limit, self.fd = current, limit, None
-        try:
-            current()
-            self.fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-                              dir_fd=root.fd)
-            self.info = self._metadata()
-            self.validate()
-        except BaseException:
-            self.close()
-            raise
-
-    def _metadata(self):
-        st = metadata(self.fd, uid=self.approval.uid, gid=self.approval.gid)
-        if (st.st_nlink != 1 or st.st_dev != self.root.approval.device
-                or not 0 < st.st_size <= self.limit):
-            raise Rejected("artifact-regular-bounded-single-link-file-required")
-        return st
-
-    def validate(self):
-        self.current()
-        self.root.validate()
-        if (signature(self._metadata()) != signature(self.info)
-                or signature(os.stat(self.name, dir_fd=self.root.fd, follow_symlinks=False)) != signature(self.info)):
-            raise Rejected("artifact-file-changed")
-        self.current()
-
-    def read_at(self, offset, count):
-        self.current()
-        if not 0 <= offset <= self.info.st_size or not 0 <= count <= self.info.st_size - offset:
-            raise Rejected("artifact-read-range")
-        block = os.pread(self.fd, count, offset)
-        if len(block) != count:
-            raise Rejected("artifact-short-read")
-        self.current()
-        return block
-
-    def checksum(self):
-        result = hashlib.sha256()
-        for offset in range(0, self.info.st_size, CHUNK):
-            result.update(self.read_at(offset, min(CHUNK, self.info.st_size - offset)))
-        self.validate()
-        return result.hexdigest()
-
-    def close(self):
-        if self.fd is not None:
-            os.close(self.fd)
-            self.fd = None
 
 
 class _Reader:
@@ -169,9 +117,11 @@ class PluginArtifactGate:
             with ExitStack() as stack:
                 archive_root = stack.enter_context(open_approved_directory(approval.archive_root))
                 library_root = stack.enter_context(open_approved_directory(approval.library_root))
-                archive = _File(archive_root, approval.archive_name, approval, MAX_ARCHIVE, current)
+                archive = _File(archive_root, approval.archive_name, uid=approval.uid, gid=approval.gid,
+                                limit=MAX_ARCHIVE, current=current)
                 stack.callback(archive.close)
-                library = _File(library_root, approval.library_name, approval, MAX_LIBRARY, current)
+                library = _File(library_root, approval.library_name, uid=approval.uid, gid=approval.gid,
+                                limit=MAX_LIBRARY, current=current)
                 stack.callback(library.close)
                 if (archive.info.st_dev, archive.info.st_ino) == (library.info.st_dev, library.info.st_ino):
                     raise Rejected("artifact-distinct-files-required")
