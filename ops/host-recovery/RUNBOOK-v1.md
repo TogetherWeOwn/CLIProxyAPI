@@ -183,8 +183,14 @@ conservatively from the original arm, not restart detection. Cross-boot, regress
 missing or expired clock evidence remains unresolved and requires a separately
 bounded continuation; no fresh budget is granted. A staged/durable recovery request
 never automatically redispatches after lost reply or process death, even with an
-enqueue acknowledgment. Manager reconciliation of that request is still required.
-Enqueue acknowledgment is not quiescence, restoration or permission to start.
+enqueue acknowledgment. Its explicit observation-only mode now validates the
+saved request and observes a pinned request-digest systemd template instance;
+the first nonempty recovery invocation is durably bound and may not be replaced.
+An absent manager Job or inactive worker stays unverified, never authorizes a
+retry, and cannot clear the retained intent. No systemd start/install operation
+is supplied. Trusted dispatch/manager wiring and executable recovery/outcome
+reconciliation remain required. Enqueue acknowledgment or job observation is not
+quiescence, restoration or permission to start.
 [Restart ownership source](SUPERVISOR-RECONCILIATION-v1.md) uses injected manager and
 complete-fence boundaries; it is not an installed persistent service or executable
 reboot recovery. A reviewed settlement/full-resume/continuation protocol is still

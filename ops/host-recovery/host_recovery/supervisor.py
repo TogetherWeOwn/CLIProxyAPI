@@ -13,6 +13,7 @@ request with an absent/lost reply must be reconciled by the manager, not retried
 """
 import copy
 from contextlib import contextmanager
+import math
 import os
 import stat
 
@@ -20,6 +21,7 @@ from .budget import positive
 from .commands import Deadline
 from .durable import Rejected, canonical, decode, digest, installation_lock, notify, read_file
 from .journal import Journal, identity
+from .jobs import recovery_unit, validate_observation
 from .manager import INVOCATION, UNIT
 
 
@@ -40,7 +42,8 @@ def private_record(fd, name):
 
 
 @contextmanager
-def recovery_owner(path, *, owner, manager, clock, boot_id, persist_alert, transport_alert, fault=None):
+def recovery_owner(path, *, owner, manager, clock, boot_id, persist_alert, transport_alert, fault=None,
+                   observe_existing=False):
     """Hold one installation lock until the caller exits, including after dispatch.
 
     manager.observe_owner must return the actual independently inspected current
@@ -50,12 +53,18 @@ def recovery_owner(path, *, owner, manager, clock, boot_id, persist_alert, trans
     manager.enqueue_recovery must address only the separate pinned recovery unit,
     with request_id as its durable idempotency identity, and bound its local wait
     by deadline. Its returned receipt is enqueue acknowledgment only.
+
+    observe_existing enables only read-only pending-job observation; it can never
+    enqueue, even if the saved request is absent. It is not recovery execution.
     """
     validate_owner(owner)
+    if type(observe_existing) is not bool:
+        raise Rejected("supervisor-observation-mode-required")
     with installation_lock(path, owner) as (fd, bound_owner):
         instance = RecoverySupervisor(fd, owner=bound_owner, manager=manager, clock=clock,
                                       boot_id=boot_id, persist_alert=persist_alert,
-                                      transport_alert=transport_alert, fault=fault)
+                                      transport_alert=transport_alert, fault=fault,
+                                      observe_existing=observe_existing)
         try:
             yield instance
         finally:
@@ -71,8 +80,12 @@ class RecoverySupervisor:
     a dead supervisor; this class deliberately refuses automatic redispatch even
     if the previous enqueue receipt claims success. It never clears the latch.
     """
-    def __init__(self, fd, *, owner, manager, clock, boot_id, persist_alert, transport_alert, fault=None):
+    def __init__(self, fd, *, owner, manager, clock, boot_id, persist_alert, transport_alert, fault=None,
+                 observe_existing=False):
         self.fd, self.owner = fd, copy.deepcopy(owner)
+        self.observe_existing = observe_existing
+        self.pending_request = None
+        self.job = None
         self.manager, self.clock, self.boot_id = manager, clock, boot_id
         self.persist_alert, self.transport_alert = persist_alert, transport_alert
         self.closed = False
@@ -100,7 +113,8 @@ class RecoverySupervisor:
             self.intent_sha256 = digest(canonical(value))
             # Both final and staged records are evidence of a possible enqueue.
             # Neither a terminal receipt nor a new invocation clears that fact.
-            if any(name.startswith(("reconcile-", ".stage-reconcile-")) for name in self.initial_entries):
+            if (not observe_existing
+                    and any(name.startswith(("reconcile-", ".stage-reconcile-")) for name in self.initial_entries)):
                 raise Rejected("supervisor-dispatch-reconciliation-required")
             arm_record = private_record(fd, "arm.json")
             self.arm_sha256 = digest(canonical(arm_record))
@@ -129,8 +143,44 @@ class RecoverySupervisor:
                          "forward_allowed": False, "production_acceptance": False}
             self.plan["request_id"] = digest(canonical(self.plan))
             self.state = "recovery_required"
+            if observe_existing:
+                self.pending_request = self._pending_request()
+                self.pending_sha256 = digest(canonical(self.pending_request))
+                self.state = "recovery_dispatch_pending"
         except Exception as failure:
             self._fail(failure, "supervisor-state-unavailable")
+
+    def _pending_request(self):
+        allowed = {"reconcile-request.json", "reconcile-enqueued.json", "reconcile-observed.json"}
+        names = {name for name in self.initial_entries if name.startswith(("reconcile-", ".stage-reconcile-"))}
+        if "reconcile-request.json" not in names or not names <= allowed:
+            raise Rejected("supervisor-dispatch-reconciliation-required")
+        request = private_record(self.fd, "reconcile-request.json")
+        if set(request) != set(self.plan):
+            raise Rejected("supervisor-pending-request-schema")
+        unsigned = {key: item for key, item in request.items() if key != "request_id"}
+        if request["request_id"] != digest(canonical(unsigned)):
+            raise Rejected("supervisor-pending-request-pin")
+        validate_owner(request["owner"])
+        for key in ("schema", "attempt_id", "intent_sha256", "original_arm", "failure_lower_bound",
+                    "forward_allowed", "production_acceptance"):
+            if canonical({key: request[key]}) != canonical({key: self.plan[key]}):
+                raise Rejected("supervisor-pending-request-mismatch")
+        if any(request["owner"][key] != self.owner[key] for key in
+               ("installation_id", "attempt_id", "unit", "boot_id")):
+            raise Rejected("supervisor-pending-owner-mismatch")
+        elapsed = request["detection_upper_bound_seconds"]
+        if (not positive(request["deadline"]) or request["deadline"] > self.plan["deadline"]
+                or type(elapsed) not in (int, float) or not math.isfinite(elapsed) or elapsed < 0
+                or elapsed > self.plan["detection_upper_bound_seconds"]
+                or self.plan["failure_lower_bound"] + elapsed >= request["deadline"]):
+            raise Rejected("supervisor-pending-request-budget")
+        if "reconcile-enqueued.json" in names:
+            receipt = private_record(self.fd, "reconcile-enqueued.json")
+            expected = {"request_id": request["request_id"], "accepted": True, "separate_recovery_owner": True}
+            if canonical(receipt) != canonical(expected):
+                raise Rejected("supervisor-pending-enqueue-receipt")
+        return request
 
     def _now(self):
         value = self.clock()
@@ -181,7 +231,8 @@ class RecoverySupervisor:
         On restart, the saved request forbids another enqueue. No automatic retry,
         terminal result, restoration permission or service-start grant is issued.
         """
-        if self.closed or self.attempted or self.plan is None or self.error is not None:
+        if (self.closed or self.attempted or self.plan is None or self.error is not None
+                or self.observe_existing):
             raise Rejected("supervisor-reconciliation-not-authorized")
         self.attempted = True
         try:
@@ -214,9 +265,69 @@ class RecoverySupervisor:
             self._fail(failure, "supervisor-dispatch-unconfirmed")
         return self.status()
 
+    def observe_pending(self, *, observer, deadline):
+        """Reconcile one existing dispatch by observation only, never enqueue again.
+
+        A request-digest-named pinned unit identifies the work. Bind the first
+        nonempty manager invocation durably, then refuse any replacement/loss of
+        that invocation. Even a stable inactive result is unverified, not a safe
+        retry boundary or a recovery outcome. Complete start fencing is separate.
+        """
+        if (self.closed or self.attempted or not self.observe_existing
+                or self.pending_request is None or self.error is not None):
+            raise Rejected("supervisor-pending-observation-not-authorized")
+        self.attempted = True
+        try:
+            if not positive(deadline):
+                raise Rejected("supervisor-deadline-required")
+            request = self.pending_request
+            end = min(deadline, request["deadline"])
+
+            def current():
+                self._current(end)
+                if digest(canonical(private_record(self.fd, "reconcile-request.json"))) != self.pending_sha256:
+                    raise Rejected("supervisor-pending-request-changed")
+                # A previously present enqueue receipt may not change in place.
+                if canonical(self._pending_request()) != canonical(request):
+                    raise Rejected("supervisor-pending-request-changed")
+                Deadline(self._now, end).remaining()
+
+            current()
+            value = copy.deepcopy(observer.observe(request["request_id"], deadline=end))
+            validate_observation(value, request["request_id"], self.owner["boot_id"])
+            if (value["unit"] == self.owner["unit"]
+                    or value["invocation_id"] in (self.owner["invocation_id"], request["owner"]["invocation_id"])):
+                raise Rejected("supervisor-separate-recovery-owner-unconfirmed")
+            current()
+            bound = {"schema": "host-recovery-job-binding-v1", "request_id": request["request_id"],
+                     "unit": recovery_unit(request["request_id"]), "boot_id": self.owner["boot_id"],
+                     "invocation_id": value["invocation_id"]}
+            if "reconcile-observed.json" in self.initial_entries:
+                if canonical(private_record(self.fd, "reconcile-observed.json")) != canonical(bound):
+                    raise Rejected("supervisor-recovery-invocation-changed")
+            elif value["invocation_id"]:
+                self.log._write("reconcile-observed.json", bound)
+                self.initial_entries.add("reconcile-observed.json")
+            current()
+            after = copy.deepcopy(observer.observe(request["request_id"], deadline=end))
+            validate_observation(after, request["request_id"], self.owner["boot_id"])
+            if canonical(value) != canonical(after):
+                raise Rejected("supervisor-recovery-job-changed")
+            current()
+            if ("reconcile-observed.json" in self.initial_entries
+                    and canonical(private_record(self.fd, "reconcile-observed.json")) != canonical(bound)):
+                raise Rejected("supervisor-recovery-binding-changed")
+            Deadline(self._now, end).remaining()
+            self.job = copy.deepcopy(value)
+            self.state = "recovery_job_" + value["state"]
+        except Exception as failure:
+            self._fail(failure, "supervisor-job-observation-unconfirmed")
+        return self.status()
+
     def status(self):
         return {"schema": "host-recovery-supervisor-status-v1", "state": self.state,
                 "error": self.error, "owner_closed": self.closed,
                 "forward_allowed": False, "start_permission": False,
                 "recovery_completed": False, "installation_start_fence_proven": False,
-                "production_acceptance": False, "alert": copy.deepcopy(self.alert)}
+                "production_acceptance": False, "alert": copy.deepcopy(self.alert),
+                "job": copy.deepcopy(self.job)}

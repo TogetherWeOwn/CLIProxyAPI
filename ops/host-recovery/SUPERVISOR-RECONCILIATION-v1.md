@@ -47,6 +47,56 @@ The independent alert is attempted even when directory reads or receipt persiste
 fail. Its supplied transport receipt does not imply durable external delivery or
 human acknowledgment; operational sink wiring remains due.
 
+## Existing dispatch: explicit observation-only reconciliation
+
+The default reopen behavior above is unchanged. `recovery_owner` now separately
+accepts explicit `observe_existing=True`; that mode cannot enqueue even when no
+request exists. `observe_pending` makes one bounded pair of read-only observations
+under the installation lock. No retry, job cancellation, worker launch, restore,
+terminal outcome, latch retirement or service-start permission exists here.
+
+The saved restricted request must have its exact digest, original intent/arm,
+installation/attempt/supervisor unit/boot, strict false permission fields and a
+non-extended conservative deadline. Only the supervisor invocation may differ
+across a same-boot restart. Missing requests, staged/unknown reconciliation files,
+changed requests, malformed or conflicting enqueue receipts, changed arm/intent,
+clock discontinuities and expired original/request deadlines fail closed. Any
+supplied caller deadline can only shorten the saved request's deadline.
+
+`jobs.SystemdRecoveryJobs` generates only fixed `systemctl show` argv for
+`cpa-recovery@<request_id>.service`, never a user-supplied unit or arbitrary command.
+The explicit template fragment and complete static-property digests are checked,
+including the reviewed worker command, ownership and non-restarting/non-delegated
+no-capability sandbox. The trusted manifest must authenticate these pins and bind
+the worker command to the request-instance identity; a hash or matching dictionary
+is not authentication. No template is installed and no request-bound dispatcher is
+implemented by this adapter. Existing callback dispatchers must independently use
+this same identity before their results could be integrated with it.
+
+A strict observation reports only `pending`, `running` or `inactive_unverified`.
+A pending numeric manager Job is not running recovery. Job absence, inactive or
+failed state and a cleared invocation cannot distinguish a lost dispatch from a
+job that already ran. A worker exit, including an apparently successful one, does
+not prove baseline restoration or old readiness and is never an outcome oracle.
+
+The first nonempty observed recovery invocation is persisted with the exact
+request/unit/boot binding before observation is acknowledged. It must be distinct
+from the current supervisor invocation. Future observations can reuse that binding
+but cannot rewrite it or adopt a replacement/vanished invocation. The manager,
+complete-fence boundary, request/arm and entry set are rechecked around observation
+and persistence; a changed second observation remains unresolved. Persistence
+faults still attempt independent alert transport. A visible record after an
+uncertain write is no permission or completion receipt.
+
+A separate-process regression reaches the durable observed-invocation binding,
+proves lock exclusion, receives SIGKILL and exits. Reopen can observe the same
+scripted invocation but refuses its replacement; it never dispatches. Another
+test uses actual bounded local subprocess transport to read scripted systemd
+properties. These are process/filesystem/transport component tests, **not real
+systemd template compatibility, daemon fencing or executable recovery evidence**.
+All start/fence-proven/recovery-completed/production-acceptance fields stay false.
+The persistent service/event loop and trusted dispatch/worker handshake remain due.
+
 ## Original-clock accounting
 
 A restart cannot invent the original failure instant. Without a durable, trusted
@@ -82,8 +132,9 @@ failure. No loopback or test-suite runtime becomes production downtime.
 ## Still required before operational use
 
 - Actual persistent manager-owned service/event loop and attested unit/invocation,
-  authenticated narrow dispatch transport, distinct pinned recovery unit and
-  manager job/invocation reconciliation after ambiguous dispatch.
+  authenticated narrow dispatch transport, distinct pinned recovery template and
+  request-instance worker handshake. Read-only job/invocation observation above
+  still needs actual manager compatibility and recovery-outcome reconciliation.
 - Independently enforced complete boot/internal-restart/start/writer fence and
   daemon pending-operation drain. No injected Boolean is its implementation.
 - Coordinator/manager/daemon/restore integration and actual complete semantic

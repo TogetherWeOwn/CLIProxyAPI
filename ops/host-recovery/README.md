@@ -47,6 +47,16 @@ as a substitute for the accepted production binaries.
   systemd recovery unit. No actual persistent service loop, installed fence,
   recovery execution, cross-boot continuation, settlement or start grant exists.
   See [restart ownership and limits](SUPERVISOR-RECONCILIATION-v1.md).
+- `host_recovery/jobs.py` and explicit supervisor observation mode: read-only
+  observation of a pinned `cpa-recovery@<request-digest>.service` instance after
+  ambiguous dispatch. Preserve the original request/arm and bind the first observed
+  recovery invocation durably, then refuse replacement or loss of that identity.
+  Missing jobs and inactive/exited workers remain unverified; no enqueue, retry,
+  restore, terminal settlement or start grant is added. Local helper/systemd output
+  is not authenticated by a matching dictionary; manifest approval, trusted local
+  transport and the independently enforced fence remain external prerequisites.
+  Tests use scripted properties, a real reply helper and process SIGKILL, **not a
+  real manager or daemon**. This does not provide a persistent service/event loop.
 - `host_recovery/restore.py`: bounded whole-root restoration of original bytes,
   uid/gid/modes, with an explicit accepted list of candidate-only additions.
   Unknown entries, type changes, unsafe links/metadata and tampered baselines

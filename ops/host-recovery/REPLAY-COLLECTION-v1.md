@@ -18,8 +18,13 @@ extracted library SHA256
 `bb306f57220b1906713766597b57041b0be68a9db51b63b8c33c45f06827c281`,
 and schema SHA256
 `a7a0a411df5cc4e28d693936f8f2dafd15a5853bc9e6d7c38997af322d60efd7`.
-These are producer-reported integration references, not independently verified
-artifacts, accepted release pins, merged/review approval or a drain boundary.
+These are producer-reported artifact identities, not independently verified
+bytes, accepted release pins or a drain boundary. The subsequent QA handoff reports
+producer PR #6 merged at squash `30f0d6a285e42b98fbbcf5aeeb3549c550bd72b4`,
+matching the reviewed head/tree above. The author package provenance still names
+the reviewed head, not that squash SHA. QA's separate rebuild ZIP has a different
+archive hash despite the same reported library hash; do not substitute archives.
+This merge is reported component approval, not host integration acceptance.
 No corrected package was installed or executed by this checkpoint. Reverify exact
 source/schema/package correspondence during integration; never mix generations
 of chunked artifacts. The historical fixture below is not that build.
@@ -30,8 +35,8 @@ pre/post-build Git status exits before publishing a package. These are reported
 component/packaging fixes, not independent reruns here. The bounded metadata/event
 contract and schema are unchanged; no flush RPC/health attestation was added.
 Version 0.2.4 remains unreleased development output, not a replacement production
-pin. Integration use remains gated on producer review/merge and separate artifact,
-integration and release checks. Surviving a broken pipe never validates evidence.
+pin. Reported producer review/merge does not waive separate artifact, integration
+or release checks. Surviving a broken pipe never validates evidence.
 
 Consequently, none of these establish complete evidence:
 
