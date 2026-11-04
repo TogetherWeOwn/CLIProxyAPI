@@ -176,6 +176,19 @@ as a substitute for the accepted production binaries.
   checks the complete tree. One ownership domain and owner-accessible directories
   per root are supported; unsupported access is refused, never relaxed. This
   does **not** verify image/replay/plugin semantics or stop any writers.
+- `host_recovery/write_set.py`: aggregate-pinned multi-root filesystem recovery
+  using independently approved protected paths and the **same caller-held
+  installation lock**. Every declared baseline/current inventory and the original
+  exact-nine auth selection is checked before the first mutation. All-root final
+  verification preserves unrelated providers, config/Compose bytes and supported
+  metadata and removes only approved additions/staging. A required independently
+  enforced quiescence callback and original phase deadline bracket operations;
+  this is not that fence's implementation. Fresh contexts can reconcile partial
+  restores; failures poison the current context. Filesystem-only receipts grant
+  no service start or semantic oracle. Real multi-root/process/SIGKILL and storage
+  fault tests still use **scripted host/daemon/semantic boundaries**. Authenticated
+  aggregate provisioning, complete semantic guards and actual manager integration
+  remain due. See [multi-root scope and limits](WRITE-SET-v1.md).
 - `host_recovery/coordinator.py`: component forward/recovery ordering, injected
   manager/daemon boundaries, registration-before-start, strict post-check and
   restoration-oracle acknowledgment shapes, original versus recovery errors,

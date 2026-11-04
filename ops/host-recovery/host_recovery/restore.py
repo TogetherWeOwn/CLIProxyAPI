@@ -65,6 +65,21 @@ def validate_plan(tree, blobs, additions):
     return reserved, owner
 
 
+def inspect_restore(root, tree, blobs, additions, *, check=lambda: None):
+    """Validate the complete current inventory without mutating any entry."""
+    reserved, (uid, gid) = validate_plan(tree, blobs, additions)
+    check()
+    current, _ = snapshot(root, uid=uid, gid=gid)
+    allowed = {path: row["kind"] for path, row in tree["entries"].items()}
+    allowed.update(additions)
+    allowed.update(dict.fromkeys(reserved.values(), "file"))
+    for path, row in current["entries"].items():
+        if allowed.get(path) != row["kind"]:
+            raise Rejected("restore-unexpected-entry-or-kind")
+    check()
+    return current
+
+
 def restore_tree(root, tree, blobs, additions, *, fault=None, check=lambda: None):
     """Restore the full accepted root, then independently rescan bytes/metadata.
 
@@ -75,15 +90,8 @@ def restore_tree(root, tree, blobs, additions, *, fault=None, check=lambda: None
     check() supplies accounting at every operation, not a hard I/O timeout.
     """
     reserved, (uid, gid) = validate_plan(tree, blobs, additions)
-    check()
-    current, _ = snapshot(root, uid=uid, gid=gid)
+    current = inspect_restore(root, tree, blobs, additions, check=check)
     expected = tree["entries"]
-    allowed = {path: row["kind"] for path, row in expected.items()}
-    allowed.update(additions)
-    allowed.update(dict.fromkeys(reserved.values(), "file"))
-    for path, row in current["entries"].items():
-        if allowed.get(path) != row["kind"]:
-            raise Rejected("restore-unexpected-entry-or-kind")
     # Verify the complete current inventory before the first mutation. A changed
     # type, unsafe metadata or unknown entry must not cause partial cleanup.
     for path in sorted(set(current["entries"]) - set(expected), key=lambda p: (-p.count("/"), p)):

@@ -98,6 +98,8 @@ class _Directory:
         return self.chain[-1][1]
 
     def validate(self):
+        if not self.chain:
+            raise Rejected("installation-directory-closed")
         for index, (name, fd, expected) in enumerate(self.chain):
             if protected(fd, self.approval.uid) != expected:
                 raise Rejected("installation-directory-changed")
@@ -110,6 +112,23 @@ class _Directory:
         while self.chain:
             _, fd, _ = self.chain.pop()
             os.close(fd)
+
+
+@contextmanager
+def open_approved_directory(approval):
+    """Retain a protected path identity without acquiring a second lock.
+
+    The approval and writer exclusion come from the caller's trusted boundary.
+    Opening a directory is not permission to mutate it or start a service.
+    """
+    if not isinstance(approval, DirectoryApproval):
+        raise Rejected("installation-directory-approval-required")
+    handle = _Directory(approval)
+    try:
+        yield handle
+        handle.validate()
+    finally:
+        handle.close()
 
 
 class InstallationHandles:
