@@ -106,10 +106,27 @@ as a substitute for the accepted production binaries.
   match the client's independent observations. A replacement supervisor, changed
   worker, lost reply or expired original reserve refuses without retry. **This
   acquires identity only, not restoration/start permission.** Package/manifest
-  authentication and restricted bootstrap loading, persistent service wiring,
+  approval and trusted root-handle acquisition, persistent service wiring,
   complete host fence and recovery execution remain due. Real local IPC tests
   still use **scripted manager/cgroup/fence boundaries**, not installed-systemd
   or daemon recovery evidence.
+- `host_recovery/loading.py`: read-only installed-content and original-request
+  loaders, starting from **independently approved pins and trusted, already-open
+  root descriptors**. An adjacent index or self-consistent journal cannot supply
+  approval. Exact bounded no-follow content inventory, numeric uid/gid, protected
+  modes, source revision, per-file hashes and final identity rewalk produce only
+  immutable captured bytes; files are never imported/executed or reopened for
+  execution. The separate journal reader binds approved intent/package/manifest/
+  baseline/policy/attempt pins to the actual original arm and digest-named request,
+  current supervisor owner and saved same-boot deadline. Staging ambiguity and
+  changed/missing/private-record failures refuse without clearing the latch.
+  `SystemdWorkerBootstrap.from_journal` passes these loaded inputs into the existing
+  one-shot identity client; all live manager/peer checks still apply. **This is not
+  archive attestation, approval discovery/signature verification, trusted handle
+  acquisition, a lock owner, a baseline-content oracle or an installed service.**
+  The caller must hold the installation lock and exclude cooperating writers.
+  Local reads cannot repair uninterruptible storage or provide a hard-real-time
+  bound. No restoration/start permission is added. See [loading contract](LOADING-v1.md).
 - `host_recovery/restore.py`: bounded whole-root restoration of original bytes,
   uid/gid/modes, with an explicit accepted list of candidate-only additions.
   Unknown entries, type changes, unsafe links/metadata and tampered baselines

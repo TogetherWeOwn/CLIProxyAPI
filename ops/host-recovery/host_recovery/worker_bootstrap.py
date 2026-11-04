@@ -1,9 +1,10 @@
 """Manager-bound worker claim acquisition, not restoration or service startup.
 
-The installed package must supply an authenticated request, intent pin and unit
-bindings through a restricted boundary. This module does not load/authenticate
-that package or read arbitrary journal paths. A self-consistent digest is not an
-approval. Manager-command and kernel reads are explicit trusted dependencies.
+The installed package must supply independently approved pins and unit bindings
+through a restricted boundary. The optional journal factory reads original inputs
+from a trusted, already-open locked root; it cannot authenticate its own code or
+discover approval in that directory. A self-consistent digest is not an approval.
+Manager-command and kernel reads are explicit trusted dependencies.
 """
 import copy
 import os
@@ -16,6 +17,7 @@ from .durable import Rejected, canonical
 from .inventory import HASH
 from .jobs import RecoveryJobBinding, SystemdRecoveryJobs, process_cgroup
 from .journal import identity
+from .loading import load_recovery
 from .manager import fragment_hash
 from .worker import WorkerClient
 
@@ -49,6 +51,24 @@ class SystemdWorkerBootstrap:
             read_process_cgroup=read_process_cgroup)
         self.attempted = False
         self.worker, self.discovered, self.end = None, None, None
+
+    @classmethod
+    def from_journal(cls, fd, *, approval, supervisor_owner, systemctl, commands,
+                     supervisor_binding, worker_binding, clock=time.monotonic, boot_id=kernel_boot_id,
+                     read_fragment_hash=fragment_hash, read_process_cgroup=process_cgroup):
+        """Load original inputs through the retained installation-owned handle.
+
+        Approval, root-handle acquisition and lock exclusion remain the caller's
+        trusted boundary. No index discovered beside these records is authority.
+        Manager/peer revalidation still runs at claim time; loading grants nothing.
+        """
+        inputs = load_recovery(fd, approval=approval, binding=worker_binding,
+                               supervisor_owner=supervisor_owner, boot_id=boot_id(), now=clock())
+        return cls(systemctl=systemctl, commands=commands, supervisor_binding=supervisor_binding,
+                   worker_binding=worker_binding, request=inputs.request,
+                   intent_sha256=approval.intent_sha256, installation_id=approval.installation_id,
+                   attempt_id=approval.attempt_id, clock=clock, boot_id=boot_id,
+                   read_fragment_hash=read_fragment_hash, read_process_cgroup=read_process_cgroup)
 
     def _request(self):
         boot = self.boot_id()
