@@ -165,6 +165,70 @@ The archive hash remains separate from the content-index digest. Failure leaves
 original records/latches untouched; the outer owner must attempt its independent
 alert path, not log restricted exception/path text or treat closure as recovery.
 
+## Pinned launch configuration and read-only status
+
+`launch.load_launch` obtains the existing typed approvals from an explicit
+`host-recovery-launch-v1` JSON file. Its exact top-level fields are `schema`,
+`installation`, `content`, `recovery`, `supervisor`, `job` and `systemctl`. Each
+object has exactly the corresponding approval/binding dataclass fields; the
+installation's two directory objects retain all external path/device/inode/owner/
+mode pins. Numeric owners and installation identities must agree across objects.
+`systemctl` is an explicit canonical absolute executable path. It is a trusted
+helper input, not a shell command or a path discovered from a worker/environment.
+
+The caller must supply the approval file's **raw SHA256 digest and numeric UID/GID
+independently**, from a reviewed trusted launch boundary. The file never supplies
+its own digest or configuration owner. Unknown/missing fields, duplicate keys,
+nonfinite values and malformed nested approval types refuse. The reader opens
+protected no-follow ancestry, requires a single-link regular file of at most
+64 KiB with exact supplied numeric ownership, no xattrs/ACLs, and mode `0400`,
+`0444`, `0600` or `0644`. Root or the explicitly supplied owner must own every
+ancestor; no group/other write or special mode bits are accepted. File identity
+and bytes are reread, and ancestry is revalidated before returning the approval.
+Observed parent inodes establish only read continuity, **not approval**. Root-level
+approval files are unsupported. No file/permission/record is created or changed.
+
+**This is integrity-pinned configuration loading, not authenticated provisioning.**
+An attacker-supplied file plus an attacker-supplied digest is not an approved
+launch. The installer/manager must still provision and authenticate the launch
+arguments, source/interpreter/helper, ownership, inode pins and artifact-to-index
+correspondence through its reviewed boundary. This code does not mint keys,
+install units, authorize privilege, or make a mutable helper executable trusted.
+
+`launch.inspect_status` wires the configuration into the real self-identity
+bootstrap and both existing loaders under the original installation-directory
+lock. It verifies the **calling process as the pinned supervisor MainPID**, captures
+content/original intent/arm/request, reobserves the same live manager identity,
+and reloads both sources before returning a fixed-shape secret-free status.
+Context-exit ancestry validation must succeed before any result is published.
+All manager queries share one explicit caller monotonic deadline; final queries
+and readbacks also obey the original request's possibly shorter deadline. No new
+reserve is created after expiry, reboot, lost request or lost manager identity.
+Local filesystem reads still cannot interrupt wedged kernel I/O.
+
+`status.py` is the corresponding Python-isolated entrypoint, requiring all of
+`--approval`, `--sha256`, `--uid`, `--gid` and an absolute local monotonic
+`--deadline`. It has **no live defaults**. It is for a separately reviewed
+manager-launch boundary, not a shell client attaching to an existing supervisor;
+that supervisor would already hold the lock. It is not a persistent service or
+an installed-unit template, and this document is not an installation instruction.
+Unknown/invalid arguments exit 2 with a fixed error; all runtime refusals exit 1
+without a status record or restricted path/exception text. Exit 0 means only the
+read-only `inputs_verified_only` result was emitted. Output contains no paths,
+unit argv, config/auth contents or raw manager output. It explicitly reports:
+
+- `complete_fence_proven: false`
+- `recovery_execution_allowed: false`
+- `start_allowed: false`
+- `terminal_outcome_verified: false`
+- `production_acceptance: false`
+
+No dispatch, stop, restore, claim, terminal settlement or start path exists in
+this entrypoint. It cannot attest the full journal outcome, baseline bytes,
+archive, asynchronous replay drain or service availability. It does not replace
+the independent operational alert route, which remains unwired. A successful
+local status is never recovery/alert/downtime acceptance.
+
 ## Verification and remaining wiring
 
 Synthetic owned-tree tests exercise real filesystem reads, exact inventory and

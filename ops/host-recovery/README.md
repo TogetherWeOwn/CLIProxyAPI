@@ -140,6 +140,21 @@ as a substitute for the accepted production binaries.
   permission**. Real filesystem/process/SIGKILL/lock tests remain component
   evidence, not installed-systemd/daemon recovery proof. See the
   [acquisition boundary](LOADING-v1.md#protected-installation-handle-acquisition).
+- `host_recovery/launch.py` and `status.py`: exact externally digest-pinned launch
+  configuration, protected no-follow approval-file reads and a bounded read-only
+  calling-supervisor status entrypoint. It composes manager self-identity with the
+  existing locked content/original-request loaders and rechecks both after manager
+  reobservation. Unknown/mixed fields, owner/installation mismatch, changed files,
+  unsafe ancestry, lost identity and expired original deadlines refuse. Output is
+  secret-free `inputs_verified_only`; complete-fence, execution, start, terminal
+  outcome and production-acceptance flags stay **false**. CLI refusals never echo
+  restricted paths or exception text. The external launch digest is an integrity
+  anchor, **not proof of who approved it**; authenticated provisioning, trusted
+  interpreter/helper/launch, persistent service and independent alert wiring remain
+  due. This process must itself be the pinned MainPID, not an attaching client or
+  second lock owner. Tests use **scripted manager/kernel observations** and real
+  owned files/locks plus CLI failure subprocesses, not installed-systemd recovery.
+  See [the launch/status contract](LOADING-v1.md#pinned-launch-configuration-and-read-only-status).
 - `host_recovery/restore.py`: bounded whole-root restoration of original bytes,
   uid/gid/modes, with an explicit accepted list of candidate-only additions.
   Unknown entries, type changes, unsafe links/metadata and tampered baselines
