@@ -258,6 +258,17 @@ use scripted manager/cgroup/fence observations, not installed-systemd recovery.
 Trusted provisioning, persistent service/worker, complete host fence, operational
 alerts and recovery outcome integration remain due; this is not an install command.
 
+The optional [worker execution composition](WORKER-EXECUTION-v1.md) now reuses the
+coordinator's recovery ordering under the same original claim/result connection.
+It requires **separate authenticated execution approval**, not a claim-derived
+grant, and live peer/phase rechecks at internal mutation/start barriers. The worker
+writes private request/intent/claim-bound evidence, never the supervisor journal or
+a settlement record. Existing or uncertain evidence is retained without retry.
+Actual subprocess/file-restoration/SIGKILL/storage-fault tests still use scripted
+manager/fence/daemon/oracle boundaries. Runnable persistent service entrypoints,
+complete fencing and operational authorization/oracles remain unfinished; do not
+install this development composition or treat a worker report as recovery acceptance.
+
 Tree restoration only operates after externally proved quiescence. Pre-admission
 must reserve its deterministic staging paths in every root's accepted write set,
 and list every candidate-only path permitted for removal. It independently rescans

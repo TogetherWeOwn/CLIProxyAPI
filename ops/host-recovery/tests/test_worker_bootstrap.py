@@ -109,6 +109,27 @@ class WorkerBootstrapTests(unittest.TestCase):
         with self.assertRaises(durable.Rejected):
             self.claim()
 
+    def test_recovery_provider_phase_queries_shorten_original_deadline_without_renewal(self):
+        passed = []
+        def client(path, **kw):
+            def claim(*, deadline, recovery_provider):
+                self.assertEqual(deadline, 1100.)
+                peer = {"pid": kw["supervisor_pid"], "uid": kw["supervisor_uid"], "gid": os.getegid()}
+                observed = kw["verify_identity"](peer=peer, peer_alive=lambda: True, deadline=1075.)
+                with self.assertRaises(durable.Rejected):
+                    kw["verify_identity"](peer=peer, peer_alive=lambda: True, deadline=1101.)
+                passed.append(recovery_provider)
+                return {"worker": observed}
+            return SimpleNamespace(claim=claim, result_receipt={"observed": True})
+        provider = lambda *a, **kw: None
+        with patch.object(worker_bootstrap, "WorkerClient", side_effect=client):
+            self.engine.claim("/synthetic/worker.sock", deadline=1100., recovery_provider=provider)
+        self.assertEqual(passed, [provider])
+        self.assertIn(1075., [deadline for _, deadline in self.calls])
+        self.assertTrue(all(deadline <= 1100. for _, deadline in self.calls))
+        self.assertEqual(self.engine.end, 1100.)
+        self.assertEqual(self.engine.result_receipt, {"observed": True})
+
     def test_caller_or_environment_cannot_replace_request_owner(self):
         with patch.dict(os.environ, {"INVOCATION_ID": "forged", "MAINPID": "1", "BOOT_ID": "forged"}):
             self.claim()

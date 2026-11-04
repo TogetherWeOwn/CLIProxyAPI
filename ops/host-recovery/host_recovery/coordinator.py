@@ -26,6 +26,24 @@ def validate_baseline_receipt(intent, receipt):
         raise Rejected("baseline-start-oracle-incomplete")
 
 
+def recover_baseline(call, intent):
+    """Shared stop/restore/verify/start ordering; call enforces each live lease.
+
+    This sequence grants no authority. The caller must authenticate the recovery
+    boundary independently and supply inclusive, non-renewing phase deadlines.
+    Journal terminal persistence remains with the installation-lock owner.
+    """
+    AttemptCoordinator._confirmed(call("detection", "fence", intent))
+    AttemptCoordinator._confirmed(call("quiescence", "quiesce", intent))
+    AttemptCoordinator._confirmed(call("restore", "validate_recovery", intent))
+    AttemptCoordinator._confirmed(call("restore", "restore_complete", intent))
+    receipt = call("verification-start", "verify_baseline_stopped", intent)
+    validate_baseline_receipt(intent, receipt)
+    AttemptCoordinator._confirmed(call("verification-start", "start_old", intent, receipt))
+    AttemptCoordinator._confirmed(call("verification-start", "old_ready", intent))
+    return receipt
+
+
 class AmbiguousCreate(Exception):
     """Create may have succeeded; reconcile its preassigned ownership identity."""
 
@@ -256,14 +274,8 @@ class AttemptCoordinator:
                         basis = "forward_boundary_entry_lower_bound"
                 self.meter.trigger_recovery(failure_at)
                 self.meter.events[-1]["failure_time_basis"] = basis
-            self._confirmed(self._call("recovery", "detection", "fence", intent))
-            self._confirmed(self._call("recovery", "quiescence", "quiesce", intent))
-            self._confirmed(self._call("recovery", "restore", "validate_recovery", intent))
-            self._confirmed(self._call("recovery", "restore", "restore_complete", intent))
-            receipt = self._call("recovery", "verification-start", "verify_baseline_stopped", intent)
-            validate_baseline_receipt(intent, receipt)
-            self._confirmed(self._call("recovery", "verification-start", "start_old", intent, receipt))
-            self._confirmed(self._call("recovery", "verification-start", "old_ready", intent))
+            receipt = recover_baseline(lambda phase, method, *args:
+                self._call("recovery", phase, method, *args), intent)
             self.active_phase = "persistence"
             deadline = self.meter.phase_deadline("recovery", "persistence")
             self._resume_current()

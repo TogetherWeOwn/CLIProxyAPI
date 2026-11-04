@@ -97,7 +97,7 @@ class SystemdWorkerBootstrap:
         return row
 
     def _verify_peer(self, *, peer, peer_alive, deadline):
-        if deadline != self.end or peer_alive() is not True:
+        if deadline > self.end or peer_alive() is not True:
             raise Rejected("worker-bootstrap-peer-unconfirmed")
         Deadline(self.clock, deadline).remaining()
         boot = self._request()
@@ -115,8 +115,10 @@ class SystemdWorkerBootstrap:
         Deadline(self.clock, deadline).remaining()
         return copy.deepcopy(self.worker)
 
-    def claim(self, path, *, deadline, result_provider=None):
-        if result_provider is not None and not callable(result_provider):
+    def claim(self, path, *, deadline, result_provider=None, recovery_provider=None):
+        if (result_provider is not None and not callable(result_provider)
+                or recovery_provider is not None and not callable(recovery_provider)
+                or result_provider is not None and recovery_provider is not None):
             raise Rejected("worker-result-provider-required")
         if self.attempted:
             raise Rejected("worker-bootstrap-exhausted")
@@ -133,8 +135,10 @@ class SystemdWorkerBootstrap:
         client = WorkerClient(path, supervisor_uid=self.discovered["uid"], supervisor_pid=self.discovered["pid"],
             supervisor_owner=self.request["owner"], request_id=self.binding.request_id,
             intent_sha256=self.intent_sha256, clock=self.clock, verify_identity=self._verify_peer)
-        if result_provider is None:
+        if result_provider is None and recovery_provider is None:
             return client.claim(deadline=self.end)
-        result = client.claim(deadline=self.end, result_provider=result_provider)
+        kwargs = ({"recovery_provider": recovery_provider} if recovery_provider is not None
+                  else {"result_provider": result_provider})
+        result = client.claim(deadline=self.end, **kwargs)
         self.result_receipt = copy.deepcopy(client.result_receipt)
         return result

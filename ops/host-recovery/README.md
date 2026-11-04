@@ -8,6 +8,18 @@ as a substitute for the accepted production binaries.
 
 ## Implemented so far
 
+- `host_recovery/worker_recovery.py`: opt-in original-request worker execution
+  through the existing manager-bound claim/result connection, with independent
+  recovery authorization and a per-operation revocable live peer/phase check.
+  The worker and coordinator share the stop/restore/verify/start ordering; actual
+  synthetic files are restored under the supervisor's retained installation lock.
+  Private once-only evidence binds request/intent/claim and is persisted before
+  reporting. Uncertainty, expired/reused phase leases, peer/manager drift, SIGKILL
+  and disk/alert failures cannot settle the installation. This does **not** supply
+  operational authorization/fencing/oracles or runnable persistent service
+  entrypoints. Actual IPC/files/lock tests use **scripted host boundaries**;
+  claims still grant no restoration/start permission and no journal terminal is
+  written by the worker. See [worker execution and limits](WORKER-EXECUTION-v1.md).
 - `host_recovery/availability.py`: durable raw point observations with explicit
   monotonic start/end, boot identity, source/target pins, strict true/false/unknown
   results, ordered sequence and final hash receipt. Ambiguous persistence or clock

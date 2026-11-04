@@ -225,15 +225,21 @@ class WorkerClient:
         Deadline(self.clock, deadline).remaining()
         return copy.deepcopy(result)
 
-    def claim(self, *, deadline, result_provider=None):
+    def claim(self, *, deadline, result_provider=None, recovery_provider=None):
         """Optionally report evidence on the same live connection after identity.
 
         result_provider(claim, deadline=...) returns only outcome/evidence_sha256.
-        It must obtain recovery authority separately: the claim grants none. No
+        recovery_provider additionally receives check(deadline=...), valid only
+        during its call, for live manager/peer revalidation at execution barriers.
+        It requires an independent identity verifier and recovery authorization;
+        the claim and check callback grant neither restoration nor starts. No
         retry occurs after a provider failure, lost report or ambiguous receipt.
         The original inclusive deadline covers the entire exchange and provider.
         """
-        if result_provider is not None and not callable(result_provider):
+        if (result_provider is not None and not callable(result_provider)
+                or recovery_provider is not None and not callable(recovery_provider)
+                or result_provider is not None and recovery_provider is not None
+                or recovery_provider is not None and self.verify_identity is None):
             raise Rejected("worker-result-provider-required")
         if self.attempted:
             raise Rejected("worker-client-exhausted")
@@ -271,8 +277,30 @@ class WorkerClient:
                         if canonical(after) != canonical(observed) or canonical(value["worker"]) != canonical(observed):
                             raise Rejected("worker-manager-claim-mismatch")
                     timer.remaining()
-                    if result_provider is not None:
-                        supplied = result_provider(copy.deepcopy(value), deadline=deadline)
+                    if result_provider is not None or recovery_provider is not None:
+                        if recovery_provider is None:
+                            supplied = result_provider(copy.deepcopy(value), deadline=deadline)
+                        else:
+                            active, revoked = True, False
+                            def check(*, deadline):
+                                nonlocal revoked
+                                try:
+                                    if not active or revoked or deadline > timer.deadline:
+                                        raise Rejected("worker-recovery-lease-unavailable")
+                                    Deadline(self.clock, deadline).remaining()
+                                    if canonical(self._verify_identity(session, deadline)) != canonical(observed):
+                                        raise Rejected("worker-manager-claim-mismatch")
+                                    Deadline(self.clock, deadline).remaining()
+                                    return True
+                                except BaseException:
+                                    revoked = True
+                                    raise
+                            try:
+                                check(deadline=deadline)
+                                supplied = recovery_provider(copy.deepcopy(value), deadline=deadline, check=check)
+                                check(deadline=deadline)
+                            finally:
+                                active = False
                         if type(supplied) is not dict or set(supplied) != {"outcome", "evidence_sha256"}:
                             raise Rejected("worker-result-provider-schema")
                         result = {"schema": "host-recovery-worker-result-v1", "request_id": self.request_id,
