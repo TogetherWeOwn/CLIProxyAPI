@@ -8,6 +8,16 @@ as a substitute for the accepted production binaries.
 
 ## Implemented so far
 
+- `host_recovery/deployment.py`: explicit intent/image/projection-pinned read-only
+  old-container command, full Config/HostConfig and effective-mount correspondence.
+  Repeated stopped/deployment observations follow fence revalidation; no raw
+  environment/mount values leave the reader. An opt-in boundary supplements the
+  existing baseline oracle before one-shot old-start delegation and never supplies
+  missing oracle facts. Tests use scripted daemon/fence/readiness observations
+  and a real synthetic reply helper, **not Docker/systemd**. Complete host fencing,
+  mounted-byte/runtime-plugin/readiness verification and authenticated provisioning
+  remain due; success has `start_authorized: false`. See
+  [deployment guard and limits](DEPLOYMENT-GUARD-v1.md).
 - `host_recovery/durable.py`: no-follow fd-relative filesystem access, one
   installation-directory lock, bounded regular-file reads, restricted atomic
   writes with file fsync → rename → directory fsync → readback acknowledgment.
