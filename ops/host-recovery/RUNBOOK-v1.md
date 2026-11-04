@@ -94,7 +94,13 @@ Every accepted post-check remains mandatory, with source-bound secret-free recei
   to full container/candidate/plugin identities. Complete stdout and every declared
   file-source coverage with cursors/rotation, raw hashes and strict schema. No
   guessed container hostname/short ID, log relabeling, swallowed source error,
-  timestamp-window grep or `dropped_foreign=01` false green.
+  timestamp-window grep or `dropped_foreign=01` false green. An asynchronous
+  producer additionally needs a genuine source-reviewed completeness/drain boundary.
+  HTTP completion, EOF, silence, contiguous event IDs or absence of a best-effort
+  failure marker do not prove its admitted queue or all request/retry decisions
+  drained. Killing the producer can discard queued evidence, not prove completion.
+  Missing boundaries, timeout, overflow, any producer failure marker or unproven
+  source coverage fail closed; do not clear this post-check with a prefix report.
 - Subscribed-account bare Wonder tool 200; unsubscribed auths stay disabled;
   seven/two aggregate flags and unchanged unrelated credential bytes/owners/modes.
 - Stable API-key fingerprints and plugin-route quota; other-provider Claude and
@@ -198,6 +204,15 @@ exposed by these adapters. Do not give this partial package general Docker/root
 access, supply a guessed fence acknowledgment or use it as a runnable recovery
 supervisor. The persistent owner, boot/start interlock, worker dispatch and full
 oracle integration remain implementation work.
+
+The raw-file capture/parser source now retains restricted prefix artifacts and
+checks exact producer records, correlation, mirrored conflicts and source offsets.
+An unchanged actual prior producer-output fixture is used only for component
+checks, with its unstamped identity retained. Every report explicitly refuses
+complete collection/drain/replay acceptance. There is no daemon stream opener,
+real probe/container binding, mixed-log demultiplexer or accepting verifier. Read
+[the collection status](REPLAY-COLLECTION-v1.md) before interpreting any report;
+no injected "complete" flag or quiet-interval workaround is supported.
 
 ## Gates still closed
 

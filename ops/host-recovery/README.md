@@ -85,6 +85,21 @@ adapters with the coordinator remain missing. An empty cgroup, `restart=no`, sta
 inspection snapshots or a killed helper cannot substitute for those prerequisites.
 No broad Docker/root permission is provided or requested by this source.
 
+- `host_recovery/collection.py`: explicit no-follow regular-file handles and
+  restricted durable full-prefix snapshots with observed identity, offsets,
+  raw hashes and genuine empty-source accounting. Observed rotation/truncation/
+  rewrite, read failure and persistence uncertainty poison the capture. This is
+  **not** a daemon/stdout opener, rotation follower or container provenance proof.
+- `host_recovery/replay.py`: bounded strict startup/decision NDJSON inspection,
+  byte-identical mirror deduplication, exact request/model/turn matching and
+  correlated foreign-drop/conflicting-duplicate negatives. Any producer failure
+  marker, partial/unknown record, gap or malformed integer rejects. Spool-receipt
+  readback wires actual raw hashes/offsets/source-set checks to this parser.
+  **Every report remains prefix-only and non-accepting.** HTTP completion, EOF,
+  silence, contiguous sequences and no failure marker cannot establish an
+  asynchronous producer's complete drain. There is no accepting mode, flush
+  implementation, actual HTTP probe or real container/source mapping here.
+  See [collection status and immutable fixture provenance](REPLAY-COLLECTION-v1.md).
 - Diagnostic HTTP ingress → executor → plugin metadata bridge, using the
   existing metadata ABI without a provider-kit change. See the carrier below.
 
@@ -119,10 +134,12 @@ Requested model stays in existing `requested_model` metadata; resolved model sta
 in the executor request's model field.
 
 Ingress/handler/plugin-seam tests are component evidence, not actual Meta replay
-decision evidence. The canonical Meta producer, producer startup markers,
-container/source-handle provenance, collector, two-turn probe and verifier still
-have to be integrated. No timestamp grep or diagnostic/container label substitutes
-for those missing links.
+decision evidence. A retained actual producer-output fixture now exercises the
+prefix parser, without changing its unstamped identity or claiming current
+producer execution. The canonical producer, startup/container/source-handle
+binding, daemon collector, asynchronous completeness boundary, two-turn HTTP
+probe and accepting verifier still have to be integrated. No timestamp grep,
+quiet prefix or diagnostic/container label substitutes for those missing links.
 
 ## Safe component verification
 
@@ -166,8 +183,11 @@ human acknowledgment. It is **not yet an alert listener or preflight handshake**
    authenticated approval, interpolation/tool identity, artifact dual hashes and
    preflight/stopped revalidation. The historical r3 comparator is not that
    integration and is not imported as if it were.
-5. Source-bound probe/producer/collector/verifier with cursors/rotation/raw hashes,
-   correlated drop/conflicting duplicate negatives and both tool-linked turns.
+5. Integrate the prefix-capture/parser components with real source-bound HTTP
+   probe/producer/RPC/container evidence, all required sources, cursors/rotation,
+   mixed-log framing and both tool-linked turns. Establish a genuine source-reviewed
+   asynchronous completeness boundary; prefix inspection cannot issue acceptance.
+   Recheck the corrected producer's immutable source/schema/artifact delivery.
 6. Actual pinned package disposable systemd/cgroup/daemon matrix, measured phase
    caps/safety margins, independent restoration/start oracle and raw availability
    samples/censoring. No systemd/daemon capability is asserted by a component test.
