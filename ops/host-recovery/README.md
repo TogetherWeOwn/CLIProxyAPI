@@ -86,6 +86,20 @@ adapters with the coordinator remain missing. An empty cgroup, `restart=no`, sta
 inspection snapshots or a killed helper cannot substitute for those prerequisites.
 No broad Docker/root permission is provided or requested by this source.
 
+- `host_recovery/fence.py`: recovery-only deny-first Docker authorization decision
+  engine. Starts/create/restart/update/exec and unknown routes are always denied.
+  Only an explicitly pinned authenticated supervisor principal can inspect bound
+  full-ID objects or perform one prepared exact kill. Durable pending records
+  precede permission; a response alone never clears pending work, and a separate
+  stopped-object observation plus durable receipt is required. Sealing revokes
+  new/unconsumed mutations without discarding pending work. Faults, unexpected
+  receipt files, restart or clock discontinuity close admission. **This is not an
+  installed plugin, trusted transport or supervisor integration.** Docker-internal
+  restart/boot paths are not proved fenced. No original/candidate start grant or
+  restart reconciliation is implemented. All complete-fence/acceptance status
+  fields remain false. See [the exact subset and prerequisites](DAEMON-AUTHORIZATION-v1.md).
+  Synthetic protocol callbacks are not real-daemon compatibility/drain evidence.
+
 - `host_recovery/collection.py`: explicit no-follow regular-file handles and
   restricted durable full-prefix snapshots with observed identity, offsets,
   raw hashes and genuine empty-source accounting. Observed rotation/truncation/

@@ -205,6 +205,23 @@ access, supply a guessed fence acknowledgment or use it as a runnable recovery
 supervisor. The persistent owner, boot/start interlock, worker dispatch and full
 oracle integration remain implementation work.
 
+The recovery-only daemon authorization decision engine now denies all starts and
+unknown operations and models one prepared, pinned full-ID kill at a time. It
+persists pending state before allowing the exact request, records daemon return
+without claiming a stop, and requires separate strict stopped-object observation
+and durable readback before local drain. Sealing revokes further kills/plans but
+cannot discard a pending operation. Reopen, receipt loss, clock/boot discontinuity
+and persistence faults retain a reconciliation hold. No state deletion or timeout
+waiver is a supported way out.
+
+This engine has **no installed plugin/transport, authenticated broker, start grant,
+full supervisor wiring or real-daemon evidence**. Docker-internal restart/restore
+paths are not proved to traverse HTTP authorization. Its local `pending_drained`
+flag does not establish installation-wide quiescence and cannot authorize file
+restoration or old start. The full host/boot fence remains missing. Read
+[the authorization scope and prerequisites](DAEMON-AUTHORIZATION-v1.md); do not
+install this deny-first subset on a live/shared daemon to fill the test gap.
+
 The raw-file capture/parser source now retains restricted prefix artifacts and
 checks exact producer records, correlation, mirrored conflicts and source offsets.
 An unchanged actual prior producer-output fixture is used only for component
