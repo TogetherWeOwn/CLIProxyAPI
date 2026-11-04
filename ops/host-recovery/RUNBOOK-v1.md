@@ -211,6 +211,22 @@ complete-fence boundaries; it is not an installed persistent service or executab
 reboot recovery. A reviewed settlement/full-resume/continuation protocol is still
 required.
 
+The request-instance worker identity source now uses a private one-shot
+Unix-seqpacket exchange with kernel connection/message credentials and Linux 6.5+
+connection-bound pidfd, plus pinned manager MainPID/invocation/cgroup observations.
+It retains the installation lock and durably records a once-only worker claim
+before reply. **That claim grants neither restoration nor service startup.** Lost
+reply/process death, changed identity or claim persistence uncertainty cannot be
+retried or cleared by deleting state. The worker still needs trusted manager
+bootstrap of supervisor PID/owner/request/intent; no environment assertion or
+socket reply can supply that authority. Service wiring, the complete fence and
+recovery execution/oracle remain missing. Real IPC/SIGKILL tests use scripted
+manager/fence/cgroup replies, not installed units or daemon recovery. Unsupported
+kernels refuse rather than falling back to a reusable numeric PID.
+Supervisor alert fixed codes now agree with the local transport schema; the real
+IPC regression proves volatile admission despite failed receipt persistence,
+not external notification or operational admission readiness.
+
 Tree restoration only operates after externally proved quiescence. Pre-admission
 must reserve its deterministic staging paths in every root's accepted write set,
 and list every candidate-only path permitted for removal. It independently rescans

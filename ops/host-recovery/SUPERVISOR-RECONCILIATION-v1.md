@@ -96,7 +96,8 @@ test uses actual bounded local subprocess transport to read scripted systemd
 properties. These are process/filesystem/transport component tests, **not real
 systemd template compatibility, daemon fencing or executable recovery evidence**.
 All start/fence-proven/recovery-completed/production-acceptance fields stay false.
-The persistent service/event loop and trusted dispatch/worker handshake remain due.
+The persistent service/event loop and trusted dispatch/worker wiring remain due;
+the separate identity-handshake source below does not install them.
 
 ## Lock-retaining observation loop core
 
@@ -207,6 +208,67 @@ telemetry changes and command/sandbox changes; **real installed-version validati
 is still due in an approved disposable environment**. Pins over the old raw display
 do not match this versioned projection; no operational pin has been replaced.
 
+## Request-instance worker identity handshake
+
+`worker.WorkerListener` binds one explicit private Unix-seqpacket endpoint without
+unlinking/replacing prior state. It serves one bounded connection while the live
+supervisor retains the installation flock. `SO_PEERCRED` and per-message
+`SCM_CREDENTIALS` must match the same non-root peer; descriptor/connection transfer
+to a descendant therefore cannot impersonate the connecting MainPID. Ancillary
+file descriptors are closed and rejected. Linux 6.5+ `SO_PEERPIDFD` (socket option
+77) obtains a handle to the **connecting process**, not whichever process currently
+occupies its numeric PID. Unsupported kernels refuse; `pidfd_open(pid)` is not a
+safe fallback here. Exit makes the handle readable and invalidates the exchange.
+Do not inherit/pass the listening endpoint to another process: the client requires
+connection and message identities to agree on the supervisor too.
+
+`jobs.observe_worker` additionally checks the complete pinned unit/fragment/static
+configuration, running state with no pending Job, actual manager MainPID, stable
+manager invocation and kernel `/proc/<pid>/cgroup` unified membership. A pending
+job, descendant, migration, changed invocation, unsupported/hybrid cgroup layout
+or vanished process refuses. The connected-process handle must remain live around
+these reads. Systemd properties are still obtained through the externally trusted
+local command boundary; matching injected rows are not manager authentication.
+
+`claim_worker` reuses the existing durable invocation binding and revalidates the
+private intent/arm/request/enqueue/binding records, owner, fence and deadline before
+and after repeated worker observations. It durably writes/readbacks
+`reconcile-worker.json` once before acknowledging the nonce/peer/request/intent/
+supervisor/worker identity. All claim-write EIO/ENOSPC stages refuse acknowledgment.
+An in-place binding/claim change, peer loss or expiry after persistence also refuses.
+A saved claim after supervisor death is **not replay authority**: even explicit
+observation-only reopen refuses and requires future outcome reconciliation. No
+endpoint/state deletion or second claim is a supported retry path.
+
+`WorkerClient` independently pins the expected supervisor UID/PID/owner and exact
+request/intent digest, checks kernel connection/message identity, and verifies the
+exact reply including its own peer identity and nonce. The installed worker must
+obtain those bootstrap identities from a separately authenticated manager/broker
+path, **not environment variables, an arbitrary caller, or this socket reply**.
+That bootstrap/service wiring is not implemented. Private endpoint ownership is
+same-uid; hostile same-uid/root code or a compromised manager is not defended here.
+No new credential, privilege grant or broad mutation API is introduced.
+
+**The claim records identity only. `restoration_permission` and `start_permission`
+are strictly false.** No complete-fence, recovery-completed or production-acceptance
+status becomes true. This is not the recovery worker implementation or oracle.
+Both client/listener exhaust on an attempted exchange; a lost reply is never
+replayed. Each IPC wait uses the caller's inclusive original reserve, not a fresh
+handshake allowance. Timeout, malformed peer or transport loss reports unresolved
+through the supervisor alert path. The shared fixed supervisor error allowlist now
+matches the actual alert transport; arbitrary exception text remains excluded.
+The alert receipt still means volatile local admission, not external notification.
+
+Real separate-process IPC tests verify kernel credentials, connection-bound pidfd,
+descriptor-transfer refusal and durable claim-before-reply. A separate supervisor
+process is SIGKILLed after claim persistence and before reply, while the installation
+lock is held; the worker refuses and reopen does not redispatch or recreate the
+claim. All manager/fence/cgroup replies in those process tests are **scripted**.
+They do not install units, contact a daemon, prove complete quiescence, restore or
+start anything. Real-version manager compatibility and the full package matrix
+remain due. Initial red supervisor-to-alert schema receipts are retained alongside
+the corrected local-IPC result, not retroactively labeled passing.
+
 ## Original-clock accounting
 
 A restart cannot invent the original failure instant. Without a durable, trusted
@@ -243,8 +305,8 @@ failure. No loopback or test-suite runtime becomes production downtime.
 
 - Actual persistent manager-owned service/event loop and attested unit/invocation,
   authenticated narrow dispatch transport, distinct pinned recovery template and
-  request-instance worker handshake. Read-only job/invocation observation above
-  still needs actual manager compatibility and recovery-outcome reconciliation.
+  bootstrap/wiring for the request-instance worker identity handshake. The source
+  above still needs actual manager compatibility and recovery-outcome reconciliation.
 - Independently enforced complete boot/internal-restart/start/writer fence and
   daemon pending-operation drain. No injected Boolean is its implementation.
 - Coordinator/manager/daemon/restore integration and actual complete semantic

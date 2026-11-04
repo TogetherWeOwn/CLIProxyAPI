@@ -62,6 +62,34 @@ def validate_observation(value, request_id, boot_id):
         raise Rejected("recovery-job-observation-state")
 
 
+def process_cgroup(pid):
+    """Read only the kernel's unified-cgroup membership for one live process."""
+    if type(pid) is not int or not 1 <= pid <= 2147483647:
+        raise Rejected("recovery-worker-pid-required")
+    try:
+        with open(f"/proc/{pid}/cgroup", "rb") as source:
+            raw = source.read(2049)
+        text = raw.decode("ascii")
+        if not text.startswith("0::") or not text.endswith("\n") or text.count("\n") != 1:
+            raise Rejected("recovery-worker-unified-cgroup-required")
+        group = text[3:-1]
+        if not cgroup_path(group):
+            raise Rejected("recovery-worker-cgroup-schema")
+        return group
+    except (OSError, UnicodeError):
+        raise Rejected("recovery-worker-process-unavailable") from None
+
+
+def validate_worker(value, request_id, boot_id, pid):
+    if type(value) is not dict or set(value) != {
+            "schema", "request_id", "boot_id", "unit", "invocation_id", "state", "job_id", "pid", "cgroup"}:
+        raise Rejected("recovery-worker-observation-schema")
+    validate_observation({k: v for k, v in value.items() if k not in ("pid", "cgroup")}, request_id, boot_id)
+    if (value["state"] != "running" or type(value["pid"]) is not int or value["pid"] != pid
+            or type(pid) is not int or not 1 <= pid <= 2147483647 or not cgroup_path(value["cgroup"])):
+        raise Rejected("recovery-worker-observation-identity")
+
+
 class SystemdRecoveryJobs:
     """Observe only one explicitly pinned digest-named recovery unit.
 
@@ -71,15 +99,37 @@ class SystemdRecoveryJobs:
     either by observing systemctl output, and never interprets an exit as success.
     """
     def __init__(self, *, systemctl, commands, binding, boot_id, clock=time.monotonic,
-                 read_fragment_hash=fragment_hash):
+                 read_fragment_hash=fragment_hash, read_process_cgroup=process_cgroup):
         if type(systemctl) is not str or not os.path.isabs(systemctl):
             raise Rejected("explicit-systemctl-required")
         if not isinstance(binding, RecoveryJobBinding):
             raise Rejected("recovery-job-binding-required")
         self.systemctl, self.commands, self.binding = systemctl, commands, binding
         self.boot_id, self.clock, self.read_fragment_hash = boot_id, clock, read_fragment_hash
+        self.read_process_cgroup = read_process_cgroup
 
     def observe(self, request_id, *, deadline):
+        return self._observe(request_id, deadline=deadline)[0]
+
+    def observe_worker(self, request_id, *, pid, deadline):
+        """Match the connected worker to the pinned unit's running MainPID.
+
+        The caller holds a live pidfd and verifies kernel connection AND message
+        credentials around this call. Descendants, a caller-supplied invocation,
+        environment variables and a reused PID are not worker authentication.
+        """
+        timer = Deadline(self.clock, deadline)
+        timer.remaining()
+        before = self.read_process_cgroup(pid)
+        value, row = self._observe(request_id, deadline=deadline)
+        result = {**value, "pid": pid, "cgroup": before}
+        validate_worker(result, request_id, value["boot_id"], pid)
+        if row["MainPID"] != str(pid) or row["ControlGroup"] != before or self.read_process_cgroup(pid) != before:
+            raise Rejected("recovery-worker-manager-peer-mismatch")
+        timer.remaining()
+        return result
+
+    def _observe(self, request_id, *, deadline):
         timer = Deadline(self.clock, deadline)
         timer.remaining()
         if request_id != self.binding.request_id:
@@ -133,4 +183,4 @@ class SystemdRecoveryJobs:
         if self.boot_id() != boot:
             raise Rejected("recovery-job-boot-changed")
         timer.remaining()
-        return observation
+        return observation, value

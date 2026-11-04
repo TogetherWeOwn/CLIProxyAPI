@@ -71,8 +71,22 @@ as a substitute for the accepted production binaries.
   Lost replies exhaust the adapter and retain the request without redispatch.
   **An enqueue acknowledgment is not a worker handshake or recovery outcome.**
   Scripted manager/local helper tests do not install/start a host unit. The trusted
-  service/broker, worker request handshake and independently enforced fence remain
-  missing; generic injected managers remain external trusted test boundaries.
+  service/broker wiring and independently enforced fence remain missing; generic
+  injected managers remain external trusted test boundaries.
+- `host_recovery/worker.py`: one-shot request-instance identity handshake over an
+  explicit private Unix-seqpacket endpoint. Kernel connection and per-message
+  credentials must match; Linux 6.5+ `SO_PEERPIDFD` pins the actual connecting
+  process, with no numeric-PID fallback. `jobs.observe_worker` requires the pinned
+  running unit's MainPID and kernel unified-cgroup membership. The supervisor
+  retains its installation lock and rechecks owner/fence/request/arm/invocation
+  around a durable once-only worker claim, then acknowledges identity only.
+  **Restoration and service-start permissions remain false.** Lost replies,
+  persistence faults, peer loss and restart do not recreate claims. Same-uid/root
+  hostility is outside this private-endpoint boundary. The worker must bootstrap
+  its expected supervisor PID/owner/request/intent from a trusted manager path,
+  not environment assertions or a socket reply; that service wiring remains due.
+  Real Linux IPC, descriptor-transfer and process-SIGKILL tests use **scripted
+  manager/fence/cgroup observations**, not installed manager/daemon recovery.
 - `host_recovery/restore.py`: bounded whole-root restoration of original bytes,
   uid/gid/modes, with an explicit accepted list of candidate-only additions.
   Unknown entries, type changes, unsafe links/metadata and tampered baselines
@@ -222,6 +236,10 @@ uses the caller's inclusive phase deadline, without retries or a new allowance.
 Packet/peer/inbox caps and idle-peer expiry are explicit. Malformed/truncated or
 ancillary data, missing/replaced listener, wrong peers, saturation and lost replies
 cannot produce success. Existing endpoints are never unlinked/replaced by it.
+Supervisor failure codes now share the transport's fixed allowlist; a real IPC
+regression covers supervisor alert admission despite ENOSPC receipt failure.
+Unknown error text still cannot enter the notice. This corrects the earlier
+supervisor/stub-only contract gap, not the missing external alert sink.
 
 **Its receipt proves volatile local inbox admission only**: not durable storage,
 external route delivery, supervisor availability or human acknowledgment. The

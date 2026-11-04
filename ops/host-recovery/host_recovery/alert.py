@@ -21,13 +21,22 @@ from .durable import Rejected, canonical, decode, digest, directory
 from .journal import identity
 
 MAX_PACKET = 4096
+SUPERVISOR_ERRORS = frozenset((
+    "supervisor-recovery-intent-required", "supervisor-intent-owner-mismatch",
+    "supervisor-dispatch-reconciliation-required", "supervisor-arm-pin-mismatch", "supervisor-arm-schema",
+    "supervisor-cross-boot-continuation-required", "supervisor-clock-continuation-required",
+    "supervisor-expired-continuation-required", "supervisor-watch-stopped", "supervisor-watch-expired",
+    "supervisor-worker-outcome-unverified", "supervisor-watch-observation-limit",
+    "supervisor-state-unavailable", "supervisor-dispatch-unconfirmed", "supervisor-watch-unconfirmed",
+    "supervisor-job-observation-unconfirmed", "supervisor-worker-claim-unconfirmed"))
 CAUSES = {
     "original_cause": frozenset(("admission-persistence-or-clock-failed", "explicit-recovery-request",
                                   "forward-stop-failed", "forward-revalidate-failed", "forward-mutate-failed",
-                                  "forward-candidate-start-failed", "forward-postchecks-failed", "forward-persistence-failed")),
+                                  "forward-candidate-start-failed", "forward-postchecks-failed", "forward-persistence-failed",
+                                  "supervisor-restart-recovery-required")),
     "recovery_error": frozenset(("recovery-detection-failed", "recovery-quiescence-failed", "recovery-restore-failed",
                                   "recovery-verification-start-failed", "recovery-persistence-failed",
-                                  "alert-budget-or-clock-unavailable", "independent-alert-delivery-failed")),
+                                  "alert-budget-or-clock-unavailable", "independent-alert-delivery-failed")) | SUPERVISOR_ERRORS,
 }
 NOTICE_FIELDS = {"schema", "attempt_id", "original_cause", "recovery_error", "outcome", "start_fenced"}
 
