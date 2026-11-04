@@ -49,8 +49,14 @@ existing budget meter. No new reserve is created. A callback cannot enlarge its
 phase deadline to the original request deadline, or survive its own method's
 return. Any failed check permanently revokes execution, even if the boundary
 catches the exception. The outer client lease is also invalid after provider
-return, failure or manager/peer loss. Cross-boot/expired work refuses; separately
-identified continuation and startup reconciliation remain due.
+return, failure or manager/peer loss. Closing or write-half-closing the supervisor
+socket revokes execution even if that process and its pidfd remain alive, including
+when a packet is still buffered. A pinned process alone is not proof that it still
+owns this connection or retains the installation lock. Only final non-authorizing
+receipt framing/identity validation may consume buffered bytes after clean socket
+closure; it cannot revive a callback, invoke another provider or grant execution.
+Cross-boot/expired work refuses; separately identified continuation and startup
+reconciliation remain due.
 
 ## Reports, persistence and alerts
 
@@ -78,6 +84,14 @@ unsettled installation as `recovery_unresolved`, not a prematurely durable recov
 success. Failed delivery or exhausted budgets cannot yield a success report. The
 transport must implement its existing independently bounded contract; this code
 does not supply an external sink, alternate route or human acknowledgment.
+
+The worker status preserves the first `recovery_error`. Subsequent `alert_error`
+and `evidence_error` record delivery/budget and evidence-persistence failures
+separately. A transport refusal/exception with valid clocks is
+`independent-alert-delivery-failed`, not a fabricated clock/budget failure. A real
+alert-phase overrun still records `alert-budget-or-clock-unavailable`. Replacement
+notices retain any earlier recovery cause; no late diagnostic makes an unresolved
+attempt successful.
 
 ## Evidence boundaries
 

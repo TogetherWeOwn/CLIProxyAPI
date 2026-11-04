@@ -296,6 +296,63 @@ class WorkerRecoveryTests(unittest.TestCase):
         with self.assertRaises(durable.Rejected):
             client.claim(deadline=1100., recovery_provider=self.engine, result_provider=lambda *a, **kw: None)
 
+    def test_delivery_failure_is_not_misreported_as_clock_or_budget_failure(self):
+        for raises in (False, True):
+            with self.subTest(raises=raises):
+                self.setUp()
+                if raises:
+                    def transport(notice):
+                        self.notices.append(copy.deepcopy(notice))
+                        raise OSError(errno.EIO, "synthetic alert route unavailable")
+                    self.engine.transport_alert = transport
+                else:
+                    self.case.transport_ok = False
+                with self.assertRaises(durable.Rejected):
+                    self.run_recovery()
+                self.assertEqual(self.case.time, 1005.)
+                self.assertEqual(self.engine.status["recovery_error"], "independent-alert-delivery-failed")
+                self.assertEqual(self.notices[-1]["recovery_error"], "independent-alert-delivery-failed")
+                self.assertEqual(self.engine.status["alert_error"], "independent-alert-delivery-failed")
+                self.assertIsNone(self.engine.status["evidence_error"])
+
+    def test_alert_failure_preserves_earlier_restore_error_in_status_and_notice(self):
+        self.boundary.overrides["restore"] = False
+        self.case.transport_ok = False
+        with self.assertRaises(durable.Rejected):
+            self.run_recovery()
+        self.assertEqual(self.engine.status["recovery_error"], "recovery-restore-failed")
+        self.assertEqual(self.engine.status["alert_error"], "independent-alert-delivery-failed")
+        self.assertEqual(self.notices[-1]["recovery_error"], "recovery-restore-failed")
+        self.assertNotIn("start-old", self.boundary.calls)
+
+    def test_evidence_failure_preserves_earlier_restore_error(self):
+        self.boundary.overrides["restore"] = False
+        reached = []
+        def fault(hook):
+            if hook == "create":
+                reached.append(hook)
+                raise OSError(errno.ENOSPC, "synthetic full evidence store")
+        self.evidence.fault = fault
+        with self.assertRaises(durable.Rejected):
+            self.run_recovery()
+        self.assertEqual(reached, ["create"])
+        self.assertEqual(self.engine.status["recovery_error"], "recovery-restore-failed")
+        self.assertEqual(self.engine.status["evidence_error"], "recovery-persistence-failed")
+        self.assertEqual(self.notices[-1]["recovery_error"], "recovery-restore-failed")
+
+    def test_actual_alert_phase_overrun_still_reports_budget_failure(self):
+        original = self.engine.transport_alert
+        def transport(notice):
+            result = original(notice)
+            self.case.time = 1025.
+            return result
+        self.engine.transport_alert = transport
+        with self.assertRaises(durable.Rejected):
+            self.run_recovery()
+        self.assertEqual(self.engine.status["recovery_error"], "alert-budget-or-clock-unavailable")
+        self.assertEqual(self.engine.status["alert_error"], "alert-budget-or-clock-unavailable")
+        self.assertTrue(self.engine.status["alert"]["transport_delivered"])
+
     def test_approval_and_evidence_owner_mismatches_refuse(self):
         for changes in ({"approval": replace(self.approval, intent_sha256="e" * 64)},
                         {"binding": replace(self.binding, request_id="e" * 64)}):

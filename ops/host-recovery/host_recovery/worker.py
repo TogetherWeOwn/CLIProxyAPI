@@ -66,10 +66,36 @@ class PeerSession:
             raise
         self.last_clock = None
         self.closed = False
+        self.disconnected = False
+
+    def process_alive(self):
+        """Transport/terminal-receipt identity only, never an execution lease.
+
+        A final non-authorizing receipt may be buffered when the sender closes
+        its socket. Kernel credentials and the pinned process must still match.
+        """
+        try:
+            return (not self.closed and not select.select([self.pidfd], [], [], 0)[0]
+                    and peer(self.sock, self.peer["uid"]) == self.peer)
+        except (OSError, ValueError):
+            return False
 
     def alive(self):
-        return (not self.closed and not select.select([self.pidfd], [], [], 0)[0]
-                and peer(self.sock, self.peer["uid"]) == self.peer)
+        if self.closed or self.disconnected:
+            return False
+        try:
+            # A pidfd proves process lifetime, not ownership of this connection.
+            # The supervisor can close its accepted socket and release the lock
+            # while staying alive. Do not consume queued protocol packets here;
+            # hangup/half-close must revoke even with buffered data still present.
+            poll = select.poll()
+            poll.register(self.sock, select.POLLIN | select.POLLRDHUP)
+            lost = select.POLLHUP | select.POLLRDHUP | select.POLLERR | select.POLLNVAL
+            if any(events & lost for _, events in poll.poll(0)) or not self.process_alive():
+                self.disconnected = True
+        except (OSError, ValueError):
+            self.disconnected = True
+        return not self.disconnected
 
     def _now(self):
         value = self.clock()
@@ -85,7 +111,7 @@ class PeerSession:
             wait.register(self.sock, event)
             wait.register(self.pidfd, selectors.EVENT_READ)
             events = wait.select(timer.remaining())
-            if not events or not self.alive() or any(key.fd == self.pidfd for key, _ in events):
+            if not events or not self.process_alive() or any(key.fd == self.pidfd for key, _ in events):
                 raise Rejected("worker-peer-or-deadline-lost")
             timer.remaining()
 
@@ -99,7 +125,7 @@ class PeerSession:
         self.ready(selectors.EVENT_WRITE, deadline)
         send(self.sock, value)
         Deadline(self._now, deadline).remaining()
-        if not self.alive():
+        if not self.process_alive():
             raise Rejected("worker-peer-lost-after-send")
 
     def close(self):
@@ -213,14 +239,17 @@ class WorkerClient:
         self.verify_identity = verify_identity
         self.result_receipt = None
 
-    def _verify_identity(self, session, deadline):
+    def _verify_identity(self, session, deadline, *, receipt_only=False):
         if self.verify_identity is None:
             return None
-        if not session.alive():
+        # Only final non-authorizing receipt validation may outlive socket close.
+        # Execution callbacks always require the live connection, not just its PID.
+        alive = session.process_alive if receipt_only else session.alive
+        if not alive():
             raise Rejected("worker-peer-unconfirmed")
-        result = self.verify_identity(peer=copy.deepcopy(session.peer), peer_alive=session.alive, deadline=deadline)
+        result = self.verify_identity(peer=copy.deepcopy(session.peer), peer_alive=alive, deadline=deadline)
         validate_worker(result, self.request_id, self.owner["boot_id"], os.getpid())
-        if not session.alive():
+        if not alive():
             raise Rejected("worker-peer-unconfirmed")
         Deadline(self.clock, deadline).remaining()
         return copy.deepcopy(result)
@@ -273,7 +302,8 @@ class WorkerClient:
                         raise Rejected("worker-claim-reply-unconfirmed")
                     validate_worker(value["worker"], self.request_id, self.owner["boot_id"], os.getpid())
                     if self.verify_identity is not None:
-                        after = self._verify_identity(session, deadline)
+                        after = self._verify_identity(session, deadline,
+                            receipt_only=result_provider is None and recovery_provider is None)
                         if canonical(after) != canonical(observed) or canonical(value["worker"]) != canonical(observed):
                             raise Rejected("worker-manager-claim-mismatch")
                     timer.remaining()
@@ -318,7 +348,7 @@ class WorkerClient:
                         if canonical(receipt) != canonical(expected):
                             raise Rejected("worker-result-receipt-unconfirmed")
                         if self.verify_identity is not None:
-                            if canonical(self._verify_identity(session, deadline)) != canonical(observed):
+                            if canonical(self._verify_identity(session, deadline, receipt_only=True)) != canonical(observed):
                                 raise Rejected("worker-manager-claim-mismatch")
                         timer.remaining()
                         self.result_receipt = copy.deepcopy(receipt)

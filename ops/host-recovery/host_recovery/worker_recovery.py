@@ -142,6 +142,7 @@ class WorkerRecovery:
         timer = Deadline(self.clock, end)
         claim = copy.deepcopy(claim)
         self.status = {"outcome": "recovery_unresolved", "recovery_error": None,
+                       "alert_error": None, "evidence_error": None,
                        "start_fenced": True, "installation_settled": False, "production_acceptance": False}
         receipt, revoked = None, False
         def current(*, deadline):
@@ -209,9 +210,12 @@ class WorkerRecovery:
                   "recovery_error": self.status["recovery_error"], "outcome": "recovery_unresolved", "start_fenced": True}
         self.status["alert"] = notify(notice, self.persist_alert, self.transport_alert)
         try:
-            if alert_end is None or not self.status["alert"]["transport_delivered"]:
+            if alert_end is None:
                 raise Rejected("worker-recovery-alert-unconfirmed")
             self.meter.check(alert_end)
+            if not self.status["alert"]["transport_delivered"]:
+                self.status["alert_error"] = "independent-alert-delivery-failed"
+                raise Rejected("worker-recovery-alert-unconfirmed")
             self.phase = "persistence"
             bound = min(end, self.meter.phase_deadline("recovery", "persistence"))
             current(deadline=bound)
@@ -225,8 +229,16 @@ class WorkerRecovery:
             return {"outcome": self.status["outcome"], "evidence_sha256": sha256}
         except Exception:
             # Visible evidence after failed fsync/readback is not a usable report.
-            self.status.update(outcome="recovery_unresolved", recovery_error=("alert-budget-or-clock-unavailable"
-                if self.phase == "alert" else "recovery-" + self.phase + "-failed"))
+            # Keep the first recovery failure; delivery and evidence persistence
+            # are separate failures, never evidence that the original cause changed.
+            if self.phase == "alert":
+                error = self.status["alert_error"] or "alert-budget-or-clock-unavailable"
+                self.status["alert_error"] = error
+            else:
+                error = "recovery-" + self.phase + "-failed"
+                self.status["evidence_error"] = error
+            self.status.update(outcome="recovery_unresolved",
+                               recovery_error=self.status["recovery_error"] or error)
             notify({**notice, "outcome": "recovery_unresolved", "recovery_error": self.status["recovery_error"]},
                    self.persist_alert, self.transport_alert)
             raise Rejected("worker-recovery-report-unconfirmed") from None
