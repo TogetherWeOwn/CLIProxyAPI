@@ -206,6 +206,15 @@ as a substitute for the accepted production binaries.
   fault tests still use **scripted host/daemon/semantic boundaries**. Authenticated
   aggregate provisioning, complete semantic guards and actual manager integration
   remain due. See [multi-root scope and limits](WRITE-SET-v1.md).
+- `inputguard/`: bounded strict YAML exact-delta comparison using the existing Go
+  YAML parser. Exact old/new semantic hashes and independent raw-byte pins compare
+  config, Compose source and frozen-rendered Compose without wildcard exclusions.
+  Tests preserve unrelated plugin/alias maps and service images, reject ambiguous
+  YAML and verify exact inverse plugin/replay changes. **Not wired into admission,
+  stopped revalidation or recovery startup; no renderer, schema validation,
+  authenticated policy, dual-artifact verification or start authority is supplied.**
+  These are pure-Go synthetic-input/race/fuzz components, not host recovery proof.
+  See [strict subset, policy and remaining integration](INPUT-GUARD-v1.md).
 - `host_recovery/coordinator.py`: component forward/recovery ordering, injected
   manager/daemon boundaries, registration-before-start, strict post-check and
   restoration-oracle acknowledgment shapes, original versus recovery errors,
