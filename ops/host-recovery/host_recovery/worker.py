@@ -49,9 +49,23 @@ def credential_packet(sock, expected):
     return decode(raw)
 
 
+def cancellation_pending(fd):
+    """A caller-owned readable descriptor revokes this exchange; never consume it."""
+    if fd is None:
+        return False
+    if type(fd) is not int or fd < 0:
+        raise Rejected("worker-cancellation-descriptor-required")
+    # Closed/invalid descriptors refuse rather than disabling cancellation.
+    os.fstat(fd)
+    return bool(select.select([fd], [], [], 0)[0])
+
+
 class PeerSession:
     """One bounded exchange with an exact kernel peer, held by pidfd."""
-    def __init__(self, sock, *, uid, pid=None, clock=time.monotonic):
+    def __init__(self, sock, *, uid, pid=None, clock=time.monotonic, cancel_fd=None):
+        if cancellation_pending(cancel_fd):
+            raise Rejected("worker-exchange-cancelled")
+        self.cancel_fd = cancel_fd
         self.sock, self.clock = sock, clock
         self.peer = peer(sock, uid)
         if uid == 0 or pid is not None and self.peer["pid"] != pid:
@@ -75,7 +89,8 @@ class PeerSession:
         its socket. Kernel credentials and the pinned process must still match.
         """
         try:
-            return (not self.closed and not select.select([self.pidfd], [], [], 0)[0]
+            return (not self.closed and not cancellation_pending(self.cancel_fd)
+                    and not select.select([self.pidfd], [], [], 0)[0]
                     and peer(self.sock, self.peer["uid"]) == self.peer)
         except (OSError, ValueError):
             return False
@@ -110,6 +125,8 @@ class PeerSession:
         with selectors.DefaultSelector() as wait:
             wait.register(self.sock, event)
             wait.register(self.pidfd, selectors.EVENT_READ)
+            if self.cancel_fd is not None:
+                wait.register(self.cancel_fd, selectors.EVENT_READ)
             events = wait.select(timer.remaining())
             if not events or not self.process_alive() or any(key.fd == self.pidfd for key, _ in events):
                 raise Rejected("worker-peer-or-deadline-lost")
@@ -141,7 +158,10 @@ class WorkerListener:
     Close leaves the socket inode for explicit endpoint reconciliation. Serving
     does not clear the recovery latch or grant restoration or service startup.
     """
-    def __init__(self, path, *, worker_uid, clock=time.monotonic):
+    def __init__(self, path, *, worker_uid, clock=time.monotonic, cancel_fd=None):
+        if cancellation_pending(cancel_fd):
+            raise Rejected("worker-exchange-cancelled")
+        self.cancel_fd = cancel_fd
         if (type(path) is not str or not os.path.isabs(path)
                 or type(worker_uid) is not int or worker_uid <= 0):
             raise Rejected("worker-endpoint-policy-required")
@@ -183,13 +203,17 @@ class WorkerListener:
         timer = Deadline(self.clock, end)
         with selectors.DefaultSelector() as wait:
             wait.register(self.sock, selectors.EVENT_READ)
+            if self.cancel_fd is not None:
+                wait.register(self.cancel_fd, selectors.EVENT_READ)
             if not wait.select(timer.remaining()):
                 raise Rejected("worker-accept-expired")
             timer.remaining()
+            if cancellation_pending(self.cancel_fd):
+                raise Rejected("worker-exchange-cancelled")
         conn, _ = self.sock.accept()
         with conn:
             conn.setblocking(False)
-            session = PeerSession(conn, uid=self.uid, clock=self.clock)
+            session = PeerSession(conn, uid=self.uid, clock=self.clock, cancel_fd=self.cancel_fd)
             try:
                 request = session.receive(end)
                 if (type(request) is not dict or set(request) != {"schema", "request_id", "nonce"}

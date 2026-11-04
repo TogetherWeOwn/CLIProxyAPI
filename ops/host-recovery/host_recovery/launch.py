@@ -6,7 +6,7 @@ A matching digest proves correspondence to that anchor, not who approved it. Thi
 reader neither provisions that anchor nor installs a service/complete host fence.
 """
 import copy
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, fields
 import os
 import stat
@@ -156,7 +156,7 @@ class _CallingSession:
 
 
 @contextmanager
-def _calling_session(approval, *, deadline, clock, boot_id, commands):
+def _calling_session(approval, *, deadline, clock, boot_id, commands, handles=None):
     """Retain the existing installation lock until final ancestry validation.
 
     Private input/identity composition for status, observation and identity-only
@@ -173,7 +173,12 @@ def _calling_session(approval, *, deadline, clock, boot_id, commands):
     observed = observer.bootstrap(installation_id=approval.recovery.installation_id,
                                   attempt_id=approval.recovery.attempt_id, deadline=deadline)
     timer.remaining()
-    with open_installation(approval.installation) as handles:
+    with ExitStack() as stack:
+        if handles is None:
+            handles = stack.enter_context(open_installation(approval.installation))
+        elif handles.approval != approval.installation:
+            raise Rejected("launch-borrowed-installation-mismatch")
+        handles.validate()
         content, inputs = handles.snapshot(content_approval=approval.content, recovery_approval=approval.recovery,
             binding=approval.job, supervisor_owner=observed["owner"], boot_id=observed["owner"]["boot_id"], now=clock())
         # Keep clock continuity from bootstrap through the initial filesystem read.

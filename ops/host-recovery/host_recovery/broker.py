@@ -216,62 +216,72 @@ def _serve_claim(approval, *, endpoint, deadline, fence, persist_alert, transpor
                  clock, boot_id, commands, fault, result_oracle):
     transport = LocalCommands(clock) if commands is None else commands
     with _calling_session(approval, deadline=deadline, clock=clock, boot_id=boot_id, commands=transport) as session:
-        if (endpoint.uid, endpoint.gid) != (approval.supervisor.uid, approval.supervisor.gid):
-            raise Rejected("broker-same-owner-endpoint-required")
-        # Do not contaminate either protected tree with socket state, including
-        # a journal whose entry set must stay pinned through each claim phase.
-        for root in (approval.installation.content.path, approval.installation.journal.path):
-            if os.path.commonpath((root, endpoint.path)) == root:
-                raise Rejected("broker-separate-endpoint-required")
-        with open_approved_directory(endpoint) as directory:
-            manager = _ClaimManager(session, directory, fence)
-            process = RecoverySupervisor(session.handles._journal.fd, owner=session.observed["owner"],
-                manager=manager, clock=clock, boot_id=boot_id, persist_alert=persist_alert,
-                transport_alert=transport_alert, fault=fault, observe_existing=True)
-            listener = None
-            try:
-                if (process.error is not None or process.worker_attempted
-                        or canonical(process.pending_request) != canonical(session.inputs.request)):
-                    raise Rejected("broker-unclaimed-original-request-required")
-                manager.validate(session.deadline)
-                path = os.path.join(endpoint.path, "claim-" + approval.job.request_id + ".sock")
-                listener = WorkerListener(path, worker_uid=endpoint.uid, clock=clock)
-                manager.validate(session.deadline)
-                jobs = SystemdRecoveryJobs(systemctl=approval.systemctl, commands=transport,
-                    binding=approval.job, clock=clock, boot_id=boot_id)
-                claim = listener.accept_once(supervisor=process, observer=_ClaimJobs(jobs, endpoint.uid, endpoint.gid),
-                                             deadline=session.deadline, result_oracle=result_oracle)
-                process._current(session.deadline)
-                if canonical(process._saved_claim(process.pending_request)) != canonical(claim):
-                    raise Rejected("broker-saved-claim-changed")
-                manager.validate(session.deadline)
-                result = {**session.status(), "schema": "host-recovery-broker-status-v1",
-                          "operation": "claim", "state": "identity_reply_sent_only",
-                          "claim_recorded": True, "claim_reply_sent": True,
-                          "peer_acknowledgment_verified": False, "restoration_permission": False,
-                          "recovery_completed": False,
-                          "worker_result_observed": process.result_observed, "installation_settled": False}
-                if result_oracle is not None:
-                    result.update(operation="claim_and_result", state="result_observed_unsettled")
-            except Exception:
-                if process.error is None:
-                    process._fail(Rejected("supervisor-worker-claim-unconfirmed"),
-                                  "supervisor-worker-claim-unconfirmed")
-                raise Rejected("broker-claim-unconfirmed") from None
-            finally:
-                process.closed = True
-                if listener is not None:
-                    listener.close()
-        session.validate()
-        # The last manager/snapshot validation may itself expose a changed saved
-        # claim. Check fixed records after all external callbacks, before unlock.
-        if (set(os.listdir(process.fd)) != process.initial_entries
-                or canonical(process._saved_claim(process.pending_request)) != canonical(claim)):
-            raise Rejected("broker-saved-claim-changed")
-        process._records_current()
-        if canonical(process._pending_request()) != canonical(session.inputs.request):
-            raise Rejected("broker-original-request-changed")
-        if result_oracle is not None:
-            process._saved_result()
-        session.timer.remaining()
+        return _serve_session(session, endpoint=endpoint, fence=fence, persist_alert=persist_alert,
+            transport_alert=transport_alert, clock=clock, boot_id=boot_id, commands=transport,
+            fault=fault, result_oracle=result_oracle)
+
+
+def _serve_session(session, *, endpoint, fence, persist_alert, transport_alert, clock, boot_id,
+                   commands, fault, result_oracle, cancel_fd=None):
+    """Borrow the calling session and its existing lock; never release it here."""
+    approval, transport = session.approval, commands
+    if (endpoint.uid, endpoint.gid) != (approval.supervisor.uid, approval.supervisor.gid):
+        raise Rejected("broker-same-owner-endpoint-required")
+    # Do not contaminate either protected tree with socket state, including
+    # a journal whose entry set must stay pinned through each claim phase.
+    for root in (approval.installation.content.path, approval.installation.journal.path):
+        if os.path.commonpath((root, endpoint.path)) == root:
+            raise Rejected("broker-separate-endpoint-required")
+    with open_approved_directory(endpoint) as directory:
+        manager = _ClaimManager(session, directory, fence)
+        process = RecoverySupervisor(session.handles._journal.fd, owner=session.observed["owner"],
+            manager=manager, clock=clock, boot_id=boot_id, persist_alert=persist_alert,
+            transport_alert=transport_alert, fault=fault, observe_existing=True)
+        listener = None
+        try:
+            if (process.error is not None or process.worker_attempted
+                    or canonical(process.pending_request) != canonical(session.inputs.request)):
+                raise Rejected("broker-unclaimed-original-request-required")
+            manager.validate(session.deadline)
+            path = os.path.join(endpoint.path, "claim-" + approval.job.request_id + ".sock")
+            kwargs = {} if cancel_fd is None else {"cancel_fd": cancel_fd}
+            listener = WorkerListener(path, worker_uid=endpoint.uid, clock=clock, **kwargs)
+            manager.validate(session.deadline)
+            jobs = SystemdRecoveryJobs(systemctl=approval.systemctl, commands=transport,
+                binding=approval.job, clock=clock, boot_id=boot_id)
+            claim = listener.accept_once(supervisor=process, observer=_ClaimJobs(jobs, endpoint.uid, endpoint.gid),
+                                         deadline=session.deadline, result_oracle=result_oracle)
+            process._current(session.deadline)
+            if canonical(process._saved_claim(process.pending_request)) != canonical(claim):
+                raise Rejected("broker-saved-claim-changed")
+            manager.validate(session.deadline)
+            result = {**session.status(), "schema": "host-recovery-broker-status-v1",
+                      "operation": "claim", "state": "identity_reply_sent_only",
+                      "claim_recorded": True, "claim_reply_sent": True,
+                      "peer_acknowledgment_verified": False, "restoration_permission": False,
+                      "recovery_completed": False,
+                      "worker_result_observed": process.result_observed, "installation_settled": False}
+            if result_oracle is not None:
+                result.update(operation="claim_and_result", state="result_observed_unsettled")
+        except Exception:
+            if process.error is None:
+                process._fail(Rejected("supervisor-worker-claim-unconfirmed"),
+                              "supervisor-worker-claim-unconfirmed")
+            raise Rejected("broker-claim-unconfirmed") from None
+        finally:
+            process.closed = True
+            if listener is not None:
+                listener.close()
+    session.validate()
+    # The last manager/snapshot validation may itself expose a changed saved
+    # claim. Check fixed records after all external callbacks, before unlock.
+    if (set(os.listdir(process.fd)) != process.initial_entries
+            or canonical(process._saved_claim(process.pending_request)) != canonical(claim)):
+        raise Rejected("broker-saved-claim-changed")
+    process._records_current()
+    if canonical(process._pending_request()) != canonical(session.inputs.request):
+        raise Rejected("broker-original-request-changed")
+    if result_oracle is not None:
+        process._saved_result()
+    session.timer.remaining()
     return result

@@ -8,6 +8,15 @@ as a substitute for the accepted production binaries.
 
 ## Implemented so far
 
+- `host_recovery/service.py`: persistent embedding lifecycle acquires the existing
+  installation lock before manager bootstrap, borrows it through the original
+  broker claim/result exchange, then retains it in an unresolved passive hold.
+  Shutdown pipe/socket cancellation wakes listener/peer waits; one original-deadline
+  alarm escalates without retry, settlement or renewed recovery allowance. Actual
+  separate-process signals/locks and local kernel-peer tests use **scripted
+  manager/fence/oracle boundaries**, not operational host recovery. Authenticated
+  provisioning, installed runnable supervisor/worker, complete fence and restart
+  reconciliation remain unfinished. See [service lifecycle and limits](SERVICE-v1.md).
 - `host_recovery/worker_runtime.py` and `claim_worker.py`: protected original-input
   loading → manager-bound identity → optional separately authorized recovery/result
   composition, without acquiring a second installation lock. Repeated protected
