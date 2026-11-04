@@ -214,6 +214,20 @@ real probe/container binding, mixed-log demultiplexer or accepting verifier. Rea
 [the collection status](REPLAY-COLLECTION-v1.md) before interpreting any report;
 no injected "complete" flag or quiet-interval workaround is supported.
 
+The local alert IPC component now implements challenge/notice admission into a
+bounded volatile inbox in an independently runnable process. It checks kernel peer
+UID, explicit private endpoint, fresh nonce, listener-instance continuity, exact
+notice schema/digest and the caller's inclusive local IPC deadline. Missing/lost
+listener, saturation, bad framing and lost acknowledgments fail closed. It does
+not unlink an existing endpoint; restart reconciliation is still required.
+
+A local admission receipt explicitly says `durable: false` and
+`human_acknowledged: false`. Disk-failure tests show the IPC attempt is independent
+of the recovery receipt write, not that a durable external alert or human notice
+was delivered. No external sink/alternate route, installed independent service or
+operational supervisor admission integration exists yet. A volatile inbox cannot
+clear the complete pre-arm alert-route gate above.
+
 ## Gates still closed
 
 Actual disposable systemd/cgroup/daemon package drills and all transition,

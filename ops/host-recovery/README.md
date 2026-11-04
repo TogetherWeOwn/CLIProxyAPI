@@ -51,8 +51,9 @@ as a substitute for the accepted production binaries.
   phase deadlines and are checked afterwards; the concrete manager must enforce
   them while calls are running. An observed manager failure timestamp is charged
   from that event, not from delayed detection. No blocking-call watchdog,
-  persistent service loop, resume/continuation, actual manager, listener or
-  executable post-check implementation exists here yet. Mock acknowledgments
+  persistent supervisor loop, resume/continuation, actual manager or
+  executable post-check implementation exists here yet. The local alert inbox
+  described below is separate and is not wired into operational admission. Mock acknowledgments
   are **not** complete host/package/start-fence evidence.
 - `host_recovery/commands.py`: bounded local subprocess output and same-clock
   deadlines, a fixed minimal environment and no shell/session escape. Helper
@@ -158,9 +159,21 @@ clocks and deterministic fault injection, not wall-clock sleeps. Filesystem faul
 injection includes EIO/ENOSPC, write/fsync/rename/directory-fsync/readback, partial
 writes and terminal-looking destination bytes after uncertain durability.
 
-The independent alert helper attempts its injected transport even if receipt
-persistence raises. It distinguishes disk receipt, strict transport receipt and
-human acknowledgment. It is **not yet an alert listener or preflight handshake**.
+The independent alert helper attempts its transport even if receipt persistence
+raises. `host_recovery/alert.py` now provides a Linux Unix-seqpacket listener/client
+with a private explicit endpoint, kernel peer-UID checks, fresh nonce challenge,
+listener-instance pinning and exact digest-bound notice receipts. Nonblocking IPC
+uses the caller's inclusive phase deadline, without retries or a new allowance.
+Packet/peer/inbox caps and idle-peer expiry are explicit. Malformed/truncated or
+ancillary data, missing/replaced listener, wrong peers, saturation and lost replies
+cannot produce success. Existing endpoints are never unlinked/replaced by it.
+
+**Its receipt proves volatile local inbox admission only**: not durable storage,
+external route delivery, supervisor availability or human acknowledgment. The
+separate-process disposable test exercises this admission despite injected disk
+failure. No external notification sink, installed independent service, supervisor
+admission wiring, restart persistence or alternate route is implemented. Do not
+use a challenge alone to pass the full operational alert prerequisite.
 
 ## Remaining acceptance work (not implemented or not proved)
 

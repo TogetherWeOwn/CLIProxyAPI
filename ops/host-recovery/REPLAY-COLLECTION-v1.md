@@ -10,8 +10,18 @@ The producer transport correction specifies a bounded asynchronous 128-record
 FIFO and one writer. Startup precedes decisions. Inference and shutdown do not
 wait for sink I/O. Saturation disables admission and preserves the admitted prefix;
 a terminal `replay-producer-failure-v1` is only best-effort when the sink resumes.
-Partial/error writes stop output. The corrected source/schema/artifact identities
-must be reverified when delivered; the historical fixture below is not that build.
+Partial/error writes stop output. The corrected immutable handoff reports source
+`92854b15dd514adbcd75ede4e6c4b588c1772f60`, package ZIP SHA256
+`4be82eaf1a9c793f4cd831e7cca8dd099ab9b73339bde7386f8e315bb3192969`,
+extracted library SHA256
+`1243649bf9e1b8a0d650b7ae9108bcbffb869e2356aa5ea68b810612166ea920`,
+and schema SHA256
+`a7a0a411df5cc4e28d693936f8f2dafd15a5853bc9e6d7c38997af322d60efd7`.
+These are producer-reported integration references, not independently verified
+artifacts, accepted release pins, merged/review approval or a drain boundary.
+No corrected package was installed or executed by this checkpoint. Reverify exact
+source/schema/package correspondence during integration; never mix generations
+of chunked artifacts. The historical fixture below is not that build.
 
 Consequently, none of these establish complete evidence:
 
