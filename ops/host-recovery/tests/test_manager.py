@@ -16,7 +16,9 @@ def observed(unit="forward.service", invocation="a" * 32, cgroup="/recovery/forw
     return {"Id": unit, "LoadState": "loaded", "FragmentPath": "/accepted/" + unit,
             "DropInPaths": "", "Type": "exec", "KillMode": "control-group", "SendSIGKILL": "yes",
             "Delegate": "no", "ProtectControlGroups": "yes", "NoNewPrivileges": "yes", "Restart": "no",
-            "ExecStart": "{ path=/accepted/helper ; argv[]=/accepted/helper ; }", "User": "recovery-worker",
+            "ExecStart": ("{ path=/accepted/helper ; argv[]=/accepted/helper ; ignore_errors=no ; "
+                          "start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"),
+            "User": "recovery-worker",
             "Group": "recovery-worker", "Slice": "recovery.slice", "ReadWritePaths": "/accepted/write-set",
             "CapabilityBoundingSet": "", "AmbientCapabilities": "", "RestrictNamespaces": "yes",
             "ProtectSystem": "strict", "RestrictSUIDSGID": "yes",
@@ -26,7 +28,7 @@ def observed(unit="forward.service", invocation="a" * 32, cgroup="/recovery/forw
 
 def binding(value):
     return manager.UnitBinding(value["Id"], value["InvocationID"], value["ControlGroup"], value["FragmentPath"],
-                               "f" * 64, durable.digest(durable.canonical({k: value[k] for k in manager.STATIC})))
+                               "f" * 64, durable.digest(durable.canonical(manager.static_properties(value))))
 
 
 def encoded(value):

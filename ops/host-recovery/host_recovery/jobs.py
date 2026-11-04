@@ -13,7 +13,7 @@ import time
 from .commands import Deadline
 from .durable import Rejected, canonical, digest
 from .inventory import HASH
-from .manager import INVOCATION, PROPERTIES, STATIC, cgroup_path, fragment_hash, properties
+from .manager import INVOCATION, PROPERTIES, cgroup_path, fragment_hash, properties, static_properties
 
 
 def recovery_unit(request_id):
@@ -94,7 +94,7 @@ class SystemdRecoveryJobs:
         value = properties(raw)
         if (value["Id"] != unit or value["LoadState"] != "loaded"
                 or value["FragmentPath"] != self.binding.fragment_path or value["DropInPaths"] != ""
-                or digest(canonical({key: value[key] for key in STATIC})) != self.binding.properties_sha256
+                or digest(canonical(static_properties(value))) != self.binding.properties_sha256
                 or self.read_fragment_hash(self.binding.fragment_path) != self.binding.fragment_sha256):
             raise Rejected("recovery-job-unit-pin-mismatch")
         required = {"Type": "exec", "KillMode": "control-group", "SendSIGKILL": "yes", "Delegate": "no",

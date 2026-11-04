@@ -16,7 +16,7 @@ class JobTests(unittest.TestCase):
         self.request_id = "d" * 64
         self.row = observed(jobs.recovery_unit(self.request_id), "b" * 32, "/recovery/restore.service")
         self.binding = jobs.RecoveryJobBinding(self.request_id, self.row["FragmentPath"], "f" * 64,
-            durable.digest(durable.canonical({key: self.row[key] for key in manager.STATIC})))
+            durable.digest(durable.canonical(manager.static_properties(self.row))))
         self.now, self.boot = 1, "boot-a"
         self.calls = []
         self.failure = None
@@ -38,7 +38,7 @@ class JobTests(unittest.TestCase):
 
     def repin(self):
         self.engine.binding = replace(self.binding,
-            properties_sha256=durable.digest(durable.canonical({key: self.row[key] for key in manager.STATIC})))
+            properties_sha256=durable.digest(durable.canonical(manager.static_properties(self.row))))
 
     def test_read_only_digest_named_unit_and_running_invocation(self):
         value = self.observe()

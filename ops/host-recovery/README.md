@@ -62,6 +62,17 @@ as a substitute for the accepted production binaries.
   transport and the independently enforced fence remain external prerequisites.
   Tests use scripted properties, a real reply helper and process SIGKILL, **not a
   real manager or daemon**. The loop core above is not a runnable persistent service.
+- `host_recovery/dispatch.py`: one-shot fixed-argv enqueue of the pinned recovery
+  request instance only, under the supervisor's ordered synchronous dispatch
+  lease. Observe → enqueue → acknowledge authorizations revalidate the durable
+  request, owner, complete-fence callback and original deadline under the same
+  installation lock. Duplicate/reordered/failed lease phases cannot acknowledge
+  dispatch. Active/pending/previously invoked jobs require observation, not restart.
+  Lost replies exhaust the adapter and retain the request without redispatch.
+  **An enqueue acknowledgment is not a worker handshake or recovery outcome.**
+  Scripted manager/local helper tests do not install/start a host unit. The trusted
+  service/broker, worker request handshake and independently enforced fence remain
+  missing; generic injected managers remain external trusted test boundaries.
 - `host_recovery/restore.py`: bounded whole-root restoration of original bytes,
   uid/gid/modes, with an explicit accepted list of candidate-only additions.
   Unknown entries, type changes, unsafe links/metadata and tampered baselines
@@ -89,7 +100,11 @@ as a substitute for the accepted production binaries.
   This is **not a privilege boundary or a hard-real-time watchdog**.
 - `host_recovery/manager.py`: explicit systemctl command generation, strict unit
   property/fragment pins, distinct non-nested forward/recovery unit bindings,
-  whole-control-group SIGKILL and repeated manager/cgroup-v2 observations.
+  whole-control-group SIGKILL and repeated manager/cgroup-v2 observations. Static
+  pins project one strict `ExecStart` display into path, unchanged displayed argv
+  and ignore-errors policy; embedded runtime timestamps/PID/exit data are not
+  configuration. Unknown/ambiguous display shapes refuse. Old raw-display pins do
+  not match the new projection; real-version compatibility remains unproved.
   Non-root, non-delegated, no-capability mutator properties are required. The
   recursive kernel populated bit, no pending job and inactive state are all
   checked; PID exit alone is insufficient. Missing/reused groups or changed

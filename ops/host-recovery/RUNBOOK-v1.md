@@ -187,10 +187,17 @@ enqueue acknowledgment. Its explicit observation-only mode now validates the
 saved request and observes a pinned request-digest systemd template instance;
 the first nonempty recovery invocation is durably bound and may not be replaced.
 An absent manager Job or inactive worker stays unverified, never authorizes a
-retry, and cannot clear the retained intent. No systemd start/install operation
-is supplied. Trusted dispatch/manager wiring and executable recovery/outcome
-reconciliation remain required. Enqueue acknowledgment or job observation is not
-quiescence, restoration or permission to start.
+retry, and cannot clear the retained intent. The separate one-shot dispatch adapter
+now generates a fixed nonblocking start for only the pinned recovery request
+instance, inside an ordered live supervisor lease. This is not an old/candidate
+service-start operation or a worker request handshake. No unit is installed and
+no host unit was started in component verification. Trusted service/broker wiring,
+complete fence and executable recovery/outcome reconciliation remain required.
+Enqueue acknowledgment or job observation is not quiescence, restoration or
+permission to start the service. Static manager pins now exclude only the known
+runtime suffix of a strictly parsed single `ExecStart` display; unknown shapes
+refuse, and old raw-display pins are not silently accepted. Actual systemd-version
+compatibility still requires the disposable matrix.
 
 The bounded observation-loop core retains that lock after acknowledged enqueue
 and between ticks, with explicit interval/deadline/count and interruptible local

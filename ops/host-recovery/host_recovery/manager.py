@@ -28,6 +28,32 @@ DYNAMIC = frozenset(("InvocationID", "ControlGroup", "ActiveState", "SubState", 
 PROPERTIES = STATIC | DYNAMIC
 
 
+def static_properties(value):
+    """Pin command configuration, not systemctl's embedded execution telemetry.
+
+    Support exactly one ExecStart record with the complete known display shape.
+    Unsupported delimiters/extra commands or fields refuse rather than guessing
+    how argv was escaped. Keep the displayed argv byte-for-byte; never execute or
+    shell-parse it. Runtime suffixes are not restoration or running-state proof.
+    Existing raw-ExecStart pins intentionally do not match this projection.
+    """
+    raw = value["ExecStart"]
+    text = r"[^\x00-\x1f\x7f;{}\[\]]+"
+    pattern = (r"\{ path=(/[^\s\x00-\x1f\x7f;{}\[\]]+) ; argv\[\]=(" + text + r") ; ignore_errors=(yes|no)"
+               r" ; start_time=\[(" + text + r")\] ; stop_time=\[(" + text + r")\]"
+               r" ; pid=(0|[1-9][0-9]{0,9}) ; code=(\(null\)|[a-z-]+)"
+               r" ; status=(0|[1-9][0-9]*)(?:/[A-Za-z0-9_+-]+)? \}")
+    if type(raw) is not str or len(raw) > 65536:
+        raise Rejected("manager-execstart-display-unsupported")
+    match = re.fullmatch(pattern, raw)
+    if match is None or int(match[6]) > 4294967295:
+        raise Rejected("manager-execstart-display-unsupported")
+    result = {key: value[key] for key in STATIC}
+    result["ExecStart"] = {"schema": "host-recovery-execstart-config-v1", "path": match[1],
+                           "argv_display": match[2], "ignore_errors": match[3]}
+    return result
+
+
 def cgroup_path(value):
     return (type(value) is str and len(value) <= 1024 and CGROUP.fullmatch(value) is not None
             and all(part not in (".", "..") for part in value.split("/")[1:]))
@@ -186,7 +212,7 @@ class SystemdMutators:
                                  "--property=" + ",".join(sorted(PROPERTIES)), "--", binding.unit),
                                 deadline=deadline)
         value = properties(raw)
-        static = {key: value[key] for key in STATIC}
+        static = static_properties(value)
         if (value["Id"] != binding.unit or value["LoadState"] != "loaded"
                 or value["FragmentPath"] != binding.fragment_path or value["DropInPaths"] != ""
                 or digest(canonical(static)) != binding.properties_sha256

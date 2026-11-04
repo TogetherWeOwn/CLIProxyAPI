@@ -90,6 +90,8 @@ class RecoverySupervisor:
         self.persist_alert, self.transport_alert = persist_alert, transport_alert
         self.closed = False
         self.attempted = False
+        self.dispatch_request = None
+        self.dispatch_phase = None
         self.watch_started = False
         self.watch = None
         self.last_clock = None
@@ -254,7 +256,18 @@ class RecoverySupervisor:
             # Recheck after persistence: a slow fsync, owner loss or a newly
             # pending start must not be followed by an out-of-budget enqueue.
             self._current(end)
-            receipt = self.manager.enqueue_recovery(copy.deepcopy(request), deadline=end)
+            self.dispatch_request = copy.deepcopy(request)
+            self.dispatch_phase = "observe"
+            try:
+                receipt = self.manager.enqueue_recovery(copy.deepcopy(request), deadline=end)
+                # Legacy injected managers remain an external trusted boundary.
+                # Once the narrow lease is used, all three phases must complete;
+                # swallowing a denied/partial lease cannot fabricate an ACK.
+                if self.dispatch_phase not in ("observe", "complete"):
+                    raise Rejected("supervisor-dispatch-lease-incomplete")
+            finally:
+                self.dispatch_request = None
+                self.dispatch_phase = None
             Deadline(self._now, end).remaining()
             expected = {"request_id": request["request_id"], "accepted": True,
                         "separate_recovery_owner": True}
@@ -271,6 +284,36 @@ class RecoverySupervisor:
         except Exception as failure:
             self._fail(failure, "supervisor-dispatch-unconfirmed")
         return self.status()
+
+    def authorize_dispatch(self, request, *, deadline, phase):
+        """Revalidate the synchronous dispatch lease, never create one from a file.
+
+        Only the single enqueue call made after durable request readback has this
+        lease. Before/after it, on reopen, failure or close there is no grant, even
+        if the exact request remains on disk. The caller must not treat this as a
+        worker/start permission or a replacement for the complete fence boundary.
+        """
+        try:
+            next_phase = {"observe": "enqueue", "enqueue": "acknowledge", "acknowledge": "complete"}
+            if (self.closed or self.dispatch_request is None or self.error is not None
+                    or self.observe_existing or type(phase) is not str or phase not in next_phase
+                    or phase != self.dispatch_phase or not positive(deadline)
+                    or deadline > self.dispatch_request["deadline"]
+                    or canonical(request) != canonical(self.dispatch_request)):
+                raise Rejected("supervisor-dispatch-lease-required")
+            # Consume before calling external boundaries; reentry or any failed
+            # validation revokes the lease for the rest of this enqueue call.
+            self.dispatch_phase = None
+            self._current(deadline)
+            if canonical(private_record(self.fd, "reconcile-request.json")) != canonical(self.dispatch_request):
+                raise Rejected("supervisor-dispatch-request-changed")
+            Deadline(self._now, deadline).remaining()
+            self.dispatch_phase = next_phase[phase]
+            return True
+        except Exception:
+            self.dispatch_request = None
+            self.dispatch_phase = None
+            raise
 
     def observe_pending(self, *, observer, deadline):
         """Reconcile one existing dispatch by observation only, never enqueue again.

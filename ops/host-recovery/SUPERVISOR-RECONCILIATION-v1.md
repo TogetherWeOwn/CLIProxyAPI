@@ -69,9 +69,10 @@ The explicit template fragment and complete static-property digests are checked,
 including the reviewed worker command, ownership and non-restarting/non-delegated
 no-capability sandbox. The trusted manifest must authenticate these pins and bind
 the worker command to the request-instance identity; a hash or matching dictionary
-is not authentication. No template is installed and no request-bound dispatcher is
-implemented by this adapter. Existing callback dispatchers must independently use
-this same identity before their results could be integrated with it.
+is not authentication. No template is installed. This observer itself cannot
+dispatch; the separate one-shot dispatcher below uses the same request-instance
+identity. Generic callback dispatchers remain independently trusted boundaries,
+not authenticated by a matching receipt.
 
 A strict observation reports only `pending`, `running` or `inactive_unverified`.
 A pending numeric manager Job is not running recovery. Job absence, inactive or
@@ -139,9 +140,72 @@ signal fixture initially emitted literal backslash-n and failed synchronization;
 that red receipt is retained, not a signal-handling failure or manager result.
 
 **This is the bounded loop core only, not an installed persistent manager service.**
-No runnable unit/entrypoint, authenticated manager owner, narrow dispatch/worker
-handshake, complete fence or operational external alert sink is supplied. All
+No runnable unit/entrypoint, authenticated manager owner, trusted broker/worker
+handshake, complete fence or operational external alert sink is supplied. The
+separate fixed-argv dispatch subset below does not implement those boundaries. All
 start/fence-proven/recovery-completed/production-acceptance fields stay false.
+
+## One-shot request-instance dispatch adapter
+
+`dispatch.SystemdRecoveryDispatch` adds only a fixed-argv, nonblocking enqueue for
+`cpa-recovery@<request-digest>.service`, not service installation or a worker. It
+requires the exact digest-bound request envelope, a non-extended original-arm
+reserve, same boot and explicit accepted unit/fragment/static-configuration pins.
+There is no arbitrary unit/command, restart, reset-failed, cancellation or retry
+operation. Any attempted call exhausts the adapter, including validation/query
+failure. A replacement adapter is not authority to retry a retained request.
+
+`RecoverySupervisor.authorize_dispatch` exists only inside the synchronous enqueue
+call made after durable request persistence/readback. Its ordered `observe`,
+`enqueue`, `acknowledge` phases each revalidate private request bytes, owner, arm,
+entry set, clock and the complete-fence callback under the installation lock. Each
+phase is consumed before external callbacks; repeated/reordered/reentrant/failed
+validation revokes the lease. A partial/denied lease cannot be suppressed to produce
+an enqueue acknowledgment. Before/after the call, after close, and on reopen there
+is no lease, even with identical durable request bytes. Generic injected managers
+that never use this lease remain external trusted boundaries; this change does not
+authenticate them or silently turn their test receipts into real enforcement.
+
+The dispatcher first requires an inactive-unverified pinned job with no manager
+job or prior invocation. This is necessary, **not proof no job ever ran**: only the
+live supervisor's single-dispatch lease authorizes the initial enqueue. A pending,
+running or previously invoked worker is observed, never restarted. It requires
+strict empty successful local stdout and post-reply lease/boot/deadline validation.
+A lost/nonempty/late reply or changed fence/owner leaves dispatch uncertain. The
+original request remains; no acknowledgment claims running recovery or restoration.
+The same lock-retaining loop can subsequently observe the request instance.
+
+This adapter is **not an authenticated privilege broker, installed manager service,
+worker request handshake or independently enforced fence**. The actual fixed worker
+must still receive/validate the request instance, package/intent identity and its
+own manager invocation through a trusted narrow boundary. All service-start,
+recovery-completed, complete-fence-proven and production-acceptance fields remain
+false. No real systemd/daemon operation was performed by its tests.
+
+A separate-process test uses scripted manager/command/authorization boundaries,
+pauses after the scripted start reply but before enqueue acknowledgment, proves
+actual flock exclusion, receives SIGKILL and reopens the retained request without
+redispatch or a recreated lease. Another uses an actual local executable fixture
+to verify fixed argv generation. These are process/lock/persistence/transport
+component receipts, **not manager/daemon or full-package recovery evidence**.
+
+## Stable command-configuration pins
+
+The earlier static-property digest included `systemctl show`'s complete `ExecStart`
+display, whose timestamp/PID/exit suffix can change without configuration changes.
+`manager.static_properties` now projects a **single supported complete display**
+into `host-recovery-execstart-config-v1`: executable path, byte-for-byte displayed
+argv and ignore-errors policy. Only the known runtime suffix is excluded. It is
+never shell-parsed or executed. All other static settings remain pinned; dynamic
+unit state/invocation/job/PID checks remain separate and mandatory.
+
+Multiple commands, missing/unknown fields, delimiter/control-bearing or ambiguous
+argv, malformed runtime suffixes and unsupported future formats refuse. This is
+an intentionally restricted display grammar, not a general systemd parser or a
+claim of compatibility across systemd versions. Fixtures cover stopped/running
+telemetry changes and command/sandbox changes; **real installed-version validation
+is still due in an approved disposable environment**. Pins over the old raw display
+do not match this versioned projection; no operational pin has been replaced.
 
 ## Original-clock accounting
 
