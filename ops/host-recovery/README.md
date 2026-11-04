@@ -44,8 +44,13 @@ as a substitute for the accepted production binaries.
   or durable dispatch request, including an acknowledged one, requires manager
   reconciliation instead of automatic redispatch after process loss. A real
   separate-process SIGKILL/lock test uses **scripted manager callbacks**, not a
-  systemd recovery unit. No actual persistent service loop, installed fence,
-  recovery execution, cross-boot continuation, settlement or start grant exists.
+  systemd recovery unit. A bounded `watch_pending` loop now retains the same lock
+  after acknowledged enqueue and across read-only pending/running observations.
+  Explicit interval/deadline/count/interruptible-wait bounds never reset recovery
+  time; stop, expiry, inactive worker and uncertainty escalate unresolved. Actual
+  SIGTERM/SIGKILL tests use scripted manager/observer boundaries. No runnable
+  persistent manager service, installed fence, recovery execution, cross-boot
+  continuation, settlement or start grant exists.
   See [restart ownership and limits](SUPERVISOR-RECONCILIATION-v1.md).
 - `host_recovery/jobs.py` and explicit supervisor observation mode: read-only
   observation of a pinned `cpa-recovery@<request-digest>.service` instance after
@@ -56,7 +61,7 @@ as a substitute for the accepted production binaries.
   is not authenticated by a matching dictionary; manifest approval, trusted local
   transport and the independently enforced fence remain external prerequisites.
   Tests use scripted properties, a real reply helper and process SIGKILL, **not a
-  real manager or daemon**. This does not provide a persistent service/event loop.
+  real manager or daemon**. The loop core above is not a runnable persistent service.
 - `host_recovery/restore.py`: bounded whole-root restoration of original bytes,
   uid/gid/modes, with an explicit accepted list of candidate-only additions.
   Unknown entries, type changes, unsafe links/metadata and tampered baselines

@@ -90,6 +90,8 @@ class RecoverySupervisor:
         self.persist_alert, self.transport_alert = persist_alert, transport_alert
         self.closed = False
         self.attempted = False
+        self.watch_started = False
+        self.watch = None
         self.last_clock = None
         self.alert = None
         self.state = "fenced"
@@ -196,7 +198,9 @@ class RecoverySupervisor:
         allowed = {"supervisor-recovery-intent-required", "supervisor-intent-owner-mismatch",
                    "supervisor-dispatch-reconciliation-required", "supervisor-arm-pin-mismatch",
                    "supervisor-arm-schema", "supervisor-cross-boot-continuation-required",
-                   "supervisor-clock-continuation-required", "supervisor-expired-continuation-required"}
+                   "supervisor-clock-continuation-required", "supervisor-expired-continuation-required",
+                   "supervisor-watch-stopped", "supervisor-watch-expired",
+                   "supervisor-worker-outcome-unverified", "supervisor-watch-observation-limit"}
         self.error = str(failure) if isinstance(failure, Rejected) and str(failure) in allowed else fallback
         notice = {"schema": "host-recovery-notice-v1", "attempt_id": self.owner["attempt_id"],
                   "original_cause": "supervisor-restart-recovery-required", "recovery_error": self.error,
@@ -259,7 +263,10 @@ class RecoverySupervisor:
                            for key, item in expected.items())):
                 raise Rejected("supervisor-enqueue-unconfirmed")
             self.log._write("reconcile-enqueued.json", receipt)
+            self.initial_entries.add("reconcile-enqueued.json")
             Deadline(self._now, end).remaining()
+            self.pending_request = copy.deepcopy(request)
+            self.pending_sha256 = digest(canonical(request))
             self.state = "recovery_enqueued"
         except Exception as failure:
             self._fail(failure, "supervisor-dispatch-unconfirmed")
@@ -277,6 +284,76 @@ class RecoverySupervisor:
                 or self.pending_request is None or self.error is not None):
             raise Rejected("supervisor-pending-observation-not-authorized")
         self.attempted = True
+        return self._observe_pending(observer=observer, deadline=deadline)
+
+    def watch_pending(self, *, observer, deadline, interval, max_observations, stop, wait):
+        """Retain the installation lock while following a pending/running job.
+
+        stop() returns a strict boolean; wait(seconds) is an interruptible local
+        wait returning True for shutdown, False only after that interval elapsed
+        (for example threading.Event.is_set / wait). Neither callback grants any
+        permission. Every observation revalidates owner, fence and durable pins.
+        Shutdown, expiry, worker exit or uncertainty ends unresolved and alerts;
+        none clears the intent or restarts dispatch. This is a bounded loop core,
+        not manager service installation or a recovery-outcome oracle.
+        """
+        fresh = self.observe_existing and not self.attempted
+        enqueued = not self.observe_existing and self.state == "recovery_enqueued"
+        if (self.closed or self.watch_started or self.error is not None
+                or self.pending_request is None or not (fresh or enqueued)):
+            raise Rejected("supervisor-watch-not-authorized")
+        self.watch_started = True
+        self.attempted = True
+        try:
+            if (not positive(deadline) or not positive(interval)
+                    or type(max_observations) is not int or not 1 <= max_observations <= 4096):
+                raise Rejected("supervisor-watch-budget-required")
+            end = min(deadline, self.pending_request["deadline"])
+            start = self._now()
+            self.watch = {"started_monotonic": start, "last_monotonic": start,
+                          "deadline": end, "observations": 0, "max_observations": max_observations,
+                          "sampled_elapsed_seconds": 0.0}
+            while True:
+                now = self._now()
+                self.watch["last_monotonic"] = now
+                self.watch["sampled_elapsed_seconds"] = now - start
+                if now >= end:
+                    raise Rejected("supervisor-watch-expired")
+                stopping = stop()
+                if type(stopping) is not bool:
+                    raise Rejected("supervisor-watch-stop-schema")
+                if stopping:
+                    raise Rejected("supervisor-watch-stopped")
+                result = self._observe_pending(observer=observer, deadline=end)
+                if result["state"] == "recovery_unresolved":
+                    return result
+                self.watch["observations"] += 1
+                now = self._now()
+                self.watch["last_monotonic"] = now
+                self.watch["sampled_elapsed_seconds"] = now - start
+                if result["state"] == "recovery_job_inactive_unverified":
+                    raise Rejected("supervisor-worker-outcome-unverified")
+                if self.watch["observations"] >= max_observations:
+                    raise Rejected("supervisor-watch-observation-limit")
+                delay = min(interval, end - now)
+                if delay <= 0:
+                    raise Rejected("supervisor-watch-expired")
+                interrupted = wait(delay)
+                if type(interrupted) is not bool:
+                    raise Rejected("supervisor-watch-wait-schema")
+                after = self._now()
+                self.watch["last_monotonic"] = after
+                self.watch["sampled_elapsed_seconds"] = after - start
+                if interrupted:
+                    raise Rejected("supervisor-watch-stopped")
+                # Refuse early/spurious returns instead of spinning manager calls.
+                if after <= now or after < now + delay:
+                    raise Rejected("supervisor-watch-wait-incomplete")
+        except Exception as failure:
+            self._fail(failure, "supervisor-watch-unconfirmed")
+        return self.status()
+
+    def _observe_pending(self, *, observer, deadline):
         try:
             if not positive(deadline):
                 raise Rejected("supervisor-deadline-required")
@@ -330,4 +407,4 @@ class RecoverySupervisor:
                 "forward_allowed": False, "start_permission": False,
                 "recovery_completed": False, "installation_start_fence_proven": False,
                 "production_acceptance": False, "alert": copy.deepcopy(self.alert),
-                "job": copy.deepcopy(self.job)}
+                "job": copy.deepcopy(self.job), "watch": copy.deepcopy(self.watch)}

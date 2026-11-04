@@ -191,6 +191,14 @@ retry, and cannot clear the retained intent. No systemd start/install operation
 is supplied. Trusted dispatch/manager wiring and executable recovery/outcome
 reconciliation remain required. Enqueue acknowledgment or job observation is not
 quiescence, restoration or permission to start.
+
+The bounded observation-loop core retains that lock after acknowledged enqueue
+and between ticks, with explicit interval/deadline/count and interruptible local
+wait. Stop/SIGTERM, SIGKILL on reopen, expiry, an exited worker and any uncertain
+boundary leave recovery unresolved without redispatch or a start grant. Its latest
+sampled elapsed time is not complete recovery/alert time or downtime. Scripted
+manager/observer process-signal tests do not install or prove a persistent host
+service; the trusted entrypoint, complete fence and recovery oracle remain due.
 [Restart ownership source](SUPERVISOR-RECONCILIATION-v1.md) uses injected manager and
 complete-fence boundaries; it is not an installed persistent service or executable
 reboot recovery. A reviewed settlement/full-resume/continuation protocol is still

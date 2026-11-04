@@ -97,6 +97,52 @@ systemd template compatibility, daemon fencing or executable recovery evidence**
 All start/fence-proven/recovery-completed/production-acceptance fields stay false.
 The persistent service/event loop and trusted dispatch/worker handshake remain due.
 
+## Lock-retaining observation loop core
+
+`watch_pending` now follows an existing dispatch, or follows a durably acknowledged
+new enqueue **in the same installation-lock context**. It never closes/reopens the
+lock between enqueue and observation or between ticks. The existing one-shot
+`observe_pending` remains one-shot; a used/closed/failed context cannot enter a new
+watch. An uncertain enqueue cannot enter this loop: it must be reopened explicitly
+in observation-only mode, with no automatic redispatch.
+
+The caller must provide a positive interval, inclusive deadline, strict integer
+observation limit (1–4096), strict boolean stop check and interruptible local wait.
+For an actual service process the stop/wait pair can use `threading.Event.is_set`
+and `Event.wait`; manager/daemon calls still require their own deadline-enforcing
+trusted boundary. No wait, shutdown or query grants a new reserve. The effective
+end is at most the saved request deadline, and each wait is shortened to the
+remaining interval. Early/spurious wait returns and non-advancing clocks refuse
+instead of busy-spinning. Observation count bounds work even with tiny intervals.
+No timer thread, detached watchdog, manager retry or second recovery owner exists.
+
+Each tick uses the same pinned request/arm and complete owner/fence checks around
+the existing observation pair. Pending jobs may become a running invocation, whose
+first identity is durably bound. Replacement/loss remains unresolved. Inactive or
+exited workers immediately escalate as outcome-unverified; the loop cannot wait
+for or invent a restoration oracle. Stop, SIGTERM-driven interruption, limit or
+deadline exhaustion and uncertain callbacks all retain the original intent and
+attempt independent alert transport even if its receipt persistence fails.
+
+Status holds only the latest job, bounded count and sampled monotonic times.
+`sampled_elapsed_seconds` is the interval to the last valid loop sample, **not** a
+complete detection/recovery/persistence/alert or outage measurement. No on-time
+success or availability bound can be derived from it. Callback overrun/host loss
+still prevents a hard-real-time guarantee, and this loop cannot enforce a deadline
+inside an unresponsive injected boundary.
+
+Tests use deterministic clocks for scheduling, with separate actual subprocess
+SIGKILL and SIGTERM/Event-wait synchronization. The live contender cannot take the
+installation flock. SIGKILL preserves request/invocation binding for observation
+on reopen; SIGTERM returns unresolved with a local scripted alert receipt. The
+signal fixture initially emitted literal backslash-n and failed synchronization;
+that red receipt is retained, not a signal-handling failure or manager result.
+
+**This is the bounded loop core only, not an installed persistent manager service.**
+No runnable unit/entrypoint, authenticated manager owner, narrow dispatch/worker
+handshake, complete fence or operational external alert sink is supplied. All
+start/fence-proven/recovery-completed/production-acceptance fields stay false.
+
 ## Original-clock accounting
 
 A restart cannot invent the original failure instant. Without a durable, trusted
