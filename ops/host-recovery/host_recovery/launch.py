@@ -159,9 +159,10 @@ class _CallingSession:
 def _calling_session(approval, *, deadline, clock, boot_id, commands):
     """Retain the existing installation lock until final ancestry validation.
 
-    Private composition boundary for read-only status/observation. The caller must
-    not publish a result until context exit succeeds. It never acquires a second
-    lock or calls RecoverySupervisor's execution/fence callback boundary.
+    Private input/identity composition for status, observation and identity-only
+    broker exchange. The caller must not publish a result until context exit
+    succeeds. This session never acquires a second lock or grants execution/fence
+    authority. The broker separately requires its explicit complete-fence boundary.
     """
     if not isinstance(approval, LaunchApproval):
         raise Rejected("launch-typed-approval-required")

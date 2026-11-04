@@ -232,6 +232,17 @@ Supervisor alert fixed codes now agree with the local transport schema; the real
 IPC regression proves volatile admission despite failed receipt persistence,
 not external notification or operational admission readiness.
 
+The [calling-manager broker composition](BROKER-v1.md) now connects pinned launch
+inputs/manager self-identity to that one original-owner worker exchange under the
+same installation lock. A separately approved same-owner private endpoint and
+explicit complete-fence/alert boundaries remain mandatory. It never dispatches,
+restores or starts anything. The local `identity_reply_sent_only` receipt is not
+peer acknowledgment, recovery completion or fence retirement. Retained socket and
+claim state are never deleted/replaced to retry. Real broker SIGKILL and IPC tests
+use scripted manager/cgroup/fence observations, not installed-systemd recovery.
+Trusted provisioning, persistent service/worker, complete host fence, operational
+alerts and recovery outcome integration remain due; this is not an install command.
+
 Tree restoration only operates after externally proved quiescence. Pre-admission
 must reserve its deterministic staging paths in every root's accepted write set,
 and list every candidate-only path permitted for removal. It independently rescans

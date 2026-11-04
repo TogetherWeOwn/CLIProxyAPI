@@ -172,6 +172,19 @@ as a substitute for the accepted production binaries.
   supervisor restart nor wires operational alert transport. Process/filesystem
   tests and actual parser composition use **scripted manager/kernel observations**,
   not installed units/daemon recovery. See [observation and limits](OBSERVATION-v1.md).
+- `host_recovery/broker.py`: pinned calling-manager/input loading to one original
+  request's worker identity exchange under the **same installation lock**. It
+  borrows that locked journal, checks a separately approved private endpoint and
+  worker numeric owner, and revalidates original content/request/manager/path around
+  the explicit complete-fence boundary. No enqueue method or live CLI exists.
+  `identity_reply_sent_only` means a local identity reply was sent, not that it was
+  accepted or recovery ran. All execution/restoration/start/outcome/acceptance
+  grants remain false. Original deadlines and retained socket/claim state prevent
+  replay after ambiguity. Bootstrap/context-exit failures also attempt independent
+  alert transport despite receipt disk failure. Actual IPC and separate broker
+  SIGKILL tests still use **scripted manager/cgroup/fence boundaries**, not installed
+  systemd/daemon/full recovery. Provisioning, runnable persistent service, complete
+  fence and outcome integration remain due. See [composition and limits](BROKER-v1.md).
 - `host_recovery/restore.py`: bounded whole-root restoration of original bytes,
   uid/gid/modes, with an explicit accepted list of candidate-only additions.
   Unknown entries, type changes, unsafe links/metadata and tampered baselines
