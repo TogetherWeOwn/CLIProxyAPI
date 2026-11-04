@@ -16,7 +16,9 @@ does not authenticate approval.
 Both loaders take **already-open trusted directory descriptors**, not environment
 paths or request-selected roots. The installation boundary still has to obtain and
 bind those handles securely to the approved installation, authenticate the approved
-pins, retain the installation lock and exclude cooperating writers. Observing a
+pins, retain the installation lock and exclude cooperating writers. The acquisition
+context below supplies the local protected-path/lock subset, not the approval or
+installation channel. Observing a
 protected directory does not prove its ancestry or installation identity. There is
 no fallback to searching a home directory, extracting an archive or loading a nearby
 Python module. Hostile root, same-UID mutation, a compromised manager and malicious
@@ -110,6 +112,59 @@ Load time is not a recovery/drain/alert availability guarantee; continued bootst
 must recheck the saved deadline before claiming any identity. Reboot recovery and
 expired recovery need the separate bounded continuation protocol, not this loader.
 
+## Protected installation-handle acquisition
+
+`installation.open_installation` is a supervisor-owner context for obtaining the
+loader handles. It takes a separate `InstallationApproval`: installation ID and
+two **independently supplied** `DirectoryApproval` values, each binding an exact
+absolute path, device, inode, numeric UID/GID and mode. These values must come from
+the approved installer/manager channel. The component neither discovers them from
+adjacent content nor authenticates their origin. It never creates directories,
+installs code, relaxes permissions or changes existing service configuration.
+
+Acquisition starts at `/`, opens every component with directory/no-follow/close-on-
+exec flags and retains the complete descriptor chain. Every ancestor must be owned
+by root or that root's approved UID, have no group/other write or special mode
+bits, and have no unsupported xattrs/ACLs. A sticky world-writable ancestor is not
+accepted. Paths must be exact absolute paths without empty, dot or parent segments;
+there are at most 64 components and 4096 characters. Leaf device/inode, UID/GID and
+mode must match independent pins. Content and journal roots must be separate,
+non-nested and not aliases of the same device/inode. Journal mode is exactly `0700`.
+
+The context takes a nonblocking exclusive flock on the **journal directory inode**,
+the same object used by `durable.installation_lock` and `recovery_owner`. There is
+no second lock file, attempt-specific lock namespace or wait-and-success fallback.
+A supervisor retaining the existing lock excludes this context and vice versa;
+workers must not take this owner context while their supervisor holds the lock.
+All successful and exceptional exits close the owned descriptors. A retained
+`InstallationHandles` object is revoked before descriptor closure.
+
+The chain is revalidated after acquisition, around `snapshot` and on normal context
+exit. Each opened inode and protection metadata must still agree with the entry
+under its retained parent; a detached old directory is not a fresh approved root.
+Observed replacement, permission/ownership/metadata change or read failure poisons
+the handles for the rest of that session. Directory mtime/size are not identity:
+ordinary journal writes cannot create a fresh lock namespace. No open descriptor
+is promised safe against an unobserved hostile same-UID/root actor.
+
+`handles.snapshot(...)` composes the content and original-recovery-input loaders
+under this same lock. Their approval owners must match the root pins and recovery
+installation ID must match the layout approval. Both sets of captured bytes are
+returned only after final ancestry revalidation. Loading cannot return a new
+recovery allowance, consume a worker claim or grant execution/restoration/start.
+Content snapshots are immutable captured bytes, not executable pathnames. This
+context does **not** enter a worker bootstrap or instantiate a live supervisor.
+
+The caller's trusted mount namespace, independently authenticated approvals,
+provisioned paths/inode pins, interpreter/code integrity and exclusion of other
+writers remain prerequisites. Protected path observations are not mount-namespace
+attestation; administrator-controlled mount transitions are not discovered as
+approval. A privileged/hostile namespace change or inode reuse after destruction
+is outside this local binding model. No guarantee can bound uninterruptible I/O.
+The archive hash remains separate from the content-index digest. Failure leaves
+original records/latches untouched; the outer owner must attempt its independent
+alert path, not log restricted exception/path text or treat closure as recovery.
+
 ## Verification and remaining wiring
 
 Synthetic owned-tree tests exercise real filesystem reads, exact inventory and
@@ -121,9 +176,19 @@ owner changes and missing originals despite terminal-looking records. One test
 loads an actual supervisor-written request while that supervisor retains the real
 installation-directory lock; manager/fence callbacks are **scripted**.
 
+Installation-acquisition tests use real owned temporary roots, independently
+supplied inode pins, path/link/mode/metadata negatives, deterministic replacements
+and failures at descriptor-acquisition/metadata steps, checking descriptor cleanup.
+They show lock exclusion with the existing supervisor primitive and a separate
+process, plus release after SIGKILL without changing the original journal records.
+The composed snapshot tests read real synthetic content and original requests;
+there is no actual manager, daemon or installed service. Fixtures are created only
+in fresh directories below the numeric test user's protected home (not `$HOME`,
+which a harness may redirect below `/tmp`). Existing ancestors are never chmodded.
+
 These are component results, not installed-systemd/daemon or full recovery evidence.
-Trusted installation/approval/handle acquisition, runnable persistent services,
-broker wiring, the independently enforced boot/internal-restart/start/writer/pending
+Trusted installation, authenticated approval/inode-pin provisioning, runnable
+persistent services, broker wiring, the independently enforced boot/internal-restart/start/writer/pending
 operation fence, full recovery execution/oracle, operational external alert route,
 source-bound replay/probe completeness and the approved disposable full-system
 matrix remain prerequisites. Neither this component nor its factory changes any

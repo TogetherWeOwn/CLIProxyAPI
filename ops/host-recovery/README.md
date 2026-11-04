@@ -127,6 +127,19 @@ as a substitute for the accepted production binaries.
   The caller must hold the installation lock and exclude cooperating writers.
   Local reads cannot repair uninterruptible storage or provide a hard-real-time
   bound. No restoration/start permission is added. See [loading contract](LOADING-v1.md).
+- `host_recovery/installation.py`: protected-path acquisition of the loaders' two
+  directory handles from independent installation/path/device/inode/owner pins.
+  No-follow ancestor/edge checks, protected ownership/modes/metadata and separate
+  roots are mandatory; world/group-writable ancestors, including sticky `/tmp`,
+  refuse. A nonblocking flock on the existing journal-directory inode retains the
+  **same installation lock**, not a new lock namespace. Validated handles compose
+  both read-only loaders, recheck ancestry before returning captured bytes, and
+  revoke on observed changes, faults or context exit. No directories/permissions
+  are created/changed. This is **not authenticated approval/pin provisioning,
+  mount-namespace attestation, installation, a live supervisor or execution/start
+  permission**. Real filesystem/process/SIGKILL/lock tests remain component
+  evidence, not installed-systemd/daemon recovery proof. See the
+  [acquisition boundary](LOADING-v1.md#protected-installation-handle-acquisition).
 - `host_recovery/restore.py`: bounded whole-root restoration of original bytes,
   uid/gid/modes, with an explicit accepted list of candidate-only additions.
   Unknown entries, type changes, unsafe links/metadata and tampered baselines
