@@ -219,8 +219,19 @@ as a substitute for the accepted production binaries.
   recovery path. Actual built-helper/coordinator tests use synthetic protected
   descriptors and **scripted manager/fence/schema boundaries**. No runnable host
   supervision, actual renderer, schema validation, authenticated approval/pin
-  provisioning, dual-artifact verification or recovery/start authority is supplied.
+  provisioning or recovery/start authority is supplied by the YAML helper.
   See [strict subset, protocol and composition limits](INPUT-GUARD-v1.md).
+- `host_recovery/artifacts.py`: protected, original-intent-bound archive and installed
+  library availability/dual hashes plus streamed exact ZIP-member correspondence.
+  Opened descriptors are retained; both files are rehashed after parsing and path/
+  owner/metadata/fence/deadline uncertainty refuses. No extraction or plugin loading.
+  An optional artifact gate composes with the existing admission/stopped exact-input
+  barrier without replacing listener/schema checks or blocking recovery on a bad
+  candidate archive. Tests use actual synthetic files/ZIPs and the built YAML helper
+  with **scripted host/fence/schema/oracle boundaries**; no actual producer-package
+  compatibility or integrated recovery acceptance is claimed. Authenticated approval,
+  image availability and operational wiring remain due. See
+  [artifact subset, trust and limits](ARTIFACT-GUARD-v1.md).
 - `host_recovery/coordinator.py`: component forward/recovery ordering, injected
   manager/daemon boundaries, registration-before-start, strict post-check and
   restoration-oracle acknowledgment shapes, original versus recovery errors,

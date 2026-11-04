@@ -14,6 +14,7 @@ import selectors
 import stat
 import subprocess
 
+from .artifacts import PluginArtifactGate
 from .commands import Deadline
 from .durable import Rejected, canonical, digest, signature
 from .loading import owner, pin
@@ -173,21 +174,28 @@ class GuardedBoundary:
     recovery/start oracle's responsibility. This is opt-in source composition, not
     a runnable production supervisor or an installed admission/start fence.
     """
-    def __init__(self, boundary, gate, *, preflight_deadline):
+    def __init__(self, boundary, gate, *, preflight_deadline, artifact_gate=None):
         if not isinstance(gate, ExactInputGate):
             raise Rejected("input-gate-required")
-        self.boundary, self.gate = boundary, gate
+        if artifact_gate is not None and not isinstance(artifact_gate, PluginArtifactGate):
+            raise Rejected("artifact-gate-required")
+        self.boundary, self.gate, self.artifact_gate = boundary, gate, artifact_gate
         self.preflight_deadline = preflight_deadline
+
+    def _verify(self, intent, deadline):
+        if self.artifact_gate is not None and self.artifact_gate.verify(intent, deadline=deadline) is not True:
+            return False
+        return self.gate.verify(intent, deadline=deadline)
 
     def preflight(self, intent):
         if self.boundary.preflight(copy.deepcopy(intent)) is not True:
             return False
-        return self.gate.verify(intent, deadline=self.preflight_deadline)
+        return self._verify(intent, self.preflight_deadline)
 
     def revalidate_stopped(self, intent, *, deadline):
         if self.boundary.revalidate_stopped(copy.deepcopy(intent), deadline=deadline) is not True:
             return False
-        return self.gate.verify(intent, deadline=deadline)
+        return self._verify(intent, deadline)
 
     def __getattr__(self, name):
         return getattr(self.boundary, name)

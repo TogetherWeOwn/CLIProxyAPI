@@ -125,7 +125,10 @@ semantic-hash command and no schema/rendering claim in this receipt.
    complete input delivery. Partial/extra/authorizing receipts, broken pipes,
    overflow, helper failure or deadline/clock uncertainty refuse with a fixed code.
 5. `GuardedBoundary` first retains the existing underlying preflight or stopped
-   revalidation check, then requires fresh exact-input comparison. Admission
+   revalidation check, then requires fresh exact-input comparison. Its optional
+   [artifact gate](ARTIFACT-GUARD-v1.md) checks the archive and installed library
+   before the comparison under that same deadline; omission is not artifact
+   coverage. Neither component replaces actual rendering/schema approval. Admission
    failure reaches no intent/arm/stop. A stopped failure follows the coordinator's
    existing recovery path without forward mutation/candidate start. Existing
    listener/schema checks cannot be replaced by a comparison result. Recovery
