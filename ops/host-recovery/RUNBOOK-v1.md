@@ -181,6 +181,24 @@ unsafe metadata, type substitutions or unsupported directory access rather than
 removing unrelated files or relaxing permissions. This tree oracle does not verify
 original images, replay or plugin absence; the full pre-start oracle remains due.
 
+The command/manager/daemon adapter source now separately models manager-owned
+mutators and daemon-owned service objects. It pins systemd unit properties and
+fragments, reads recursive cgroup-v2 populated state, requests whole-group kill,
+checks full immutable daemon IDs/images/ownership/restart policy, and reinspects
+service objects after kill. Tests use synthetic child processes, scripted CLI
+responses and fake mountinfo/files. **No real manager or daemon drill was run.**
+
+Both adapters still require an independently enforced start/pending-operation
+fence and an authorized narrow privilege boundary; neither creates one. Restart
+policy `no` does not fence Compose/manual starts or already-pending daemon work.
+The generic local command transport is not such a privilege boundary. A helper
+reply/death, stable inspection snapshot, main PID exit or empty cgroup is not an
+all-writers-quiescent receipt. No create/start operation or unit installation is
+exposed by these adapters. Do not give this partial package general Docker/root
+access, supply a guessed fence acknowledgment or use it as a runnable recovery
+supervisor. The persistent owner, boot/start interlock, worker dispatch and full
+oracle integration remain implementation work.
+
 ## Gates still closed
 
 Actual disposable systemd/cgroup/daemon package drills and all transition,

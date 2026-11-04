@@ -54,6 +54,37 @@ as a substitute for the accepted production binaries.
   persistent service loop, resume/continuation, actual manager, listener or
   executable post-check implementation exists here yet. Mock acknowledgments
   are **not** complete host/package/start-fence evidence.
+- `host_recovery/commands.py`: bounded local subprocess output and same-clock
+  deadlines, a fixed minimal environment and no shell/session escape. Helper
+  failure, output overflow or lost reply is an uncertain operation, not a daemon
+  cancellation. Deadline cleanup kills only the helper; the owning supervisor
+  must reap it and independently quiesce the complete manager/daemon boundary.
+  This is **not a privilege boundary or a hard-real-time watchdog**.
+- `host_recovery/manager.py`: explicit systemctl command generation, strict unit
+  property/fragment pins, distinct non-nested forward/recovery unit bindings,
+  whole-control-group SIGKILL and repeated manager/cgroup-v2 observations.
+  Non-root, non-delegated, no-capability mutator properties are required. The
+  recursive kernel populated bit, no pending job and inactive state are all
+  checked; PID exit alone is insufficient. Missing/reused groups or changed
+  invocation/configuration refuse or remain pending. No units are installed or
+  started. Tests use **scripted manager/fake-mount fixtures**, not actual systemd.
+- `host_recovery/daemon.py`: explicit local Docker endpoint, projected inspection
+  without environment/mount/credential output, full immutable old/candidate IDs,
+  exact installation/attempt ownership, no-restart/no-auto-remove checks and
+  reinspection of every stopped object. Multiple attempt-owned objects are all
+  considered for recovery; short/foreign/changed IDs fail closed. It exposes no
+  create/start/update/restart/remove operation. Tests use **scripted CLI replies**,
+  not an actual daemon or installed authorization boundary.
+
+The manager and daemon adapters both require an independent, currently enforced
+start/pending-operation fence. Their injected Boolean acknowledgment is an
+interface requirement, **not an implementation or proof of that fence**. Source
+property pins alone do not authenticate policy approval. The persistent supervisor,
+privilege broker, boot/restart/start authorization and integration of these
+adapters with the coordinator remain missing. An empty cgroup, `restart=no`, stable
+inspection snapshots or a killed helper cannot substitute for those prerequisites.
+No broad Docker/root permission is provided or requested by this source.
+
 - Diagnostic HTTP ingress → executor → plugin metadata bridge, using the
   existing metadata ABI without a provider-kit change. See the carrier below.
 
@@ -120,9 +151,12 @@ human acknowledgment. It is **not yet an alert listener or preflight handshake**
    separate manager-owned forward/recovery cgroups, all six semantic operations,
    boot fence and reconciliation after manager/worker loss. No second Bash
    rollback owner.
-2. Narrow daemon boundary, immutable object IDs registered durably before start,
-   ambiguous-create reconciliation, daemon/reboot restart prevention and complete
-   cgroup **plus daemon-object** quiescence before restore.
+2. Integrate the new manager/daemon observation/quiescence adapters with an actual
+   independently enforced narrow start/pending-operation fence and persistent
+   supervisor. Complete create/start authorization, immutable IDs registered
+   durably before start, ambiguous-create reconciliation and daemon/reboot restart
+   prevention. Scripted adapter tests do not prove complete cgroup **plus daemon**
+   quiescence or install a privileged authorization boundary.
 3. Full write-set conversion and integration of the tree-restoration component
    across every approved root; complete independent config/Compose/image/replay/
    no-plugin oracle before old start; safe journal settlement, supervisor resume
