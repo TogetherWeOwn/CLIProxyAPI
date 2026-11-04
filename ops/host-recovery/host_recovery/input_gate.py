@@ -190,6 +190,17 @@ class ComposeInputGate(ExactInputGate):
                b'"application_validated":true,"compose_validated":true,"start_authorized":false}\n')
 
 
+class MetaInputGate(ExactInputGate):
+    """Require the source-pinned Meta shape, application and Compose checks.
+
+    Schema shape is not authenticated migration policy, producer execution,
+    asynchronous evidence completeness or recovery/start authority.
+    """
+    receipt = (b'{"schema":"host-recovery-meta-input-result-v1","matched":true,'
+               b'"application_validated":true,"compose_validated":true,'
+               b'"meta_config_validated":true,"start_authorized":false}\n')
+
+
 class GuardedBoundary:
     """Compose the comparison with existing preflight/stopped checks, not replace them.
 

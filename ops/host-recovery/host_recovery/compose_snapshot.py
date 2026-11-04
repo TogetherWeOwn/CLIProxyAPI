@@ -19,6 +19,8 @@ RENDERER = "compose-go/v2@v2.16.2:single-file-model-v1"
 MAX_ENVIRONMENT = 64 * 1024
 PROJECT = re.compile(r"[a-z0-9][a-z0-9_-]{0,127}\Z", re.ASCII)
 VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z", re.ASCII)
+META_PROFILE = ("meta@c54c8c86989032f269ebfb49e95c6fb16fb9f2db:"
+                "config.go@4665020ba0b2688dda79578f3f8717878a50212c8fd092f856c728c563ddbfd8:strict-replay-v1")
 
 
 class ProtectedComposeSnapshot:
@@ -28,6 +30,11 @@ class ProtectedComposeSnapshot:
     compares to the corresponding independently pinned frozen models. Frozen
     outputs must use this renderer version, not an arbitrary Docker CLI version.
     """
+    def _envelope(self, inputs, captured):
+        return {"schema": "host-recovery-compose-request-v1", "renderer": RENDERER,
+                "project_name": self.project_name, "inputs": decode(inputs),
+                "before_environment": captured["before"], "after_environment": captured["after"]}
+
     def __init__(self, *, snapshot, environment, project_name, check, clock):
         if (not isinstance(snapshot, ProtectedInputSnapshot) or not isinstance(environment, InputPairApproval)
                 or type(project_name) is not str or PROJECT.fullmatch(project_name) is None
@@ -76,9 +83,7 @@ class ProtectedComposeSnapshot:
                         raise Rejected("compose-snapshot-environment-invalid")
                     captured[side] = values
                 inputs = self.snapshot(intent, deadline=deadline)
-                result = canonical({"schema": "host-recovery-compose-request-v1", "renderer": RENDERER,
-                                    "project_name": self.project_name, "inputs": decode(inputs),
-                                    "before_environment": captured["before"], "after_environment": captured["after"]})
+                result = canonical(self._envelope(inputs, captured))
                 if len(result) > MAX_REQUEST:
                     raise Rejected("compose-snapshot-request-limit")
                 for side, source in files.items():
@@ -98,3 +103,14 @@ class ProtectedComposeSnapshot:
             return result
         except Exception:
             raise Rejected("compose-snapshot-unconfirmed") from None
+
+
+class ProtectedMetaSnapshot(ProtectedComposeSnapshot):
+    """Same retained nine-file capture with a source-pinned Meta shape profile.
+
+    This changes only the helper envelope. Authentication of policy, installation
+    roles and actual producer artifact remains external; no plugin is executed.
+    """
+    def _envelope(self, inputs, captured):
+        return {"schema": "host-recovery-meta-input-request-v1", "producer_config": META_PROFILE,
+                "inputs": super()._envelope(inputs, captured)}

@@ -231,7 +231,14 @@ as a substitute for the accepted production binaries.
   supervision, authenticated approval/pin provisioning or recovery/start authority
   is supplied. See [strict subset and protocol](INPUT-GUARD-v1.md),
   [application validation scope](APPLICATION-GUARD-v1.md) and
-  [Compose renderer scope](COMPOSE-GUARD-v1.md).
+  [Compose renderer scope](COMPOSE-GUARD-v1.md). The separate `metacmd` helper,
+  `ProtectedMetaSnapshot` and `MetaInputGate` compose a reviewed-source-pinned
+  conservative Meta replay-config shape with those checks and a distinct receipt.
+  Both sides validate; proposed global/Meta plugin activation must be explicit.
+  Malformed/unknown Meta options refuse rather than relying on the producer's
+  error-discarding parser. Other plugins remain opaque. This is not full A+B
+  migration-policy approval, installed-artifact identity or producer execution;
+  see [source/profile and unsupported-field limits](META-GUARD-v1.md).
 - `host_recovery/input_snapshot.py`: reusable protected seven-file capture for the
   exact-input gate: three before/after source/frozen-render pairs and an independent
   delta policy, all bound to the original intent and external raw pins. The shared
