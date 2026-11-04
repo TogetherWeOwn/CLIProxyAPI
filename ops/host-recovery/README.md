@@ -359,8 +359,16 @@ No broad Docker/root permission is provided or requested by this source.
   **Every report remains prefix-only and non-accepting.** HTTP completion, EOF,
   silence, contiguous sequences and no failure marker cannot establish an
   asynchronous producer's complete drain. There is no accepting mode, flush
-  implementation, actual HTTP probe or real container/source mapping here.
+  implementation or real container/source mapping here.
   See [collection status and immutable fixture provenance](REPLAY-COLLECTION-v1.md).
+- `host_recovery/probe.py` and `probe_http.py`: two actual synthetic loopback
+  Messages POSTs with request-origin IDs, exact tool-use/result linkage and preserved
+  thinking/signature blocks. A fresh post-tool confirmation prevents initial-nonce
+  shortcuts. Six private durable raw artifacts, strict response/framing limits,
+  one inclusive local helper deadline and no redirects/retries/credential scraping.
+  **Not live-probe authorization or real ingress/producer/container evidence.**
+  All source-authentication/collection/drain/replay/production acceptance fields
+  remain false. See [HTTP probe boundaries and retained regression](HTTP-PROBE-v1.md).
 - Diagnostic HTTP ingress → executor → plugin metadata bridge, using the
   existing metadata ABI without a provider-kit change. See the carrier below.
 
