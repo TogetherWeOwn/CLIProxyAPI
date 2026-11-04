@@ -49,15 +49,20 @@ def credential_packet(sock, expected):
     return decode(raw)
 
 
-def cancellation_pending(fd):
-    """A caller-owned readable descriptor revokes this exchange; never consume it."""
-    if fd is None:
-        return False
+def wait_for_cancellation(fd, timeout):
+    """Observe a caller-owned descriptor without select's FD_SETSIZE limit."""
     if type(fd) is not int or fd < 0:
         raise Rejected("worker-cancellation-descriptor-required")
     # Closed/invalid descriptors refuse rather than disabling cancellation.
     os.fstat(fd)
-    return bool(select.select([fd], [], [], 0)[0])
+    with selectors.DefaultSelector() as wait:
+        wait.register(fd, selectors.EVENT_READ)
+        return bool(wait.select(timeout))
+
+
+def cancellation_pending(fd):
+    """A caller-owned readable descriptor revokes this exchange; never consume it."""
+    return False if fd is None else wait_for_cancellation(fd, 0)
 
 
 class PeerSession:
@@ -90,7 +95,7 @@ class PeerSession:
         """
         try:
             return (not self.closed and not cancellation_pending(self.cancel_fd)
-                    and not select.select([self.pidfd], [], [], 0)[0]
+                    and not wait_for_cancellation(self.pidfd, 0)
                     and peer(self.sock, self.peer["uid"]) == self.peer)
         except (OSError, ValueError):
             return False

@@ -29,7 +29,10 @@ read descriptor. All boundaries must already be independently provisioned.
    in a passive unresolved hold. This also happens after bootstrap or exchange
    failure once the installation was acquired. The service performs no recovery,
    validation, persistence or operational retry in that hold.
-5. Retain one alarm at the original shortened deadline. Expiration attempts a
+5. Share one timer through input loading, initial validation, exchange and hold,
+   so the loaded original deadline survives even a pre-yield validation failure.
+   Check it before honoring shutdown readiness; simultaneous shutdown and expiry
+   cannot suppress escalation. Retain one alarm at that deadline. Expiration attempts a
    distinct `supervisor-expired-continuation-required` notice once, including when
    receipt persistence fails. Clock uncertainty instead reports
    `supervisor-clock-continuation-required`; it is not measured expiry. This is
@@ -53,7 +56,8 @@ code. A retained file descriptor does not establish pathname continuity forever.
 
 The service owner supplies a read pipe/socket that stays open and unreused for
 the entire call. Readability or EOF requests shutdown. The exchange never
-consumes it. A signal-aware owner can write a byte to it; this wakes both an idle
+consumes it. Selector-based cancellation and passive hold support valid descriptors
+above `FD_SETSIZE`. A signal-aware owner can write a byte to it; this wakes both an idle
 listener and connected-peer I/O waits. Cancellation revokes the server's peer
 lease; endpoint closure revokes worker execution even if the supervisor process
 survives. Cancellation is not proof that helpers, cgroups or daemon jobs stopped.

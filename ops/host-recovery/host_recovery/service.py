@@ -6,7 +6,6 @@ and retains command cleanup ownership. No callback is imported from configuratio
 A handled request remains latched, even after a positively observed worker result.
 """
 import os
-import select
 import stat
 import time
 
@@ -16,7 +15,7 @@ from .commands import Deadline
 from .durable import Rejected, canonical, digest, notify
 from .installation import DirectoryApproval, open_installation
 from .launch import LaunchApproval, _calling_session
-from .worker import cancellation_pending
+from .worker import cancellation_pending, wait_for_cancellation
 
 
 def _cancel_descriptor(fd):
@@ -97,8 +96,7 @@ def run_supervisor(approval, *, endpoint, deadline, fence, result_oracle, persis
             if not cancellation_pending(cancel_fd):
                 try:
                     with _calling_session(approval, deadline=deadline, clock=clock, boot_id=boot_id,
-                                          commands=commands, handles=handles) as session:
-                        timer.deadline = min(timer.deadline, session.deadline)
+                                          commands=commands, handles=handles, timer=timer) as session:
                         receipt = _serve_session(session, endpoint=endpoint, fence=guarded_fence,
                             result_oracle=result_oracle, persist_alert=persist_alert, transport_alert=alert_transport,
                             clock=clock, boot_id=boot_id, commands=commands, fault=fault, cancel_fd=cancel_fd)
@@ -111,7 +109,7 @@ def run_supervisor(approval, *, endpoint, deadline, fence, result_oracle, persis
             # No recovery action or timer renewal after this point. Even expiry,
             # a failed notice or a worker report cannot release the live lock.
             alarm = True
-            while not cancellation_pending(cancel_fd):
+            while True:
                 remaining = None
                 if alarm:
                     try:
@@ -122,8 +120,9 @@ def run_supervisor(approval, *, endpoint, deadline, fence, result_oracle, persis
                         report("supervisor-expired-continuation-required" if expired
                                else "supervisor-clock-continuation-required")
                         alarm = False
-                if not cancellation_pending(cancel_fd):
-                    select.select([cancel_fd], [], [], remaining)
+                if cancellation_pending(cancel_fd):
+                    break
+                wait_for_cancellation(cancel_fd, remaining)
         return result
     except Exception:
         # Invalid ancestry/failed lock acquisition cannot be called a retained

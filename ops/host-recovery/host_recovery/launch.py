@@ -156,7 +156,7 @@ class _CallingSession:
 
 
 @contextmanager
-def _calling_session(approval, *, deadline, clock, boot_id, commands, handles=None):
+def _calling_session(approval, *, deadline, clock, boot_id, commands, handles=None, timer=None):
     """Retain the existing installation lock until final ancestry validation.
 
     Private input/identity composition for status, observation and identity-only
@@ -166,7 +166,10 @@ def _calling_session(approval, *, deadline, clock, boot_id, commands, handles=No
     """
     if not isinstance(approval, LaunchApproval):
         raise Rejected("launch-typed-approval-required")
-    timer = Deadline(clock, deadline)
+    if timer is None:
+        timer = Deadline(clock, deadline)
+    elif not isinstance(timer, Deadline) or timer.clock is not clock or timer.deadline != deadline:
+        raise Rejected("launch-original-timer-required")
     timer.remaining()
     observer = SystemdSupervisorIdentity(systemctl=approval.systemctl, commands=commands,
                                          binding=approval.supervisor, clock=clock, boot_id=boot_id)

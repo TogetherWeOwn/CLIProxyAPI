@@ -49,11 +49,10 @@ read,write=os.pipe2(os.O_NONBLOCK|os.O_CLOEXEC)
 def stop(*args):
     os.write(write,b'stop')
 for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,stop)
-real_select=service.select.select
-def wait(*args):
-    if len(args)==4 and args[3]!=0:
-        print('READY',flush=True)
-    return real_select(*args)
+real_wait=service.wait_for_cancellation
+def wait(fd,timeout):
+    print('READY',flush=True)
+    return real_wait(fd,timeout)
 def listener(*args,**kwargs):
     if value['mode']=='idle':
         result=worker.WorkerListener(*args,**kwargs)
@@ -64,7 +63,7 @@ def listener(*args,**kwargs):
 with patch.object(launch,'SystemdSupervisorIdentity',return_value=identity), \
      patch.object(broker,'SystemdRecoveryJobs',return_value=SimpleNamespace(observe=case.observe,observe_worker=case.observe_worker)), \
      patch.object(broker,'WorkerListener',side_effect=listener), \
-     patch.object(service.select,'select',side_effect=wait):
+     patch.object(service,'wait_for_cancellation',side_effect=wait):
     result=service.run_supervisor(approval,endpoint=DirectoryApproval(**value['endpoint']),deadline=1170.,
         fence=case.fence,result_oracle=lambda intent,result,**kw:outcomes.expected_oracle(intent,result),
         persist_alert=lambda n:None,transport_alert=lambda n:True,commands=SimpleNamespace(run=lambda *a,**kw:b''),
@@ -109,15 +108,14 @@ class ServiceTests(unittest.TestCase):
             commands=SimpleNamespace(run=lambda *a, **kw: b""), cancel_fd=self.read,
             clock=lambda: self.case.fixture.now, boot_id=lambda: self.case.owner["boot_id"])
         args.update(changes)
-        real_select = service.select.select
-        def select(*args):
-            return real_select(*args) if len(args) == 4 and args[3] == 0 else self.hold(*args)
+        def wait(fd, timeout):
+            return self.hold([fd], [], [], timeout)
         with patch.object(launch, "SystemdSupervisorIdentity", return_value=self.case.identity), \
                 patch.object(broker, "SystemdRecoveryJobs", return_value=self.case.job), \
                 patch.object(broker, "WorkerListener", side_effect=self.listener), \
-                patch.object(service.select, "select", side_effect=select):
-            # cancellation_pending also uses select; let real nonblocking probes
-            # run unchanged while instrumenting only the passive blocking hold.
+                patch.object(service, "wait_for_cancellation", side_effect=wait):
+            # Only the passive hold is instrumented; kernel cancellation probes
+            # and broker/peer I/O remain untouched.
             return service.run_supervisor(self.case.fixture.approval, **args)
 
     def assert_unsettled(self, result):
@@ -143,6 +141,52 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(result["worker_result_observed"])
         self.assertEqual(len(self.case.listeners), 1)
         self.assertTrue(all(end == 1170. for end in self.case.deadlines))
+        self.assert_unsettled(result)
+
+    def test_pre_yield_validation_failure_retains_loaded_original_deadline(self):
+        self.case.identity.observe_owner.side_effect = durable.Rejected("scripted initial validation failure")
+        def advance():
+            if self.held == 1:
+                self.case.fixture.now = 1180.
+                return False
+        self.on_hold = advance
+        result = self.run_service(deadline=9999.)
+        self.assertFalse(result["worker_result_observed"])
+        self.assertTrue(result["hold_deadline_missed"])
+        self.assertIn("supervisor-expired-continuation-required", [n["recovery_error"] for n in self.case.notices])
+        self.assertEqual(self.case.listeners, [])
+        self.assert_unsettled(result)
+
+    def test_shutdown_at_expiry_cannot_suppress_deadline_alarm(self):
+        self.on_hold = lambda: setattr(self.case.fixture, "now", 1171.)
+        result = self.run_service()
+        self.assertTrue(result["hold_deadline_missed"])
+        self.assertEqual([n["recovery_error"] for n in self.case.notices],
+                         ["supervisor-expired-continuation-required"])
+        self.assert_unsettled(result)
+
+    def test_hold_clock_cannot_regress_relative_to_final_exchange_observation(self):
+        self.case.after_reply = lambda process: setattr(self.case.fixture, "now", 1150.)
+        def regress():
+            if self.held == 1:
+                self.case.fixture.now = 1100.
+                return False
+        self.on_hold = regress
+        result = self.run_service()
+        self.assertIsNone(result["hold_deadline_missed"])
+        self.assertEqual([n["recovery_error"] for n in self.case.notices],
+                         ["supervisor-clock-continuation-required"])
+        self.assert_unsettled(result)
+
+    def test_high_numbered_cancellation_descriptor_is_supported_through_hold(self):
+        high = fcntl.fcntl(self.read, fcntl.F_DUPFD_CLOEXEC, 1100)
+        self.addCleanup(os.close, high)
+        self.read = high
+        self.assertFalse(worker.wait_for_cancellation(high, 0))
+        result = self.run_service()
+        self.assertTrue(worker.wait_for_cancellation(high, 0))
+        self.assertTrue(result["worker_result_observed"])
+        self.assertEqual(self.held, 1)
         self.assert_unsettled(result)
 
     def test_original_deadline_alarm_escalates_once_without_unlock_or_retry(self):
@@ -345,6 +389,9 @@ class CancellationTests(unittest.TestCase):
         self.assertFalse(Path(path).exists())
 
     def test_readable_cancellation_revokes_live_socket_process_lease(self):
+        high = fcntl.fcntl(self.read, fcntl.F_DUPFD_CLOEXEC, 1100)
+        self.addCleanup(os.close, high)
+        self.read = high
         path = str(self.case.endpoint / "peer.sock")
         with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as listener:
             listener.bind(path)
@@ -354,6 +401,9 @@ class CancellationTests(unittest.TestCase):
                 conn, _ = listener.accept()
                 with conn:
                     peer = worker.PeerSession(conn, uid=os.geteuid(), cancel_fd=self.read)
+                    original_pidfd = peer.pidfd
+                    peer.pidfd = fcntl.fcntl(original_pidfd, fcntl.F_DUPFD_CLOEXEC, 1200)
+                    os.close(original_pidfd)
                     try:
                         self.assertTrue(peer.alive())
                         os.write(self.write, b"stop")
