@@ -17,6 +17,15 @@ CHECKS = frozenset(("model", "replay", "quota", "fingerprint", "subscription", "
                     "sol", "no_client_repin", "alias_inert", "config_policy"))
 
 
+def validate_baseline_receipt(intent, receipt):
+    expected = {"baseline_sha256": intent["baseline_sha256"], "object_id": intent["old_object_id"],
+                "original_image": True, "original_replay": True, "new_plugin_absent": True,
+                "complete_write_set": True, "metadata_verified": True, "all_writers_stopped": True}
+    if (type(receipt) is not dict or set(receipt) != set(expected)
+            or any(type(receipt[k]) is not type(v) or receipt[k] != v for k, v in expected.items())):
+        raise Rejected("baseline-start-oracle-incomplete")
+
+
 class AmbiguousCreate(Exception):
     """Create may have succeeded; reconcile its preassigned ownership identity."""
 
@@ -236,12 +245,7 @@ class AttemptCoordinator:
             self._confirmed(self._call("recovery", "restore", "validate_recovery", intent))
             self._confirmed(self._call("recovery", "restore", "restore_complete", intent))
             receipt = self._call("recovery", "verification-start", "verify_baseline_stopped", intent)
-            expected = {"baseline_sha256": intent["baseline_sha256"], "object_id": intent["old_object_id"],
-                        "original_image": True, "original_replay": True, "new_plugin_absent": True,
-                        "complete_write_set": True, "metadata_verified": True, "all_writers_stopped": True}
-            if (type(receipt) is not dict or set(receipt) != set(expected)
-                    or any(type(receipt[k]) is not type(v) or receipt[k] != v for k, v in expected.items())):
-                raise Rejected("baseline-start-oracle-incomplete")
+            validate_baseline_receipt(intent, receipt)
             self._confirmed(self._call("recovery", "verification-start", "start_old", intent, receipt))
             self._confirmed(self._call("recovery", "verification-start", "old_ready", intent))
             self.active_phase = "persistence"

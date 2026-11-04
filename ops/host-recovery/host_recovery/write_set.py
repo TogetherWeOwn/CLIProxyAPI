@@ -14,7 +14,7 @@ from .budget import positive
 from .commands import Deadline
 from .durable import Rejected, canonical, decode, digest, read_file
 from .installation import DirectoryApproval, open_approved_directory
-from .inventory import HASH, MAX_ENTRIES, MAX_TREE_BYTES, load_baseline, selected_auths, snapshot
+from .inventory import HASH, MAX_ENTRIES, MAX_TREE_BYTES, load_baseline, relative_path, selected_auths, snapshot
 from .journal import identity, validate_intent
 from .restore import inspect_restore, restore_tree, stages, validate_plan
 
@@ -198,18 +198,56 @@ class WriteSetRecovery:
 
     def _verify_all(self, deadline):
         self._load(deadline)
+        captured = {}
         for name, (tree, blobs) in sorted(self.baselines.items()):
             self._current(deadline)
             root = self.roots[name].approval
             actual, actual_blobs = snapshot(self.roots[name].fd, uid=root.uid, gid=root.gid)
             if actual != tree or actual_blobs != blobs:
                 raise Rejected("write-set-final-inventory-mismatch")
+            captured[name] = (actual, actual_blobs)
             if name == self.manifest["auth"]["root"]:
                 auth = self.manifest["auth"]
                 selected_auths(actual, actual_blobs, auth["selected"], auth["expected_type"])
             self._current(deadline)
         # All cooperating writers must remain excluded across the whole scan.
         self._current(deadline)
+        return captured
+
+    def capture_files(self, intent, roles, *, deadline):
+        """Read actual restored role bytes, not backup blobs or cached proposals.
+
+        roles is an independently approved mapping to (root, relative file).
+        Returned bytes remain restricted; no paths/content belong in receipts.
+        """
+        try:
+            if (not self.restored or type(roles) is not dict or not 1 <= len(roles) <= 16
+                    or any(not identity(role) for role in roles)):
+                raise Rejected("write-set-restored-role-mapping-required")
+            roles = copy.deepcopy(roles)
+            locations = set()
+            for location in roles.values():
+                if (type(location) is not tuple or len(location) != 2
+                        or type(location[0]) is not str or location[0] not in self.roots):
+                    raise Rejected("write-set-restored-role-mapping-required")
+                relative_path(location[1])
+                if location in locations:
+                    raise Rejected("write-set-distinct-role-files-required")
+                locations.add(location)
+            self._bound(intent, deadline)
+            actual = self._verify_all(deadline)
+            result = {}
+            for role, (root, path) in roles.items():
+                tree, blobs = actual[root]
+                row = tree["entries"].get(path)
+                if row is None or row["kind"] != "file":
+                    raise Rejected("write-set-restored-role-file-required")
+                result[role] = blobs[row["sha256"]]
+            self._verify_all(deadline)
+            return result
+        except BaseException:
+            self.failed = True
+            raise
 
     def verify_files(self, intent, *, deadline):
         """Fresh all-root oracle, not config/image/replay semantics or start grant."""

@@ -218,6 +218,16 @@ as a substitute for the accepted production binaries.
   fault tests still use **scripted host/daemon/semantic boundaries**. Authenticated
   aggregate provisioning, complete semantic guards and actual manager integration
   remain due. See [multi-root scope and limits](WRITE-SET-v1.md).
+- `host_recovery/baseline_gate.py` and `inputguard/baselinecmd`: fresh restored
+  all-root file capture plus a distinct non-authorizing rollback-input helper.
+  Strict original replay-layout/subtree, no-plugin-config and closed rendered
+  Compose/image-reference checks run after the existing independent stopped-state
+  oracle and again before one-shot old-start delegation. Incomplete oracle facts,
+  lost replies, source/fence/role/policy drift or uncertainty refuse. This is not
+  the full rollback application schema, observed daemon image/effective mounts,
+  runtime plugin absence, readiness or complete host fence. Real files/helper
+  tests still use scripted manager/daemon/oracle/alert boundaries. See
+  [restored-input scope and limits](BASELINE-GUARD-v1.md).
 - `inputguard/`: bounded strict YAML exact-delta comparison using the existing Go
   YAML parser. Exact old/new semantic hashes and independent raw-byte pins compare
   config, Compose source and frozen-rendered Compose without wildcard exclusions.
