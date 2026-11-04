@@ -197,6 +197,7 @@ class LaunchTests(unittest.TestCase):
             with durable.directory(str(self.fixture.journal), private=True) as fd:
                 with self.assertRaises(BlockingIOError):
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return self.args["supervisor_owner"]
         self.observer.observe_owner.side_effect = observe
         self.status()
         with durable.directory(str(self.fixture.journal), private=True) as fd:

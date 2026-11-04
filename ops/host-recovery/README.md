@@ -155,6 +155,19 @@ as a substitute for the accepted production binaries.
   second lock owner. Tests use **scripted manager/kernel observations** and real
   owned files/locks plus CLI failure subprocesses, not installed-systemd recovery.
   See [the launch/status contract](LOADING-v1.md#pinned-launch-configuration-and-read-only-status).
+- `host_recovery/observation.py` and `observe.py`: a bounded read-only manager-launch
+  entrypoint retaining that **same installation-directory lock** across ticks and
+  interruptible waits. Each tick revalidates the original approved snapshots and
+  calling supervisor, brackets pinned recovery-job observations and refuses worker
+  invocation replacement/loss. One timer cannot renew the original deadline.
+  Count/stop/inactive endings remain unresolved; expired, changed or uncertain
+  inputs refuse. SIGTERM/INT interrupt the wait; SIGKILL releases the lock without
+  altering the original request. **No dispatch, fence acknowledgment, claim,
+  restoration, settlement, start or completed-recovery path exists.** Exit 3 emits
+  an unresolved read-only receipt, not success. This neither adopts old requests on
+  supervisor restart nor wires operational alert transport. Process/filesystem
+  tests and actual parser composition use **scripted manager/kernel observations**,
+  not installed units/daemon recovery. See [observation and limits](OBSERVATION-v1.md).
 - `host_recovery/restore.py`: bounded whole-root restoration of original bytes,
   uid/gid/modes, with an explicit accepted list of candidate-only additions.
   Unknown entries, type changes, unsafe links/metadata and tampered baselines

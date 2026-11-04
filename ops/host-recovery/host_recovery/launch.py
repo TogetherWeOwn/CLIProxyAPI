@@ -5,6 +5,8 @@ never from this file, its adjacent index, environment identity or a worker reque
 A matching digest proves correspondence to that anchor, not who approved it. This
 reader neither provisions that anchor nor installs a service/complete host fence.
 """
+import copy
+from contextlib import contextmanager
 from dataclasses import dataclass, fields
 import os
 import stat
@@ -107,6 +109,83 @@ def load_launch(path, *, sha256, uid, gid):
         directory.close()
 
 
+class _CallingSession:
+    """Borrowed read-only inputs/lock; never an execution or fence lease."""
+    def __init__(self, approval, observer, observed, handles, content, inputs, clock, timer):
+        self.approval, self.observer, self.handles = approval, observer, handles
+        self.observed = copy.deepcopy(observed)
+        self.content, self.inputs, self.clock = content, inputs, clock
+        self.deadline = min(timer.deadline, inputs.request["deadline"])
+        self.timer = timer
+        self.timer.deadline = self.deadline
+        self.closed, self.failed = False, False
+
+    def validate(self):
+        if self.closed or self.failed:
+            raise Rejected("launch-session-unavailable")
+        try:
+            self.timer.remaining()
+            expected = self.observed["owner"]
+            actual = self.observer.observe_owner(copy.deepcopy(expected), deadline=self.deadline)
+            if type(actual) is not dict or actual != expected:
+                raise Rejected("launch-supervisor-owner-changed")
+            self.handles.validate()
+            # Readback after the manager query prevents that query from concealing
+            # a cooperating journal/content change. Never adopt a newer request.
+            content, inputs = self.handles.snapshot(content_approval=self.approval.content,
+                recovery_approval=self.approval.recovery, binding=self.approval.job,
+                supervisor_owner=expected, boot_id=expected["boot_id"], now=self.clock())
+            if content.files != self.content.files or inputs != self.inputs:
+                raise Rejected("launch-snapshot-changed")
+            self.timer.remaining()
+        except BaseException:
+            self.failed = True
+            raise
+
+    def status(self):
+        if self.closed or self.failed:
+            raise Rejected("launch-session-unavailable")
+        return {"schema": "host-recovery-status-v1", "operation": "status", "state": "inputs_verified_only",
+                "installation_id": self.approval.recovery.installation_id,
+                "attempt_id": self.approval.recovery.attempt_id, "request_id": self.approval.job.request_id,
+                "source_revision": self.approval.content.source_revision,
+                "intent_sha256": self.approval.recovery.intent_sha256,
+                "content_index_sha256": self.approval.content.index_sha256,
+                "complete_fence_proven": False, "recovery_execution_allowed": False, "start_allowed": False,
+                "terminal_outcome_verified": False, "production_acceptance": False}
+
+
+@contextmanager
+def _calling_session(approval, *, deadline, clock, boot_id, commands):
+    """Retain the existing installation lock until final ancestry validation.
+
+    Private composition boundary for read-only status/observation. The caller must
+    not publish a result until context exit succeeds. It never acquires a second
+    lock or calls RecoverySupervisor's execution/fence callback boundary.
+    """
+    if not isinstance(approval, LaunchApproval):
+        raise Rejected("launch-typed-approval-required")
+    timer = Deadline(clock, deadline)
+    timer.remaining()
+    observer = SystemdSupervisorIdentity(systemctl=approval.systemctl, commands=commands,
+                                         binding=approval.supervisor, clock=clock, boot_id=boot_id)
+    observed = observer.bootstrap(installation_id=approval.recovery.installation_id,
+                                  attempt_id=approval.recovery.attempt_id, deadline=deadline)
+    timer.remaining()
+    with open_installation(approval.installation) as handles:
+        content, inputs = handles.snapshot(content_approval=approval.content, recovery_approval=approval.recovery,
+            binding=approval.job, supervisor_owner=observed["owner"], boot_id=observed["owner"]["boot_id"], now=clock())
+        # Keep clock continuity from bootstrap through the initial filesystem read.
+        timer.remaining()
+        session = _CallingSession(approval, observer, observed, handles, content, inputs, clock, timer)
+        try:
+            session.validate()
+            yield session
+        finally:
+            session.closed = True
+    session.timer.remaining()
+
+
 def inspect_status(approval, *, deadline, clock=time.monotonic, boot_id=kernel_boot_id, commands=None):
     """Read status as the pinned calling MainPID; no dispatch/restore/start route.
 
@@ -115,38 +194,7 @@ def inspect_status(approval, *, deadline, clock=time.monotonic, boot_id=kernel_b
     An expired/cross-boot journal refuses rather than issuing a new allowance.
     commands is injectable only as a trusted component-test boundary.
     """
-    if not isinstance(approval, LaunchApproval):
-        raise Rejected("launch-typed-approval-required")
-    timer = Deadline(clock, deadline)
-    timer.remaining()
     transport = LocalCommands(clock) if commands is None else commands
-    observer = SystemdSupervisorIdentity(systemctl=approval.systemctl, commands=transport,
-                                         binding=approval.supervisor, clock=clock, boot_id=boot_id)
-    observed = observer.bootstrap(installation_id=approval.recovery.installation_id,
-                                  attempt_id=approval.recovery.attempt_id, deadline=deadline)
-    timer.remaining()
-    with open_installation(approval.installation) as handles:
-        content, inputs = handles.snapshot(content_approval=approval.content, recovery_approval=approval.recovery,
-            binding=approval.job, supervisor_owner=observed["owner"], boot_id=observed["owner"]["boot_id"], now=clock())
-        end = min(deadline, inputs.request["deadline"])
-        remaining = Deadline(clock, end)
-        remaining.remaining()
-        observer.observe_owner(observed["owner"], deadline=end)
-        handles.validate()
-        # Readback after the final manager observation prevents that observation
-        # from concealing a cooperating journal/content change during the query.
-        latest_content, latest_inputs = handles.snapshot(content_approval=approval.content,
-            recovery_approval=approval.recovery, binding=approval.job, supervisor_owner=observed["owner"],
-            boot_id=observed["owner"]["boot_id"], now=clock())
-        if latest_content.files != content.files or latest_inputs != inputs:
-            raise Rejected("launch-snapshot-changed")
-        remaining.remaining()
-        result = {"schema": "host-recovery-status-v1", "operation": "status", "state": "inputs_verified_only",
-                  "installation_id": approval.recovery.installation_id, "attempt_id": approval.recovery.attempt_id,
-                  "request_id": approval.job.request_id, "source_revision": approval.content.source_revision,
-                  "intent_sha256": approval.recovery.intent_sha256, "content_index_sha256": approval.content.index_sha256,
-                  "complete_fence_proven": False, "recovery_execution_allowed": False, "start_allowed": False,
-                  "terminal_outcome_verified": False, "production_acceptance": False}
-    # Context-exit ancestry validation must also succeed before publishing status.
-    remaining.remaining()
+    with _calling_session(approval, deadline=deadline, clock=clock, boot_id=boot_id, commands=transport) as session:
+        result = session.status()
     return result

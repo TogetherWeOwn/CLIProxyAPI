@@ -229,6 +229,19 @@ archive, asynchronous replay drain or service availability. It does not replace
 the independent operational alert route, which remains unwired. A successful
 local status is never recovery/alert/downtime acceptance.
 
+## Lock-retaining observation
+
+The private calling-session composition is also used by `observation.observe_request`
+and `observe.py`. Unlike one-shot status, it retains the same installation-directory
+lock across bounded ticks and interruptible waits, while refusing changed inputs,
+manager identity, worker invocation or clocks. It uses only read-only systemd
+observation; it never supplies a fake complete-fence acknowledgment or issues a
+worker/start/restore grant. Every emitted receipt is unresolved, including after
+worker exit, stop or count exhaustion. Context-exit validation precedes publication.
+See [the observation contract](OBSERVATION-v1.md) for bounds, process/lock lifecycle,
+exit codes and explicit restart/alert/execution limits. This does not make the
+package an installed or operational persistent recovery supervisor.
+
 ## Verification and remaining wiring
 
 Synthetic owned-tree tests exercise real filesystem reads, exact inventory and
