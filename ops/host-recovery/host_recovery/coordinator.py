@@ -6,10 +6,12 @@ Python calls alone cannot bound a wedged filesystem, daemon or manager. The call
 holds the installation lock throughout. No live commands or host defaults exist.
 """
 import copy
+import os
+import stat
 
-from .budget import Budget
-from .durable import Rejected, canonical, digest, notify
-from .journal import validate_intent
+from .budget import Budget, positive
+from .durable import Rejected, canonical, decode, digest, notify, read_file, signature
+from .journal import OBJECT_ID, validate_intent
 
 CHECKS = frozenset(("model", "replay", "quota", "fingerprint", "subscription", "claude",
                     "sol", "no_client_repin", "alias_inert", "config_policy"))
@@ -46,6 +48,9 @@ class AttemptCoordinator:
         self.start_fenced = True
         self.started_forward = False
         self.recovery_attempted = False
+        self.resume_attempted = False
+        self.resume_records = None
+        self.resume_entries = None
         self.active_phase = "admission"
         self.result = {"outcome": "fenced", "production_acceptance": False}
 
@@ -74,10 +79,87 @@ class AttemptCoordinator:
         return {"attempt_id": value["attempt_id"], "intent_sha256": digest(canonical(value)),
                 "baseline_sha256": value["baseline_sha256"], "start_fenced": True}
 
+    def _resume_current(self):
+        if self.resume_records is None:
+            return
+        entries = set(os.listdir(self.journal.fd))
+        if entries != self.resume_entries:
+            raise Rejected("resume-journal-entries-changed")
+        for name, (raw, before) in self.resume_records.items():
+            current, after = read_file(self.journal.fd, name, limit=65536)
+            if current != raw or signature(after) != before:
+                raise Rejected("resume-original-record-changed")
+        if canonical(self.journal.intent) != canonical(decode(self.resume_records["intent.json"][0])):
+            raise Rejected("resume-original-intent-changed")
+
+    def resume(self):
+        """Recover a reopened same-boot intent; never resume candidate promotion.
+
+        The caller retains the installation lock and supplies the independently
+        authenticated recovery owner/boundary. This subset refuses prior dispatch,
+        claim and staged/unknown state rather than adopting a possibly live worker.
+        recovery_preflight must authenticate the package, policy and complete
+        baseline and prove the independent listener before any mutating call. It
+        must not infer ownership/quiescence from an old terminal or worker exit.
+        This component does not install that owner, broker or complete host fence.
+        """
+        if (self.resume_attempted or self.started_forward or self.recovery_attempted
+                or self.meter is not None or not self.journal.reopened or self.journal.intent is None):
+            raise Rejected("resume-reopened-journal-required")
+        self.resume_attempted = True
+        self.journal.revoke_forward()
+        self.original_cause = "restart-original-cause-unavailable"
+        self.active_phase = "resume-inputs"
+        try:
+            if self.journal.uncertain:
+                raise Rejected("resume-reopen-after-uncertainty-required")
+            self.resume_entries = set(os.listdir(self.journal.fd))
+            allowed = {"intent.json", "arm.json", "outcome.json", "recovery-outcome.json"}
+            for name in self.resume_entries - allowed:
+                if not (name.startswith("object-") and name.endswith(".json")
+                        and OBJECT_ID.fullmatch(name[7:-5])):
+                    raise Rejected("resume-state-reconciliation-required")
+            records = {}
+            for name in ("intent.json", "arm.json"):
+                raw, info = read_file(self.journal.fd, name, limit=65536)
+                if ((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode))
+                        != (os.geteuid(), os.getegid(), 0o600)):
+                    raise Rejected("resume-private-original-record-required")
+                records[name] = (raw, signature(info))
+            intent = decode(records["intent.json"][0])
+            validate_intent(intent)
+            if canonical(intent) != canonical(self.journal.intent):
+                raise Rejected("resume-original-intent-changed")
+            record = decode(records["arm.json"][0])
+            if (set(record) != {"schema", "arm", "intent_sha256"}
+                    or record["schema"] != "host-recovery-arm-v1"
+                    or record["intent_sha256"] != digest(canonical(intent))):
+                raise Rejected("resume-original-arm-pin")
+            arm = record["arm"]
+            if (type(arm) is not dict or set(arm) != {"boot_id", "monotonic"}
+                    or arm["boot_id"] != intent["owner"]["boot_id"] or not positive(arm["monotonic"])):
+                raise Rejected("resume-original-arm-schema")
+            self.resume_records = records
+            self._resume_current()
+            self.meter = Budget(intent["budget"], arm, self.clock, self.boot_id)
+            # Unknown failure time is not zero detection overhead. Charge from t0,
+            # including the detection cap; a late restart may already be too late.
+            self.meter.trigger_recovery(arm["monotonic"])
+            self._confirmed(self._call("recovery", "detection", "recovery_preflight", intent))
+        except Exception:
+            self.recovery_attempted = True
+            self.recovery_error = "recovery-" + self.active_phase + "-failed"
+            self.result = {"outcome": "recovery_unresolved", "production_acceptance": False}
+            self._alert()
+            return self.status()
+        return self.recover()
+
     def _call(self, direction, phase, method, *args):
         self.active_phase = phase
+        self._resume_current()
         deadline = self.meter.phase_deadline(direction, phase)
         result = getattr(self.boundary, method)(*copy.deepcopy(args), deadline=deadline)
+        self._resume_current()
         self.meter.check(deadline)
         self.meter.events.append({"phase": phase, "direction": direction,
                                   "event": "completed", "monotonic": self.meter.now()})
@@ -147,7 +229,8 @@ class AttemptCoordinator:
             # ObservedFailure carries the manager's earlier raw failure event.
             # A missing timestamp is not evidence of zero detection overhead.
             self.active_phase = "detection"
-            self.meter.trigger_recovery(self.meter.now() if failure_at is None else failure_at)
+            if self.meter.failure_at is None or failure_at is not None:
+                self.meter.trigger_recovery(self.meter.now() if failure_at is None else failure_at)
             self._confirmed(self._call("recovery", "detection", "fence", intent))
             self._confirmed(self._call("recovery", "quiescence", "quiesce", intent))
             self._confirmed(self._call("recovery", "restore", "validate_recovery", intent))
@@ -163,7 +246,11 @@ class AttemptCoordinator:
             self._confirmed(self._call("recovery", "verification-start", "old_ready", intent))
             self.active_phase = "persistence"
             deadline = self.meter.phase_deadline("recovery", "persistence")
+            self._resume_current()
             self.journal.finish("baseline_restored", receipt)
+            if self.resume_entries is not None:
+                self.resume_entries.add("recovery-outcome.json")
+            self._resume_current()
             self.meter.check(deadline)
             self.result = {"outcome": "baseline_restored", "production_acceptance": False}
         except Exception:

@@ -33,8 +33,8 @@ CAUSES = {
     "original_cause": frozenset(("admission-persistence-or-clock-failed", "explicit-recovery-request",
                                   "forward-stop-failed", "forward-revalidate-failed", "forward-mutate-failed",
                                   "forward-candidate-start-failed", "forward-postchecks-failed", "forward-persistence-failed",
-                                  "supervisor-restart-recovery-required")),
-    "recovery_error": frozenset(("recovery-detection-failed", "recovery-quiescence-failed", "recovery-restore-failed",
+                                  "supervisor-restart-recovery-required", "restart-original-cause-unavailable")),
+    "recovery_error": frozenset(("recovery-resume-inputs-failed", "recovery-detection-failed", "recovery-quiescence-failed", "recovery-restore-failed",
                                   "recovery-verification-start-failed", "recovery-persistence-failed",
                                   "alert-budget-or-clock-unavailable", "independent-alert-delivery-failed")) | SUPERVISOR_ERRORS,
 }
