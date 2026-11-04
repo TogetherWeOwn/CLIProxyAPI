@@ -217,10 +217,16 @@ as a substitute for the accepted production binaries.
   `GuardedBoundary` composes fresh comparison with preflight and stopped forward
   revalidation, preserving existing listener/schema checks and the independent
   recovery path. Actual built-helper/coordinator tests use synthetic protected
-  descriptors and **scripted manager/fence/schema boundaries**. No runnable host
-  supervision, actual renderer, schema validation, authenticated approval/pin
-  provisioning or recovery/start authority is supplied by the YAML helper.
-  See [strict subset, protocol and composition limits](INPUT-GUARD-v1.md).
+  descriptors and **scripted manager/fence/oracle boundaries**. The separate opt-in
+  `applicationcmd` helper and `ApplicationInputGate` additionally validate both
+  host-owned config documents using the actual application types/pure validators,
+  without runtime normalization, secret hashing or path loading. Unknown/mistyped
+  source groups cannot hide behind expansion/overrides. Its distinct receipt
+  prevents a comparison-only helper downgrade. Plugin-owned options and Compose
+  schemas/rendering remain unvalidated. No runnable host supervision, authenticated
+  approval/pin provisioning or recovery/start authority is supplied. See
+  [strict subset and protocol](INPUT-GUARD-v1.md) and
+  [application validation scope](APPLICATION-GUARD-v1.md).
 - `host_recovery/input_snapshot.py`: reusable protected seven-file capture for the
   exact-input gate: three before/after source/frozen-render pairs and an independent
   delta policy, all bound to the original intent and external raw pins. The shared

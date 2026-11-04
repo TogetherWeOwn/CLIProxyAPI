@@ -18,28 +18,36 @@ var errProtocol = errors.New("recovery-input-request-invalid")
 // It never opens files, renders inputs, authenticates policy or authorizes a start.
 // Duplicate, unknown, differently cased and missing fields are all refused.
 func VerifyRequest(reader io.Reader) error {
+	bundle, err := decodeRequest(reader)
+	if err != nil {
+		return err
+	}
+	return VerifyBundle(bundle)
+}
+
+func decodeRequest(reader io.Reader) (Bundle, error) {
+	var bundle Bundle
 	raw, err := io.ReadAll(io.LimitReader(reader, MaxRequestBytes+1))
 	if err != nil || len(raw) > MaxRequestBytes {
-		return errProtocol
+		return bundle, errProtocol
 	}
 	request, err := exactObject(raw, "schema", "config", "compose_source", "frozen_rendered_compose")
 	if err != nil {
-		return errProtocol
+		return bundle, errProtocol
 	}
 	var schema string
 	if json.Unmarshal(request["schema"], &schema) != nil || schema != "host-recovery-input-request-v1" {
-		return errProtocol
+		return bundle, errProtocol
 	}
-	var bundle Bundle
 	for name, pair := range map[string]*Pair{
 		"config": &bundle.Config, "compose_source": &bundle.ComposeSource,
 		"frozen_rendered_compose": &bundle.FrozenRenderedCompose,
 	} {
 		if err := decodePair(request[name], pair); err != nil {
-			return errProtocol
+			return bundle, errProtocol
 		}
 	}
-	return VerifyBundle(bundle)
+	return bundle, nil
 }
 
 // exactObject checks keys before decoding values; encoding/json's usual struct

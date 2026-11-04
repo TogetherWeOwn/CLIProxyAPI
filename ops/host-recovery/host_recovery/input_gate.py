@@ -47,6 +47,8 @@ class ExactInputGate:
     the calling owner/lock/protected handles/writer fence before and after capture.
     No secret bytes, parser diagnostics or helper output escape through errors.
     """
+    receipt = RECEIPT
+
     def __init__(self, *, helper_fd, approval, snapshot, check, clock):
         if (type(helper_fd) is not int or helper_fd < 0 or not isinstance(approval, InputApproval)
                 or not all(callable(value) for value in (snapshot, check, clock))):
@@ -150,7 +152,7 @@ class ExactInputGate:
                                     raise Rejected("input-gate-output-limit")
                 code = proc.wait(timeout=remaining())
             remaining()
-            if sent != len(raw) or code != 0 or bytes(output) != RECEIPT:
+            if sent != len(raw) or code != 0 or bytes(output) != self.receipt:
                 raise Rejected("input-gate-helper-refused")
         finally:
             if proc is not None:
@@ -164,6 +166,17 @@ class ExactInputGate:
                     self.pending.append(proc)
                 proc.stdin.close()
                 proc.stdout.close()
+
+
+class ApplicationInputGate(ExactInputGate):
+    """Require the application-aware helper, not a comparison-only success receipt.
+
+    All descriptor, capture, deadline and same-lock boundary checks are inherited.
+    Only host-owned config types/intrinsic validators are covered; plugin options,
+    Compose schemas/rendering and operational/recovery readiness are not.
+    """
+    receipt = (b'{"schema":"host-recovery-application-input-result-v1","matched":true,'
+               b'"application_validated":true,"start_authorized":false}\n')
 
 
 class GuardedBoundary:

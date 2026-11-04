@@ -1,6 +1,7 @@
 // Package inputguard compares bounded YAML inputs against exact approved changes.
-// It does not authenticate approval, render Compose, validate application schemas,
-// acquire protected files or grant mutation/start authority.
+// Its optional application check validates host config types, not plugin options
+// or Compose schemas. It does not authenticate approval, render Compose, acquire
+// protected files or grant mutation/start authority.
 package inputguard
 
 import (
