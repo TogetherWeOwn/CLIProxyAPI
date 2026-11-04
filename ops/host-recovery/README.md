@@ -8,6 +8,16 @@ as a substitute for the accepted production binaries.
 
 ## Implemented so far
 
+- `host_recovery/availability.py`: durable raw point observations with explicit
+  monotonic start/end, boot identity, source/target pins, strict true/false/unknown
+  results, ordered sequence and final hash receipt. Ambiguous persistence or clock
+  continuity revokes completion; unknown/interrupted tails stay censored. Discrete
+  negative streaks and their available brackets never become continuous downtime
+  estimates; even all-green traces cannot prove zero downtime. Actual disposable
+  HTTP/SIGKILL/file-fault tests are sampling component evidence, not full-system
+  recovery, measured phase allocations or production timing. No network/default
+  endpoint, credential access, schedule, blocking watchdog or persistent service is
+  supplied. See [availability evidence and limits](AVAILABILITY-v1.md).
 - `host_recovery/broker.py:dispatch_claim`: opt-in same-supervisor/installation-lock
   composition binds its private listener before one-shot pinned recovery-unit
   enqueue, then receives/persists the original worker claim/result and requires
