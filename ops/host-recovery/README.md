@@ -581,6 +581,12 @@ Use exact-head Actions run/job links as CI evidence; do not substitute local
 full-suite/build transcripts. Local execution is limited to a permitted focused
 reproduction, never a CI mirror.
 
+A separate read-only Actions runtime inventory records hosted Docker/containerd/runc
+and tool versions/hashes without daemon contact, installation or service mutation.
+Missing/changed tools fail that inventory, but success is not source-provenance,
+containment, dedicated-runtime or cold-barrier qualification. See the
+[runtime inventory scope and next fixture boundary](RUNTIME-INVENTORY-v1.md).
+
 ## Broker operation persistence (non-authorizing)
 
 `host_recovery/broker_operations.py` supplies the dedicated broker's first

@@ -175,6 +175,31 @@ jobs:
             ${{ runner.temp }}/recovery-system-manager-cleanup.log
           if-no-files-found: error
 
+  recovery-runtime-inventory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Inventory runtime prerequisites without daemon contact
+        shell: bash
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse HEAD)"
+          env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C GITHUB_ACTIONS=true \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            timeout 45s bash ops/host-recovery/tests/inventory_runtime.sh "$head_sha" \
+            2>&1 | tee "$RUNNER_TEMP/recovery-runtime-inventory.log"
+      - name: Retain raw runtime prerequisite inventory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-runtime-inventory-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/recovery-runtime-inventory.log
+          if-no-files-found: error
+
   recovery-race:
     runs-on: ubuntu-24.04
     steps:
