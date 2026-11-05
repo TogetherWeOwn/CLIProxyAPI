@@ -133,6 +133,47 @@ jobs:
             ${{ runner.temp }}/recovery-private-bus.log
           if-no-files-found: error
 
+  recovery-system-manager:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Real manager completion and whole-unit termination
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            git rev-parse HEAD
+            # Only the two inert run-scoped transient units on this disposable
+            # hosted runner are touched. No daemon, deployment or host install.
+            sudo env -i PATH=/usr/bin:/bin LANG=C CPA_RECOVERY_SYSTEM_MANAGER_TEST=1 \
+              GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+              GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+              /usr/bin/timeout 120s /usr/bin/python3 -I ops/host-recovery/tests/test_manager_system_native.py
+          } 2>&1 | tee "$RUNNER_TEMP/recovery-system-manager.log"
+      - name: Collect only owned transient fixtures
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo env -i PATH=/usr/bin:/bin LANG=C CPA_RECOVERY_SYSTEM_MANAGER_TEST=1 \
+            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            /usr/bin/timeout 45s /usr/bin/python3 -I ops/host-recovery/tests/test_manager_system_native.py --cleanup \
+            2>&1 | tee "$RUNNER_TEMP/recovery-system-manager-cleanup.log"
+      - name: Retain raw real-manager result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-system-manager-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/recovery-system-manager.log
+            ${{ runner.temp }}/recovery-system-manager-cleanup.log
+          if-no-files-found: error
+
   recovery-race:
     runs-on: ubuntu-24.04
     steps:

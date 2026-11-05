@@ -269,6 +269,11 @@ not actual systemd, system-bus, root-provisioning, kernel-cgroup, daemon or cold
 qualification. The ordinary suite skips that matrix explicitly; its separate step
 must pass. No local suite/build or live-host contact is needed.
 
+A separate Actions-only real PID1/whole-unit fixture is documented in
+[SYSTEM-MANAGER-TEST-v1.md](SYSTEM-MANAGER-TEST-v1.md). Its actual system bus and
+root/PID1 checks are unpatched. It does not qualify the dedicated daemon domain,
+activation exclusion, cold recovery or operational provisioning.
+
 ## Required next boundaries
 
 The independently provisioned privileged broker remains unimplemented. It must
