@@ -2,8 +2,9 @@
 
 This embedding transport is not an installed broker, activation interlock or cold
 barrier. The caller retains the original authority/journal and protected library
-handle. Only fixed forward OR runtime StopUnit calls exist; no arbitrary dispatch or numeric
-job cancellation is exposed. Completion delivery does not prove runtime drain.
+handle. Fixed forward OR runtime StopUnit calls and the separate journaled
+mask_reload phase use it; no arbitrary dispatch or numeric job cancellation is
+exposed. Completion delivery and reload return do not prove runtime drain.
 """
 import ctypes as C
 import math
@@ -127,15 +128,41 @@ class _Connection:
         self.current()
 
     def basic(self, message, kind):
-        value = C.c_uint32() if kind == "u" else C.c_char_p()
+        value = C.c_uint8() if kind == "y" else C.c_uint32() if kind == "u" else C.c_char_p()
         if self.lib.sd_bus_message_read_basic(message, kind.encode(), C.byref(value)) <= 0:
             raise Rejected("manager-bus-message-field-required")
-        return value.value if kind == "u" else _text(value.value)
+        return value.value if kind in ("u", "y") else _text(value.value)
 
     def fields(self, message, signature):
-        if _text(self.lib.sd_bus_message_get_signature(message, 1)) != signature:
+        expected = "v" if signature.startswith("v:") else signature
+        if _text(self.lib.sd_bus_message_get_signature(message, 1)) != expected:
             raise Rejected("manager-bus-message-signature")
-        if signature == "a(usssoo)":
+        if signature.startswith("v:"):
+            kind = signature[2:]
+            if kind not in ("s", "u", "as", "ay", "(uo)"):
+                raise Rejected("manager-bus-fixed-variant-required")
+            if self.lib.sd_bus_message_enter_container(message, b"v", kind.encode()) <= 0:
+                raise Rejected("manager-bus-property-type-required")
+            if kind in ("as", "ay"):
+                element = kind[1:]
+                if self.lib.sd_bus_message_enter_container(message, b"a", element.encode()) <= 0:
+                    raise Rejected("manager-bus-property-array-required")
+                items = []
+                while self.lib.sd_bus_message_at_end(message, 0) == 0:
+                    if len(items) >= (16 if kind == "ay" else MAX_EVENTS):
+                        raise Rejected("manager-bus-property-array-limit")
+                    items.append(self.basic(message, element))
+                _ok(self.lib.sd_bus_message_exit_container(message))
+                values = [bytes(items) if kind == "ay" else items]
+            elif kind == "(uo)":
+                if self.lib.sd_bus_message_enter_container(message, b"r", b"uo") <= 0:
+                    raise Rejected("manager-bus-property-job-required")
+                values = [(self.basic(message, "u"), self.basic(message, "o"))]
+                _ok(self.lib.sd_bus_message_exit_container(message))
+            else:
+                values = [self.basic(message, kind)]
+            _ok(self.lib.sd_bus_message_exit_container(message))
+        elif signature == "a(usssoo)":
             _ok(self.lib.sd_bus_message_enter_container(message, b"a", b"(usssoo)"))
             result = []
             while self.lib.sd_bus_message_at_end(message, 0) == 0:

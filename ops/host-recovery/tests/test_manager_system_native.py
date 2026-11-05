@@ -357,13 +357,16 @@ class SystemManagerTests(unittest.TestCase):
         st = path.stat()
         self.assertEqual((st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode)), (0, 0, 0o755))
         approval = DirectoryApproval(str(path), st.st_dev, st.st_ino, 0, 0, 0o755)
-        with open_approved_directory(approval) as directory:
-            masks = PersistentUnitMasks(directory=directory, units={"forward": binding})
-            receipt = masks.publish(current=self.current)
-            self.assertTrue(receipt["persistent_masks_published"])
-            self.assertFalse(receipt["activation_exclusion_proven"])
-            self.assertFalse(receipt["manager_reload_performed"])
-            print(json.dumps({"source_mask_publication": receipt}), flush=True)
+        context = open_approved_directory(approval)
+        directory = context.__enter__()
+        self.addCleanup(context.__exit__, None, None, None)
+        masks = PersistentUnitMasks(directory=directory, units={"forward": binding})
+        receipt = masks.publish(current=self.current)
+        self.assertTrue(receipt["persistent_masks_published"])
+        self.assertFalse(receipt["activation_exclusion_proven"])
+        self.assertFalse(receipt["manager_reload_performed"])
+        print(json.dumps({"source_mask_publication": receipt}), flush=True)
+        return masks
 
     def test_persistent_mask_blocks_fresh_launches_but_does_not_quiesce(self):
         paths = activation_paths()
@@ -391,10 +394,30 @@ class SystemManagerTests(unittest.TestCase):
         command(self.systemctl, "start", "--", unit_name("masked"))
         binding, pids = self.running_binding(unit_name("masked"))
         self.assertEqual(binding.fragment_path, str(paths["masked"]))
-        # Use the package's exclusive descriptor-bound publication primitive.
-        # Reload is a separate test-only action, not part of that primitive.
-        self.publish_mask(binding)
-        command(self.systemctl, "daemon-reload")
+        from host_recovery.broker_operations import OperationJournal
+        from host_recovery.mask_reload import ManagerMaskReload
+        from test_broker_operations import binding as synthetic_binding, epoch as synthetic_epoch
+        state = self.root / "reload-state"
+        state.mkdir(mode=0o700)
+        fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        self.addCleanup(os.close, fd)
+        now = time.monotonic()
+        original = synthetic_binding()
+        original.update(original_arm=now, failure_monotonic=now, recovery_deadline=self.deadline)
+        # Synthetic original request/authority, but real durable files, pinned
+        # library, root PID1 connection, Reload reply and typed properties.
+        journal = OperationJournal(fd, binding=original, epoch=synthetic_epoch(), clock=time.monotonic,
+                                   boot_id=lambda: "boot-original")
+        operation = journal.pending("contain_forward", target_sha256="d" * 64, deadline=self.deadline)
+        masks = self.publish_mask(binding)
+        session = self.session(binding)
+        reload = ManagerMaskReload(journal=journal, masks=masks, session=session)
+        receipt = reload.reload(operation=operation)
+        self.assertTrue(receipt["effective_masks_observed"])
+        self.assertEqual(receipt["active_unit_count"], 1)
+        self.assertFalse(receipt["activation_exclusion_proven"])
+        self.assertEqual(receipt, reload.observe())
+        print(json.dumps({"source_mask_reload": receipt}), flush=True)
         masked = self.masked_observation(binding.unit)
         self.assertEqual(masked["LoadState"], "masked")
         self.assertEqual(masked["ActiveState"], "active")

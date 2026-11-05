@@ -59,10 +59,13 @@ and change the loaded property projection. The existing strict loaded-unit
 reader remains unchanged; an external reload/configuration change causes refusal,
 not permission to synthesize missing properties or ignore original pins. A
 returned record says only the filesystem publication and stop submission returned,
-never that the mask is effective or that an old job cannot execute. Operational
-reload/cancellation/configuration transition and durable retirement witnesses
-remain required before this can contribute to a complete cold barrier. The
-optional path is not exposed by mutation IPC or enabled in operational runners.
+never that the mask is effective or that an old job cannot execute. The separate
+[journaled reload phase](MASK-RELOAD-v1.md) now supplies one authenticated reload
+and typed effective-mask observations under an original pending operation; this
+forward composition does not invoke it. Operational cancellation/configuration
+transition and durable retirement witnesses remain required before this can
+contribute to a complete cold barrier. The optional path is not exposed by
+mutation IPC or enabled in operational runners.
 
 ## Evidence scope
 
