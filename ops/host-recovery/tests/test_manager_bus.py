@@ -65,6 +65,11 @@ class ScriptedConnection:
         message = dict(fields=[self.number,bus.JOB_PREFIX+str(self.number),self.job_units[role].unit,self.result])
         message.update(overrides)
         self.matches[0][1](message)
+    def admission(self, role='dockerd', number=41, **overrides):
+        message = dict(fields=[number,bus.JOB_PREFIX+str(number),self.job_units[role].unit],
+                       signature='uos', member='JobNew')
+        message.update(overrides)
+        next(function for rule,function in self.matches if "member='JobNew'" in rule)(message)
 
 
 class ManagerSessionTests(unittest.TestCase):

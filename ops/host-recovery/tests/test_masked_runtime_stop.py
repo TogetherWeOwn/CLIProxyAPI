@@ -100,6 +100,10 @@ class MaskedRuntimeStopTests(unittest.TestCase):
                 number = self.numbers[role]+10
                 connection.inventory.append([number, self.units[role].unit, 'stop', 'running',
                     bus.JOB_PREFIX+str(number), bus.MANAGER_PATH+'/unit/'+role])
+                def admission():
+                    self.event_cookie += 1
+                    connection.admission(role=role, number=number, cookie=self.event_cookie)
+                connection.queue.append(admission)
                 if self.early and self.stop_signals[role]:
                     connection.queue.append(lambda:event(number, self.stop_results[role]))
                 value = [bus.JOB_PREFIX+str(number)]

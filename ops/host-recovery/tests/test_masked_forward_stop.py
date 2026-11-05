@@ -54,7 +54,7 @@ class MaskedForwardStopTests(unittest.TestCase):
             self.hook(method)
             result = []
             def event(number, outcome):
-                connection.number, connection.result, connection.cookie = number, outcome, number
+                connection.number, connection.result, connection.cookie = number, outcome, number + (number == 42)
                 connection.inventory = []
                 if outcome == 'done': self.row.update(ActiveState='inactive', SubState='dead', MainPID=0, ControlGroup='')
                 connection.event(role='forward')
@@ -65,6 +65,7 @@ class MaskedForwardStopTests(unittest.TestCase):
             elif method == 'StopUnit':
                 self.assertEqual((signature, args), ('ss', (self.units['forward'].unit, 'fail')))
                 connection.inventory = [[42, self.waiting[1], 'stop', 'running', bus.JOB_PREFIX+'42', self.waiting[5]]]
+                connection.queue.append(lambda:connection.admission(role='forward', number=42, cookie=42))
                 if self.early_stop and self.stop_signal: connection.queue.append(lambda:event(42, self.stop_result))
                 if self.stop_reply: connection.queue.append(lambda:result.append([bus.JOB_PREFIX+'42']))
             else:

@@ -48,7 +48,7 @@ class _MaskedFixedStop:
             "binding_sha256": digest(self.journal._binding), "epoch_sha256": digest(self.journal._epoch),
             "masks": decode(self.masks.configuration()), "jobs": decode(self.jobs.configuration()),
             "cancellation": decode(self.cancellation.configuration()), "reload": decode(self.reload.configuration()),
-            "kill_whom": "all", "kill_signal": 9})
+            "kill_whom": "all", "kill_signal": 9, "fixed_job_admission_witness": "job-new-v1"})
 
     @property
     def target_sha256(self):
@@ -139,6 +139,8 @@ class _MaskedFixedStop:
                 self._operation = canonical(operation)
                 operation = decode(self._operation)
                 self._current()
+                self.session._watch_fixed_jobs()
+                self._current()
                 self._execution_starts = self._execution_snapshot()
                 self._execution_current()
                 self._before_stops()
@@ -181,9 +183,10 @@ class _MaskedFixedStop:
                         or receipt != self.reload.observe()):
                     raise Rejected("masked-forward-final-observation-changed")
                 self._final_check()
+                job_observation = self.session._fixed_jobs_absent()
                 self._execution_current()
                 self.completed = True
-                return {"schema": self.observation_schema, **extra,
+                return {"schema": self.observation_schema, **extra, **job_observation,
                     "target_sha256": self.target_sha256, "operation_id": operation["operation_id"],
                     "canceled_waiting_start_count": canceled["canceled_waiting_start_count"],
                     "whole_unit_kill_returned": bool(killed), "fixed_stop_completion_observed": True,

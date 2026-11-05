@@ -70,6 +70,37 @@ outside this witness. Equal values do not prove actual-exec or launch exclusion,
 all-job retirement, coverage or drain. Retained records do not reconstruct the
 volatile observations after process loss. No operational authority is enabled.
 
+## Same-connection fixed job admission witness
+
+Before the execution snapshot or mask publication, the sequence installs and
+acknowledges an authenticated `JobNew` match on the original connection. It
+shares the bounded event count and strictly increasing manager-sender cookie
+with the existing `JobRemoved` witness. Unsupported headers, signatures, paths,
+duplicate admissions, identity loss and overflow revoke the session. Unrelated
+units are not adopted; their events still consume the bound.
+
+For fixed units, a newly observed job is supported only during the corresponding
+one-shot stop dispatch, and its exact ID/path must match the actual `StopUnit`
+reply. Both early and late admission signals are handled within the original
+deadline. A completion cannot stand in for a missing admission signal. Existing
+waiting starts remain the separate exact cancellation phase's responsibility;
+a new admission outside the supported stop window fails closed, even if it
+later disappears or never executes.
+
+Final observation requires matching admissions and done completions for every
+fixed stop, canceled completions for every inventoried waiting start, and no
+fixed-unit jobs in `ListJobs`. Runtime composition also requires this before
+empty-domain publication and rechecks afterwards. Receipts add only
+`fixed_stop_admission_count` and `fixed_jobs_absent_observed`. No new durable
+record, outer return, replay, clock reset or operational grant is introduced.
+
+This is a volatile bounded observation, not a manager-side admission interlock:
+unexpected jobs may already execute before the observer rejects them. Matching
+JobNew/reply identities do not establish exclusive causal ownership of a job
+submitted concurrently by another caller. No all-manager retirement, continuous
+activation/writer exclusion, alias/template coverage, reexec/boot continuity or
+crash reconstruction is claimed; `manager_jobs_retired` remains false.
+
 ## What this does not establish
 
 The returned `masked_inactive_observed` and `fixed_stop_completion_observed` are

@@ -273,6 +273,7 @@ class ManagerJobSession:
         self._cancel_targets, self._cancel_events, self._cancel_attempted = {}, {}, set()
         self._cancel_watched = False
         self._kill_attempted = set()
+        self._fixed_jobs_watched, self._created = False, {}
         try:
             self._current()
             if library.checksum() != library_sha256:
@@ -445,6 +446,77 @@ class ManagerJobSession:
             self.failed = True
             raise Rejected("manager-bus-inventory-unconfirmed") from None
 
+    def _watch_fixed_jobs(self):
+        """Observe fixed-unit admissions before the masked shutdown sequence.
+
+        This revokes on unexpected jobs; it cannot prevent the manager executing
+        them. Only this session's one-shot StopUnit admissions are supported.
+        Existing waiting starts are separately inventoried/canceled, not adopted
+        from JobNew signals. No watcher survives connection or process loss.
+        """
+        try:
+            self.identity()
+            if self._fixed_jobs_watched or self._attempted or self._cancel_watched:
+                raise Rejected("manager-bus-fixed-job-watch-exhausted")
+            self._fixed_jobs_watched = True
+            rule = "type='signal',sender='%s',path='%s',interface='%s.Manager',member='JobNew'" % (
+                self.owner, MANAGER_PATH, MANAGER)
+            self._until(self._connection.match(rule, self._job_new))
+            self.identity()
+        except BaseException:
+            self.failed = True
+            raise Rejected("manager-bus-fixed-job-watch-unconfirmed") from None
+
+    def _job_new(self, message):
+        connection = self._connection
+        if (not self._fixed_jobs_watched
+                or _text(connection.lib.sd_bus_message_get_sender(message)) != self.owner
+                or _text(connection.lib.sd_bus_message_get_path(message)) != MANAGER_PATH
+                or _text(connection.lib.sd_bus_message_get_interface(message)) != MANAGER + ".Manager"
+                or _text(connection.lib.sd_bus_message_get_member(message)) != "JobNew"):
+            raise Rejected("manager-bus-job-admission-sender-unconfirmed")
+        number, path, unit = connection.fields(message, "uos")
+        cookie = C.c_uint64()
+        _ok(connection.lib.sd_bus_message_get_cookie(message, C.byref(cookie)))
+        self._event_count += 1
+        if (self._event_count > MAX_EVENTS or cookie.value <= self._last_cookie
+                or type(number) is not int or number != job_path(path)):
+            raise Rejected("manager-bus-job-admission-unconfirmed")
+        self._last_cookie = cookie.value
+        roles = [role for role, binding in self.units.items() if unit == binding.unit]
+        if not roles:
+            return
+        role = roles[0]
+        expected = self._submitted.get(role)
+        if (role in self._created or role not in self._attempted
+                or any(number == target[0] for target in self._cancel_targets.values())
+                or any(number == target[0] for target in self._created.values())
+                or expected is None and self._inflight != role
+                or expected is not None and expected != (number, path)):
+            raise Rejected("manager-bus-unexpected-fixed-job-admission")
+        self._created[role] = (number, path)
+
+    def _fixed_jobs_absent(self):
+        """Final bounded observation, not all-manager retirement or a start grant."""
+        try:
+            self.identity()
+            if (not self._fixed_jobs_watched or set(self._submitted) != set(self.units)
+                    or self._created != self._submitted):
+                raise Rejected("manager-bus-fixed-job-admissions-required")
+            rows = self.jobs()
+            if any(row[1] in {unit.unit for unit in self.units.values()} for row in rows.values()):
+                raise Rejected("manager-bus-fixed-job-still-present")
+            if (any(self._events.get(number, {}).get("result") != "done"
+                    for number, _ in self._submitted.values())
+                    or any(self._cancel_events.get(role, {}).get("result") != "canceled"
+                           for role in self._cancel_targets)):
+                raise Rejected("manager-bus-fixed-job-completions-required")
+            self.identity()
+            return {"fixed_stop_admission_count": len(self._created), "fixed_jobs_absent_observed": True}
+        except BaseException:
+            self.failed = True
+            raise Rejected("manager-bus-fixed-job-absence-unconfirmed") from None
+
     def _watch_waiting_starts(self):
         """Internal cancellation phase only; never adopt caller-supplied job IDs."""
         try:
@@ -508,6 +580,17 @@ class ManagerJobSession:
                     or any(number == item[0] for item in self._cancel_targets.values())):
                 raise Rejected("manager-bus-job-identity-reused")
             self._submitted[role] = (number, path)
+            if self._fixed_jobs_watched:
+                while role not in self._created:
+                    self.pump()
+                    self._current()
+                    if role not in self._created:
+                        remaining = self.deadline - self.clock()
+                        if remaining <= 0:
+                            raise Rejected("manager-bus-job-admission-deadline")
+                        self._connection.wait(max(1, min(50000, int(remaining * 1000000))))
+                if self._created[role] != (number, path):
+                    raise Rejected("manager-bus-stop-admission-identity-conflict")
             # JobRemoved can precede the StopUnit reply; do not discard it or
             # substitute a later job with the same unit/ID.
             events = [event for event in self._events.values() if event["unit"] == self.units[role].unit]
