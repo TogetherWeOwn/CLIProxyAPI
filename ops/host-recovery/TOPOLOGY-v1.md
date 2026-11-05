@@ -76,6 +76,46 @@ persisted runtime metadata/version support, effective manager activation graph,
 actual full task/shim containment and independent approval provenance cannot be
 proven by these strings/booleans. Missing proof keeps all operational denies.
 
+## Fixed forward containment submission
+
+`host_recovery/broker_containment.py:ForwardContainment` is an embedding adapter,
+**not installed, provisioned, or exposed by the observation-only IPC server**.
+It joins the original supervisor's live peer/kernel flock/input checks to the
+private operation journal and the existing strict manager reader. The captured
+forward unit/effective configuration must match the original topology pin and
+numeric forward owner. Runtime, recovery and supervisor domains cannot overlap
+the forward target. It acquires no second installation lock.
+
+- One attempt per adapter and one durable `contain_forward` pending record per
+  original journal. The broker journal mutex covers the complete operation, not
+  just publication. A different adapter cannot replay a consumed operation.
+- Read back/sync pending before any submission. Recheck original peer, lock,
+  inputs, unit, configuration and original shortened deadline before the fixed
+  stop and again before whole-unit SIGKILL. Never accept caller argv/unit/PID,
+  arbitrary commands, start/restore methods or worker-provided callbacks.
+- A successful helper exit only records return. Two fresh recursive cgroup and
+  pinned-unit observations bracket return persistence. `forward_stopped_observed`
+  describes those point reads only; missing cgroup, surviving descendants,
+  pending jobs or inconsistent observations are not stopped proof.
+- Any uncertainty closes the adapter/journal and retains pending/staged/return
+  bytes. No retry, job recreation or lost-reply repair occurs. The embedding
+  broker still owns helper reaping and independent alert attempts, including
+  when persistence fails; this adapter is not an alert service.
+
+Manager stop/kill addresses a **fixed unit name**, not an invocation-atomic kernel
+handle. Independently enforced exclusive activation ownership is still required;
+point reads alone cannot exclude an intervening activation or recall submitted
+work. This adapter does not claim tracked-job cancellation/retirement, daemon
+handler drain, cold teardown, activation fencing or a complete fence. Every
+pending-drained, restoration/execution/start/settlement and acceptance flag stays
+false. The supervisor remains fixed-deny, the worker identity-only and all IPC
+effect methods denied until the complete operational boundary is qualified.
+
+Tests use actual synthetic foreign flock/Unix peers and private durable records,
+with **scripted manager/stop/kill/cgroup replies**. They are not installed-systemd,
+root-broker or runtime qualification. New methods run on GitHub Actions; no local
+suite or build is required to substitute for exact-head Actions evidence.
+
 ## Required next boundaries
 
 The independently provisioned privileged broker remains unimplemented. It must
