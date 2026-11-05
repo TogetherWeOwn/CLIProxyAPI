@@ -11,6 +11,13 @@ names and never reloads the manager, replaces content or acknowledges activation
 exclusion, job retirement or drain. Existing strict loaded-unit pins and all
 operational runner/IPC denies remain unchanged.
 
+The opt-in [masked forward stop sequence](MASKED-FORWARD-STOP-v1.md) composes
+persistent publication, exact waiting-start cancellation, reload, journaled stop
+and fixed whole-unit KILL on the original manager connection. It retains the
+original outer pending operation and all runner/IPC denies. Matching completion
+and inactive mask observations are not all-job retirement, actual-exec exclusion,
+cgroup quiescence, drain or recovery/start authority.
+
 The separate [whole-runtime inventory observation](QUARANTINE-INVENTORY-v1.md)
 compares unfiltered full daemon IDs and fixed containerd namespace/task metadata
 with the protected original journal. It remains read-only/non-authorizing and

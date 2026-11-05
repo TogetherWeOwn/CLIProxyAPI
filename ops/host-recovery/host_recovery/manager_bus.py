@@ -190,10 +190,19 @@ class _Connection:
         try:
             _ok(self.lib.sd_bus_message_new_method_call(self.bus, C.byref(message), destination.encode(),
                 path.encode(), interface.encode(), method.encode()))
+            if len(signature) != len(args):
+                raise Rejected("manager-bus-fixed-argument-count")
             for kind, value in zip(signature, args):
-                if kind != "s" or type(value) is not str:
+                if kind == "s" and type(value) is str:
+                    pointer = C.cast(C.c_char_p(value.encode()), C.c_void_p)
+                elif (kind == "i" and type(value) is int and value == 9
+                        and interface == MANAGER + ".Manager" and method == "KillUnit"
+                        and signature == "ssi" and args[1] == "all"):
+                    number = C.c_int32(value)
+                    pointer = C.cast(C.byref(number), C.c_void_p)
+                else:
                     raise Rejected("manager-bus-fixed-argument-required")
-                _ok(self.lib.sd_bus_message_append_basic(message, b"s", C.cast(C.c_char_p(value.encode()), C.c_void_p)))
+                _ok(self.lib.sd_bus_message_append_basic(message, kind.encode(), pointer))
             def returned(reply):
                 if self.lib.sd_bus_message_is_method_error(reply, None) != 0:
                     raise Rejected("manager-bus-method-return-unconfirmed")
@@ -262,6 +271,7 @@ class ManagerJobSession:
         self._event_count, self._last_cookie = 0, 0
         self._cancel_targets, self._cancel_events, self._cancel_attempted = {}, {}, set()
         self._cancel_watched = False
+        self._kill_attempted = set()
         try:
             self._current()
             if library.checksum() != library_sha256:
@@ -508,6 +518,27 @@ class ManagerJobSession:
         except BaseException:
             self.failed = True
             raise Rejected("manager-bus-stop-unconfirmed") from None
+
+    def _kill_stopping_unit(self, role, *, check):
+        """Internal fixed whole-unit KILL after a separately journaled stop.
+
+        The embedding sequence retains its original pending operation and masks.
+        A KillUnit reply is not a stop completion or cgroup/activation fence.
+        """
+        try:
+            self.identity()
+            if role not in self._submitted or role in self._kill_attempted:
+                raise Rejected("manager-bus-fixed-kill-exhausted")
+            check()
+            self._current()
+            self._kill_attempted.add(role)
+            self._call(self.owner, MANAGER + ".Manager", "KillUnit", "ssi",
+                       (self.units[role].unit, "all", 9), "")
+            self.identity()
+            check()
+        except BaseException:
+            self.failed = True
+            raise Rejected("manager-bus-kill-unconfirmed") from None
 
     def completions(self):
         try:

@@ -351,7 +351,7 @@ class SystemManagerTests(unittest.TestCase):
         print(json.dumps({"manager_bus": session.bus_id, "manager_owner": session.owner,
                           "completion": event}), flush=True)
 
-    def publish_mask(self, binding):
+    def publish_mask(self, binding, *, publish=True):
         from host_recovery.unit_masks import PersistentUnitMasks
         path = Path("/etc/systemd/system")
         st = path.stat()
@@ -361,6 +361,8 @@ class SystemManagerTests(unittest.TestCase):
         directory = context.__enter__()
         self.addCleanup(context.__exit__, None, None, None)
         masks = PersistentUnitMasks(directory=directory, units={"forward": binding})
+        if not publish:
+            return masks
         receipt = masks.publish(current=self.current)
         self.assertTrue(receipt["persistent_masks_published"])
         self.assertFalse(receipt["activation_exclusion_proven"])
@@ -369,6 +371,12 @@ class SystemManagerTests(unittest.TestCase):
         return masks
 
     def test_persistent_mask_blocks_fresh_launches_but_does_not_quiesce(self):
+        self.masked_fixture(composed=False)
+
+    def test_original_pending_sequence_masks_stops_and_kills_on_one_connection(self):
+        self.masked_fixture(composed=True)
+
+    def masked_fixture(self, *, composed):
         paths = activation_paths()
         mask = Path("/etc/systemd/system") / unit_name("masked")
         self.assertFalse(os.path.lexists(mask))
@@ -376,7 +384,8 @@ class SystemManagerTests(unittest.TestCase):
         self.addCleanup(cleanup_activation)
         fragments = {
             "masked": ("[Service]\nType=exec\nRestart=no\nKillMode=control-group\n"
-                "SendSIGKILL=yes\nTimeoutStopSec=1s\nRuntimeMaxSec=60s\nUser=0\nGroup=0\nLimitCORE=0\n"
+                "SendSIGKILL=yes\nTimeoutStopSec=" + ("5s" if composed else "1s")
+                + "\nRuntimeMaxSec=60s\nUser=0\nGroup=0\nLimitCORE=0\n"
                 "ExecStart=" + sys.executable + " -I " + str(ROOT / "tests/manager_system_fixture.py")
                 + " " + str(self.root / "ready.sock") + "\n"),
             "dependent": ("[Unit]\nRequires=" + unit_name("masked") + "\nAfter=" + unit_name("masked")
@@ -411,32 +420,61 @@ class SystemManagerTests(unittest.TestCase):
         # library, root PID1 connection, Reload reply and typed properties.
         journal = OperationJournal(fd, binding=original, epoch=generation, clock=time.monotonic,
                                    boot_id=lambda: "boot-original")
-        operation = journal.pending("contain_forward", target_sha256="d" * 64, deadline=self.deadline)
-        masks = self.publish_mask(binding)
+        masks = self.publish_mask(binding, publish=False)
         session = self.session(binding)
-        reload = ManagerMaskReload(journal=journal, masks=masks, session=session)
-        receipt = reload.reload(operation=operation)
-        self.assertTrue(receipt["effective_masks_observed"])
-        self.assertEqual(receipt["active_unit_count"], 1)
-        self.assertFalse(receipt["activation_exclusion_proven"])
-        self.assertEqual(receipt, reload.observe())
-        print(json.dumps({"source_mask_reload": receipt}), flush=True)
-        masked = self.masked_observation(binding.unit)
-        self.assertEqual(masked["LoadState"], "masked")
-        self.assertEqual(masked["ActiveState"], "active")
-        self.assertEqual(masked["InvocationID"], binding.invocation_id)
-        self.assertEqual(masked["MainPID"], str(pids["parent"]))
-        for key in ("parent_fd", "child_fd"):
-            poller = select.poll()
-            poller.register(pids[key], select.POLLIN)
-            self.assertFalse(poller.poll(0), "mask alone killed a fixture process")
-        print(json.dumps({"masked_active_unit": binding.unit, "mask_path": str(mask),
-                          "load_state": masked["LoadState"], "active_state": masked["ActiveState"],
-                          "same_invocation": True, "both_pidfds_live": True,
-                          "mask_is_quiescence": False}), flush=True)
-        # A separate authenticated stop/completion, explicit whole-unit kill and
-        # pidfd deaths are required. Mask presence cannot supply any of them.
-        self.stop_and_witness(binding, kill=True)
+        if composed:
+            from host_recovery.manager_jobs import ForwardStopJobs, completion_name
+            from host_recovery.masked_forward_stop import MaskedForwardStop
+            busctl = shutil.which("busctl", path=os.defpath)
+            self.assertIsNotNone(busctl)
+            checksum = digest(Path(busctl).read_bytes())
+            jobs = ForwardStopJobs(journal=journal, units={"forward": binding}, busctl=busctl,
+                busctl_sha256=checksum, commands=None, read_helper_hash=lambda path:digest(Path(path).read_bytes()),
+                session=session)
+            sequence = MaskedForwardStop(journal=journal, masks=masks, jobs=jobs)
+            operation = journal.pending("contain_forward", target_sha256=sequence.target_sha256, deadline=self.deadline)
+            witness = QueuedLaunchWitness(target=binding.unit, library=self.library,
+                library_sha256=self.library_sha256, units={"forward": binding}, deadline=self.deadline,
+                clock=time.monotonic, check=self.current)
+            self.addCleanup(witness.close)
+            receipt = sequence.stop(operation=operation)
+            self.assertTrue(receipt["whole_unit_kill_returned"])
+            self.assertTrue(receipt["fixed_stop_completion_observed"])
+            self.assertTrue(receipt["masked_inactive_observed"])
+            self.assertFalse(receipt["complete_fence_proven"])
+            self.assertFalse(receipt["pending_drained"])
+            self.assertFalse(receipt["start_allowed"])
+            self.assertNotIn("contain_forward", journal._returned)
+            completion = json.loads((state / completion_name(1, "forward")).read_bytes())
+            witness.completed(completion["job_path"], "done")
+            self.assertEqual(witness.observed[completion["job_path"]]["job_id"], completion["job_id"])
+            print(json.dumps({"source_masked_forward_sequence": receipt, "completion": completion}), flush=True)
+        else:
+            operation = journal.pending("contain_forward", target_sha256="d" * 64, deadline=self.deadline)
+            masks.publish(current=self.current)
+            reload = ManagerMaskReload(journal=journal, masks=masks, session=session)
+            receipt = reload.reload(operation=operation)
+            self.assertTrue(receipt["effective_masks_observed"])
+            self.assertEqual(receipt["active_unit_count"], 1)
+            self.assertFalse(receipt["activation_exclusion_proven"])
+            self.assertEqual(receipt, reload.observe())
+            print(json.dumps({"source_mask_reload": receipt}), flush=True)
+            masked = self.masked_observation(binding.unit)
+            self.assertEqual(masked["LoadState"], "masked")
+            self.assertEqual(masked["ActiveState"], "active")
+            self.assertEqual(masked["InvocationID"], binding.invocation_id)
+            self.assertEqual(masked["MainPID"], str(pids["parent"]))
+            for key in ("parent_fd", "child_fd"):
+                poller = select.poll()
+                poller.register(pids[key], select.POLLIN)
+                self.assertFalse(poller.poll(0), "mask alone killed a fixture process")
+            print(json.dumps({"masked_active_unit": binding.unit, "mask_path": str(mask),
+                              "load_state": masked["LoadState"], "active_state": masked["ActiveState"],
+                              "same_invocation": True, "both_pidfds_live": True,
+                              "mask_is_quiescence": False}), flush=True)
+            # Mask presence cannot replace independent stop/completion, whole-unit
+            # kill and pidfd deaths. This original qualification remains separate.
+            self.stop_and_witness(binding, kill=True)
         self.stopped(binding, pids, observe=self.masked_observation)
         for suffix in ("masked", "dependent"):
             result = subprocess.run((self.systemctl, "start", "--", unit_name(suffix)),

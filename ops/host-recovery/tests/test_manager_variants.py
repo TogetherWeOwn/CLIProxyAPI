@@ -1,6 +1,7 @@
 """Typed native decoder with scripted ABI calls; no native library or bus."""
 import ctypes as C
 import unittest
+from unittest.mock import Mock
 
 from host_recovery import durable, manager_bus as bus
 
@@ -27,6 +28,45 @@ class VariantLibrary:
         elif kind == b'u': C.cast(pointer, C.POINTER(C.c_uint32))[0] = value
         else: C.cast(pointer, C.POINTER(C.c_char_p))[0] = value
         return 1
+
+
+class ManagerArgumentTests(unittest.TestCase):
+    def encode(self, signature, args, *, method='KillUnit', interface=bus.MANAGER+'.Manager'):
+        connection = object.__new__(bus._Connection)
+        native = Mock()
+        connection.lib, connection.bus = native, C.c_void_p(1)
+        connection.error, connection.callbacks = None, []
+        native.sd_bus_is_open.return_value = 1
+        native.sd_bus_message_new_method_call.return_value = 1
+        native.sd_bus_call_async.return_value = 1
+        self.appended = []
+        def append(message, kind, pointer):
+            self.appended.append((kind, C.cast(pointer, C.POINTER(C.c_int32))[0]
+                                  if kind == b'i' else C.cast(pointer, C.c_char_p).value))
+            return 1
+        native.sd_bus_message_append_basic.side_effect = append
+        connection.call(':1.7', interface, method, signature, args, '', usec=1000)
+        return native
+
+    def test_fixed_whole_unit_sigkill_is_encoded_as_signed_int32(self):
+        native = self.encode('ssi', ('fixture.service','all',9))
+        self.assertEqual(self.appended, [(b's',b'fixture.service'),(b's',b'all'),(b'i',9)])
+        self.assertEqual(native.sd_bus_call_async.call_count, 1)
+
+    def test_other_integer_values_types_methods_or_interfaces_never_dispatch(self):
+        for value, overrides in [(True,{}),(15,{}),(9.,{}),(9,dict(method='Other')),
+                                 (9,dict(interface='other.Manager'))]:
+            with self.subTest(value=value, overrides=overrides):
+                with self.assertRaises(durable.Rejected):
+                    self.encode('ssi', ('fixture.service','all',value), **overrides)
+                self.assertFalse(any(kind == b'i' for kind, _ in self.appended))
+        with self.assertRaises(durable.Rejected): self.encode('ssi', ('fixture.service','main',9))
+
+    def test_argument_count_mismatch_does_not_silently_zip_truncate(self):
+        for signature, args in [('ssi',('fixture.service','all')), ('ss',('fixture.service','all',9))]:
+            with self.subTest(signature=signature):
+                with self.assertRaises(durable.Rejected): self.encode(signature, args)
+                self.assertEqual(self.appended, [])
 
 
 class ManagerVariantTests(unittest.TestCase):

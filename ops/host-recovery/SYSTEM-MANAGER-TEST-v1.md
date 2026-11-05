@@ -4,7 +4,7 @@ The `recovery-system-manager` job in `pr-test-build.yml` exercises the existing
 `ManagerJobSession` against **real systemd PID1 on a disposable GitHub-hosted
 Ubuntu runner**. It is separate from the synthetic private-bus matrix and ordinary
 Python discovery. Missing capabilities fail the separate job; ordinary discovery
-skips the four methods explicitly. Never run this fixture on a workstation, shared
+skips the five methods explicitly. Never run this fixture on a workstation, shared
 agent host, self-hosted runner or production machine.
 
 ## Boundaries exercised
@@ -200,6 +200,26 @@ revocation, manager re-exec/reboot, arbitrary activation-graph exclusion, old-ep
 death or complete pending drain. Durable mask transitions and operational job
 retirement/actual-exec admission still remain separate requirements. No current
 fixture result is implied by this source description.
+
+## Original-operation composed stop fixture
+
+A fifth method reuses the exact owned mask/dependency fixture but calls
+[MaskedForwardStop](MASKED-FORWARD-STOP-v1.md) for the entire mask publication,
+cancellation scan, reload, journaled stop, fixed whole-unit KILL and matching stop
+completion. The original mask-alone-does-not-kill method and queued-start positive
+and negative controls remain separate and unchanged in scope. An independent
+subscribed connection must match the actual source stop ID/path and done result;
+both original pidfds must be dead, and fresh direct/dependency starts must refuse.
+
+The composed fixture uses a five-second native fallback stop cap so the source
+must submit explicit KILL rather than relying on that fallback; its thirty-second
+original fixture deadline, sixty-second native runtime cap, exact-name cleanup
+and ephemeral runner still bound use. These are test controls, not production
+network timeouts, recovery phase allocations or downtime. Real manager/root/
+library calls are unpatched, but original request/lock authority remains
+synthetic. The sequence leaves the outer operation pending and every drain,
+fence, restoration/start and settlement grant false. Source authorship alone
+claims no new passing qualification: retain the exact-head Actions outcome.
 
 ## What a green job does not prove
 
