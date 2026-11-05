@@ -50,18 +50,25 @@ class SupervisorPeerAuthority:
         self.deadline = deadline
         self.failed, self.last_clock, self._observed = False, None, None
 
-    def _live(self, deadline):
+    def _time(self, deadline):
         now = self.lock.clock()
-        binding = decode(self._binding)
-        if (self.failed or self.lock.failed or self.manager.revoked
-                or not positive(deadline) or deadline > self.deadline
-                or not positive(now) or now < binding["failure_monotonic"] or now >= deadline
-                or self.last_clock is not None and now < self.last_clock
-                or self.manager.boot_id() != binding["original_boot_id"]
-                or canonical(self.lock.peer.peer) != self._peer or not self.lock.peer.alive()):
-            raise Rejected("broker-authority-peer-clock-or-deadline-unconfirmed")
+        if (not positive(now) or now < decode(self._binding)["failure_monotonic"] or now >= deadline
+                or self.last_clock is not None and now < self.last_clock):
+            raise Rejected("broker-authority-clock-or-deadline-unconfirmed")
         self.last_clock = now
         return now
+
+    def _live(self, deadline):
+        if (self.failed or self.lock.failed or self.manager.revoked
+                or not positive(deadline) or deadline > self.deadline):
+            raise Rejected("broker-authority-observation-revoked")
+        self._time(deadline)
+        if (self.manager.boot_id() != decode(self._binding)["original_boot_id"]
+                or canonical(self.lock.peer.peer) != self._peer or not self.lock.peer.alive()):
+            raise Rejected("broker-authority-peer-clock-or-deadline-unconfirmed")
+        # Boot and peer reads are external boundaries too. Their elapsed time
+        # cannot escape the last deadline check before returning an observation.
+        return self._time(deadline)
 
     def _manager_owner(self, deadline):
         self._live(deadline)

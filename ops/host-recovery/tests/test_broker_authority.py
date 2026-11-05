@@ -193,6 +193,22 @@ class BrokerAuthorityTests(unittest.TestCase):
         self.refused()
         self.assertEqual(len(self.calls), 4)
 
+    def test_final_boot_read_cannot_return_an_expired_observation(self):
+        actual = self.lock.observe
+        calls = []
+        def observe(*, deadline):
+            result = actual(deadline=deadline)
+            calls.append(True)
+            if len(calls) == 2:
+                def late_boot():
+                    self.now = deadline
+                    return self.boot
+                self.manager.boot_id = late_boot
+            return result
+        with patch.object(self.lock, 'observe', side_effect=observe):
+            self.refused()
+        self.assertEqual(len(calls), 2)
+
     def test_boot_change_after_first_manager_reply_refuses(self):
         self.hook = lambda: setattr(self, 'boot', 'changed-boot')
         self.refused()
