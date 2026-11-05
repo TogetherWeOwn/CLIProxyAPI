@@ -648,6 +648,37 @@ a qualified cold barrier, quarantine inventory or full-system recovery evidence.
 The privileged fixed-method server/client, actual manager/kernel/runtime proof,
 original-lock/live-peer effect barriers and independent verifier remain due.
 
+## Original-supervisor broker checks (point observations only)
+
+`host_recovery/broker_authority.py:SupervisorPeerAuthority` composes the existing
+kernel peer/pidfd and original-directory FLOCK observation with pinned systemd
+MainPID, numeric owner, invocation, unit fragment/static properties and process
+cgroup reads. It rereads the independently approved original intent/arm/request
+through the protected loader and requires the exact original operation binding.
+It never acquires or transfers the installation lock. Caller identity assertions,
+environment variables and a self-consistent saved request cannot replace these
+observations. All construction inputs must come from the separately protected
+approval/transport boundary, not client-supplied pins.
+
+Repeated manager observations surround input loading; inputs are captured again
+after the final manager query, followed by fresh lock and peer checks. Boot,
+clock regression, peer/lock loss, changed original bytes or manager identity,
+read uncertainty and expired/expanded deadlines revoke the object. A successful
+shortened deadline stays shortened. The broker must serialize calls and repeat
+checks at each actual fixed effect barrier. These are **point observations**, not
+an atomic lease or cancellation of an already submitted manager/daemon call.
+
+Every receipt still denies drain, complete fence, execution, start, settlement
+and production acceptance. There is **no privileged server/client, runtime effect
+adapter, root identity/bootstrap or operational service wiring** in this module.
+No receipt is a reusable permit. Those implementations, cold/quarantine full-ID
+inventory and the independent stopped-baseline/readiness/result verifier remain
+required before enabling operational runners. Existing supervisor fixed-deny and
+worker identity-only entrypoints are unchanged. Tests combine real synthetic
+lock-owning separate processes with **scripted manager replies**, not installed
+systemd/runtime containment or root provisioning; use exact-head Actions results
+for their verification status.
+
 ## Remaining acceptance work (not implemented or not proved)
 
 1. Persistent systemd supervisor with admission, durable active-attempt latch,
