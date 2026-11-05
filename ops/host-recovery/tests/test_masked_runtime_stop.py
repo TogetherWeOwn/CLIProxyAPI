@@ -1,0 +1,294 @@
+"""Owned masks/journal; scripted manager and cgroup domain, not cold recovery."""
+from dataclasses import replace
+import errno
+import os
+import unittest
+from unittest.mock import Mock, patch
+
+from host_recovery import durable, manager_bus as bus
+from host_recovery.broker_operations import OperationJournal
+from host_recovery.broker_runtime import RuntimeDomain
+from host_recovery.manager_jobs import RuntimeStopJobs, completion_name, record_names
+from host_recovery.masked_runtime_stop import MaskedRuntimeStop
+from host_recovery.unit_masks import PersistentUnitMasks
+from test_broker_operations import binding, epoch
+from test_manager import binding as unit_binding, observed
+from test_manager_bus import ScriptedConnection
+import test_manager_bus as session_fixture
+import test_unit_masks as mask_fixture
+
+
+class MaskedRuntimeStopTests(unittest.TestCase):
+    make = mask_fixture.PersistentUnitMaskTests.make
+
+    def setUp(self):
+        mask_fixture.PersistentUnitMaskTests.setUp(self)
+        session_fixture.ManagerSessionTests.setUp(self)
+        self.units = {role: unit_binding(observed(role+'.service', 'd'*32, '/runtime.slice/'+role+'.service'))
+                      for role in ('dockerd', 'containerd')}
+        self.masks = PersistentUnitMasks(directory=self.directory, units=self.units)
+        self.session = bus.ManagerJobSession(library=self.library, library_sha256='a'*64,
+            units=self.units, deadline=1090., clock=lambda:self.now, check=lambda:self.check_hook())
+        self.addCleanup(self.session.close)
+        self.connection.job_units = self.units
+        self.path_state = self.root / 'runtime-state'
+        self.path_state.mkdir(mode=0o700)
+        fd = os.open(self.path_state, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        self.addCleanup(os.close, fd)
+        original = binding()
+        original.update(original_arm=990., failure_monotonic=990., recovery_deadline=1090.)
+        self.journal = OperationJournal(fd, binding=original, epoch=epoch(), clock=lambda:self.now,
+                                        boot_id=lambda:'boot-original')
+        self.forward = self.journal.pending('contain_forward', target_sha256='e'*64, deadline=1090.)
+        self.journal.returned(self.forward, result='returned')
+        self.jobs = RuntimeStopJobs(journal=self.journal, units=self.units, busctl='/synthetic/busctl',
+            busctl_sha256='b'*64, commands=None, read_helper_hash=lambda path:'b'*64, session=self.session)
+        self.domain = Mock(spec=RuntimeDomain)
+        self.domain.cgroup = '/runtime.slice'
+        self.domain.configuration.return_value = durable.canonical({'synthetic_domain':True})
+        self.domain.populated.return_value = False
+        def kill(*, check):
+            self.effects.append(('slice-kill', None))
+            check()
+        self.domain.kill.side_effect = kill
+        self.sequence = self.make_sequence()
+        self.operation = self.journal.pending('cold_quiesce_runtime', target_sha256=self.sequence.target_sha256,
+                                               deadline=1090.)
+        self.effects, self.hook = [], lambda method, role:None
+        self.stop_signals = {'dockerd':True, 'containerd':True}
+        self.stop_results = {'dockerd':'done', 'containerd':'done'}
+        self.early, self.event_cookie = False, 100
+        self.rows = {role:dict(Id=unit.unit, LoadState='masked', FragmentPath='/dev/null', DropInPaths=[],
+            ActiveState='active', SubState='running', InvocationID=bytes.fromhex(unit.invocation_id),
+            ControlGroup=unit.cgroup, MainPID=123, Job=(0, '/')) for role,unit in self.units.items()}
+        self.numbers = {'containerd':41, 'dockerd':42}
+        self.connection.inventory = [[number, self.units[role].unit, 'start', 'waiting', bus.JOB_PREFIX+str(number),
+            bus.MANAGER_PATH+'/unit/'+role] for role,number in self.numbers.items()]
+        original_call = ScriptedConnection.call
+        def call(connection, destination, interface, method, signature, args, response, **kwargs):
+            if method not in ('Cancel','Reload','StopUnit','KillUnit','GetUnit','Get'):
+                return original_call(connection, destination, interface, method, signature, args, response, **kwargs)
+            connection.calls.append((destination, method, args))
+            role = None
+            if method == 'Cancel':
+                role = next(r for r,n in self.numbers.items() if kwargs['path'] == bus.JOB_PREFIX+str(n))
+            elif method in ('StopUnit','KillUnit','GetUnit'):
+                role = next(r for r,u in self.units.items() if u.unit == args[0])
+            elif method == 'Get': role = kwargs['path'].rsplit('/',1)[1]
+            if method in ('Cancel','Reload','StopUnit','KillUnit'): self.effects.append((method, role))
+            self.hook(method, role)
+            result = []
+            def event(number, outcome):
+                connection.inventory = [row for row in connection.inventory if row[0] != number]
+                self.event_cookie += 1
+                connection.number, connection.result, connection.cookie = number, outcome, self.event_cookie
+                if outcome == 'done': self.rows[role].update(ActiveState='inactive', SubState='dead', MainPID=0, ControlGroup='')
+                connection.event(role=role)
+            if method == 'Cancel':
+                connection.queue.append(lambda:event(self.numbers[role], 'canceled'))
+                value = []
+            elif method == 'StopUnit':
+                number = self.numbers[role]+10
+                connection.inventory.append([number, self.units[role].unit, 'stop', 'running',
+                    bus.JOB_PREFIX+str(number), bus.MANAGER_PATH+'/unit/'+role])
+                if self.early and self.stop_signals[role]:
+                    connection.queue.append(lambda:event(number, self.stop_results[role]))
+                value = [bus.JOB_PREFIX+str(number)]
+            elif method == 'KillUnit':
+                self.assertEqual((signature,args,response), ('ssi',(self.units[role].unit,'all',9),''))
+                if self.stop_signals[role]:
+                    connection.queue.append(lambda:event(self.numbers[role]+10, self.stop_results[role]))
+                value = []
+            else:
+                value = ([] if method == 'Reload' else [bus.MANAGER_PATH+'/unit/'+role]
+                         if method == 'GetUnit' else [self.rows[role][args[1]]])
+            connection.queue.append(lambda:result.append(value))
+            return result, None, None
+        patcher = patch.object(ScriptedConnection, 'call', call)
+        patcher.start(); self.addCleanup(patcher.stop)
+
+    def make_sequence(self, **overrides):
+        args = dict(journal=self.journal, masks=self.masks, jobs=self.jobs, domain=self.domain)
+        args.update(overrides)
+        return MaskedRuntimeStop(**args)
+
+    def apply(self):
+        return self.sequence.stop(operation=self.operation)
+
+    def test_both_fixed_completions_precede_one_recursive_domain_kill(self):
+        reached = []
+        def kill(*, check):
+            reached.append('kill')
+            self.assertEqual(self.effects, [('Cancel','containerd'),('Cancel','dockerd'),('Reload',None),
+                ('StopUnit','dockerd'),('KillUnit','dockerd'),('StopUnit','containerd'),('KillUnit','containerd')])
+            for role in self.units:
+                saved = durable.decode((self.path_state/completion_name(2,role)).read_bytes())
+                self.assertEqual(saved['result'], 'done')
+                self.assertTrue((self.path/self.units[role].unit).is_symlink())
+            check()
+        self.domain.kill.side_effect = kill
+        result = self.apply()
+        self.assertEqual(reached, ['kill'])
+        self.assertEqual(result['runtime_stop_completion_count'], 2)
+        self.assertEqual(result['canceled_waiting_start_count'], 2)
+        self.assertTrue(result['recursive_domain_kill_returned'] and result['domain_empty_observed'])
+        for key,value in result.items():
+            if key.endswith(('allowed','proven','retired','drained','acceptance')): self.assertIs(value, False)
+        self.assertNotIn(str(self.root), str(result))
+        self.assertNotIn('cold_quiesce_runtime', self.journal._returned)
+        self.assertFalse((self.path_state/'operation-02-return.json').exists())
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(reached, ['kill'])
+
+    def test_inactive_units_still_get_two_completions_and_recursive_kill(self):
+        self.connection.inventory = []
+        self.early = True
+        for row in self.rows.values(): row.update(ActiveState='inactive', SubState='dead', MainPID=0, ControlGroup='')
+        result = self.apply()
+        self.assertEqual(self.effects, [('Reload',None),('StopUnit','dockerd'),('StopUnit','containerd'),('slice-kill',None)])
+        self.assertFalse(result['whole_unit_kill_returned'])
+        self.assertEqual(self.domain.kill.call_count, 1)
+
+    def test_domain_pins_scope_and_original_forward_are_required(self):
+        for action in ('missing-forward','unreturned-forward','different-slice','foreign-unit'):
+            with self.subTest(action=action):
+                self.setUp()
+                if action == 'missing-forward': self.journal._pending.pop('contain_forward')
+                elif action == 'unreturned-forward': self.journal._returned.remove('contain_forward')
+                elif action == 'different-slice': self.domain.cgroup = '/different.slice'
+                else: self.jobs.units['containerd'] = replace(self.units['containerd'], cgroup='/elsewhere')
+                with self.assertRaises(durable.Rejected): self.make_sequence()
+                self.assertEqual(self.effects, [])
+
+    def test_original_target_deadline_or_boundaries_cannot_be_replaced(self):
+        for action in ('target','deadline','domain','roles','method','jobs','session','masks'):
+            with self.subTest(action=action):
+                self.setUp()
+                if action == 'target': self.operation['target_sha256'] = 'f'*64
+                elif action == 'deadline': self.session.deadline = 1091.
+                elif action == 'roles': self.sequence.roles = ('dockerd',)
+                elif action == 'method': self.sequence.method = 'contain_forward'
+                else: setattr(self.sequence, action, object())
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertEqual(self.effects, [])
+                self.domain.kill.assert_not_called()
+
+    def test_each_publication_fault_is_reached_and_skips_later_effects(self):
+        # Six cancel, two reload and six stop phase records, after original pending.
+        expected = [[], [('Cancel','containerd')], [('Cancel','containerd')], [('Cancel','containerd')],
+            [('Cancel','containerd'),('Cancel','dockerd')], [('Cancel','containerd'),('Cancel','dockerd')]]
+        canceled = [('Cancel','containerd'),('Cancel','dockerd')]
+        expected += [canceled, canceled+[('Reload',None)], canceled+[('Reload',None)],
+            canceled+[('Reload',None),('StopUnit','dockerd')],
+            canceled+[('Reload',None),('StopUnit','dockerd'),('KillUnit','dockerd')]]
+        first = expected[-1]
+        expected += [first, first+[('StopUnit','containerd')], first+[('StopUnit','containerd'),('KillUnit','containerd')]]
+        self.assertEqual(len(expected), 14)
+        for phase in range(14):
+            for point in ('create','write','file-fsync','rename','directory-fsync','readback'):
+                for code in (errno.EIO, errno.ENOSPC):
+                    with self.subTest(phase=phase, point=point, code=code):
+                        self.setUp()
+                        reached, writes = [], []
+                        def fault(actual):
+                            if actual == 'create': writes.append(actual)
+                            if len(writes) == phase+1 and actual == point:
+                                reached.append(actual)
+                                raise OSError(code, 'synthetic')
+                        self.journal.fault = fault
+                        with self.assertRaises(durable.Rejected): self.apply()
+                        self.assertEqual(reached, [point])
+                        self.assertEqual(self.effects, expected[phase])
+                        self.domain.kill.assert_not_called()
+                        self.assertTrue(self.sequence.failed and self.journal._failed and self.session.failed)
+
+    def test_first_runtime_failure_prevents_second_stop_and_domain_kill(self):
+        for outcome in ('failed','canceled','timeout','dependency'):
+            with self.subTest(outcome=outcome):
+                self.setUp()
+                self.stop_results['dockerd'] = outcome
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertNotIn(('StopUnit','containerd'), self.effects)
+                self.domain.kill.assert_not_called()
+
+    def test_second_job_disappearance_cannot_replace_completion(self):
+        self.stop_signals['containerd'] = False
+        def hook(method, role):
+            if (method,role) == ('KillUnit','containerd'): self.connection.inventory = []
+        self.hook = hook
+        self.connection.wait_hook = lambda:setattr(self,'now',1090.)
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertIn(('KillUnit','containerd'), self.effects)
+        self.domain.kill.assert_not_called()
+        self.assertFalse((self.path_state/completion_name(2,'containerd')).exists())
+
+    def test_domain_kill_failure_is_sticky_and_never_retried(self):
+        def kill(*,check):
+            check()
+            raise OSError(errno.EIO, 'synthetic')
+        self.domain.kill.side_effect = kill
+        with self.assertRaises(durable.Rejected): self.apply()
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(self.domain.kill.call_count, 1)
+        self.assertFalse(self.sequence.completed)
+
+    def test_populated_unknown_or_missing_domain_after_kill_is_not_empty(self):
+        for value in (True,None,0):
+            with self.subTest(value=value):
+                self.setUp()
+                self.domain.populated.return_value = value
+                self.connection.wait_hook = lambda:setattr(self,'now',1090.)
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertEqual(self.domain.kill.call_count, 1)
+                self.assertFalse(self.sequence.completed)
+        self.setUp()
+        self.domain.populated.side_effect = FileNotFoundError('synthetic')
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(self.domain.kill.call_count, 1)
+
+    def test_trailing_repopulation_after_empty_read_refuses(self):
+        self.domain.populated.side_effect = [False,False,False,True]
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(self.domain.populated.call_count, 4)
+        self.assertFalse(self.sequence.completed)
+
+    def test_peer_loss_at_domain_kill_refuses_before_acknowledgment(self):
+        reached = []
+        def kill(*,check):
+            reached.append('kill')
+            self.check_hook = lambda:(_ for _ in ()).throw(durable.Rejected('lost'))
+            check()
+        self.domain.kill.side_effect = kill
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(reached, ['kill'])
+        self.assertFalse(self.sequence.completed)
+
+    def test_second_completion_persistence_loss_prevents_domain_kill(self):
+        reached = []
+        def fault(point):
+            if point == 'directory-fsync' and ('KillUnit','containerd') in self.effects:
+                reached.append(point)
+                self.check_hook = lambda:(_ for _ in ()).throw(durable.Rejected('lost'))
+        self.journal.fault = fault
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(reached, ['directory-fsync'])
+        self.assertTrue((self.path_state/completion_name(2,'containerd')).exists())
+        self.domain.kill.assert_not_called()
+
+    def test_mask_removed_after_first_stop_prevents_later_effects(self):
+        def hook(method,role):
+            if (method,role) == ('StopUnit','dockerd'): (self.path/'containerd.service').unlink()
+        self.hook = hook
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertNotIn(('KillUnit','dockerd'), self.effects)
+        self.assertNotIn(('StopUnit','containerd'), self.effects)
+        self.domain.kill.assert_not_called()
+
+    def test_new_fixed_job_after_domain_kill_refuses_final_observation(self):
+        def kill(*,check):
+            check()
+            self.connection.inventory = [[75,'containerd.service','start','waiting',bus.JOB_PREFIX+'75',
+                                          bus.MANAGER_PATH+'/unit/containerd']]
+        self.domain.kill.side_effect = kill
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertFalse(self.sequence.completed)

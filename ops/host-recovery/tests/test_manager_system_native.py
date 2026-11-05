@@ -50,7 +50,7 @@ def unit_name(suffix):
     if not all(re.fullmatch(r"[1-9][0-9]{0,19}", value) for value in (run, attempt)):
         raise AssertionError("bounded Actions run identity required")
     if suffix not in ("active", "inactive", "masked", "dependent", "queue-control", "gate-control",
-                      "queue-fenced", "gate-fenced"):
+                      "queue-fenced", "gate-fenced", "runtime-dockerd", "runtime-containerd", "runtime-task"):
         raise AssertionError("fixed fixture suffix required")
     return "cpa-manager-fixture-" + run + "-" + attempt + "-" + suffix + ".service"
 
@@ -144,6 +144,64 @@ def cleanup_activation(*, queued=False):
         state = command(systemctl, "show", "--property=LoadState", "--value", "--", path.name).strip()
         if state != b"not-found":
             raise AssertionError("owned activation fixture still loadable")
+        print(json.dumps({"cleanup_unit": path.name, "load_state": "not-found",
+                          "fragment_removed": True, "mask_removed": True}), flush=True)
+
+
+def runtime_paths():
+    # Calling unit_name also validates the numeric Actions identity.
+    unit_name("runtime-dockerd")
+    slice_name = "system-cpafixture" + os.environ["GITHUB_RUN_ID"] + "a" + os.environ["GITHUB_RUN_ATTEMPT"] + ".slice"
+    return {"slice": Path("/run/systemd/system") / slice_name,
+            **{role: Path("/run/systemd/system") / unit_name("runtime-" + role)
+               for role in ("dockerd", "containerd", "task")}}
+
+
+def cleanup_runtime():
+    paths = runtime_paths()
+    systemctl = shutil.which("systemctl", path=os.defpath)
+    masks = [Path("/etc/systemd/system") / paths[role].name for role in ("dockerd", "containerd")]
+    for path in paths.values():
+        if os.path.lexists(path):
+            owned_fragment(path)
+    for mask in masks:
+        if os.path.lexists(mask):
+            info = mask.lstat()
+            if not stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or os.readlink(mask) != "/dev/null":
+                raise AssertionError("owned runtime mask unconfirmed")
+    for role in ("dockerd", "containerd", "task", "slice"):
+        unit = paths[role].name
+        loaded = command(systemctl, "list-units", "--all", "--no-legend", "--plain", "--", unit).strip()
+        active = command(systemctl, "list-units", "--all", "--no-legend", "--plain",
+                         "--state=active,activating,deactivating", "--", unit).strip()
+        if active and role != "slice":
+            command(systemctl, "kill", "--kill-whom=all", "--signal=SIGKILL", "--", unit)
+        if loaded:
+            command(systemctl, "stop", "--", unit)
+        if command(systemctl, "list-units", "--all", "--no-legend", "--plain",
+                   "--state=active,activating,deactivating", "--", unit).strip():
+            raise AssertionError("owned runtime fixture still active")
+    for path in paths.values():
+        if os.path.lexists(path):
+            owned_fragment(path)
+            path.unlink()
+    for mask in masks:
+        if os.path.lexists(mask):
+            if not mask.is_symlink() or os.readlink(mask) != "/dev/null":
+                raise AssertionError("owned runtime mask changed")
+            mask.unlink()
+    for parent in (Path("/run/systemd/system"), Path("/etc/systemd/system")):
+        fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    command(systemctl, "daemon-reload")
+    for path in paths.values():
+        if command(systemctl, "list-units", "--all", "--no-legend", "--plain", "--", path.name).strip():
+            command(systemctl, "reset-failed", "--", path.name)
+        if command(systemctl, "show", "--property=LoadState", "--value", "--", path.name).strip() != b"not-found":
+            raise AssertionError("owned runtime fixture still loadable")
         print(json.dumps({"cleanup_unit": path.name, "load_state": "not-found",
                           "fragment_removed": True, "mask_removed": True}), flush=True)
 
@@ -630,6 +688,111 @@ class SystemManagerTests(unittest.TestCase):
                                   "complete_fence_proven": False, "pending_drained": False}), flush=True)
                 witness.close()
 
+    def test_masked_runtime_pair_then_recursive_slice_kill(self):
+        from host_recovery.broker_operations import OperationJournal
+        from host_recovery.broker_runtime import RuntimeDomain
+        from host_recovery.manager_jobs import RuntimeStopJobs, completion_name
+        from host_recovery.masked_runtime_stop import MaskedRuntimeStop
+        from host_recovery.unit_masks import PersistentUnitMasks
+        paths = runtime_paths()
+        masks_paths = {role:Path("/etc/systemd/system") / paths[role].name for role in ("dockerd", "containerd")}
+        self.assertTrue(all(not os.path.lexists(path) for path in (*paths.values(), *masks_paths.values())))
+        self.addCleanup(cleanup_runtime)
+        for role,path in paths.items():
+            body = ("[Slice]\n" if role == "slice" else
+                "[Service]\nType=exec\nRestart=no\nKillMode=control-group\nSendSIGKILL=yes\n"
+                "TimeoutStopSec=5s\nRuntimeMaxSec=60s\nUser=0\nGroup=0\nLimitCORE=0\nSlice=" + paths["slice"].name
+                + "\nExecStart=" + sys.executable + " -I " + str(ROOT / "tests/manager_system_fixture.py")
+                + " " + str(self.root / "ready.sock") + "\n")
+            raw = ("# cpa-owned-fixture=" + path.name + "\n" + body).encode()
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            try:
+                self.assertEqual(os.write(fd, raw), len(raw))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            self.assertEqual(owned_fragment(path), raw)
+        command(self.systemctl, "daemon-reload")
+        command(self.systemctl, "start", "--", paths["slice"].name)
+        units, processes = {}, {}
+        for role in ("dockerd", "containerd", "task"):
+            command(self.systemctl, "start", "--", paths[role].name)
+            unit,pids = self.running_binding(paths[role].name)
+            processes[role] = pids
+            if role != "task": units[role] = unit
+        # The third inert fixture models a separate runtime-domain task. Neither
+        # fixed StopUnit/KillUnit targets it: only the recursive slice write does.
+        cgroup = command(self.systemctl, "show", "--property=ControlGroup", "--value", "--", paths["slice"].name).decode().strip()
+        self.assertEqual(cgroup, "/system.slice/" + paths["slice"].name)
+        fd = os.open("/sys/fs/cgroup" + cgroup, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        self.addCleanup(os.close, fd)
+        info = os.fstat(fd)
+        domain = RuntimeDomain(fd=fd, mount_root="/sys/fs/cgroup", cgroup=cgroup, device=info.st_dev, inode=info.st_ino)
+        self.assertTrue(domain.populated())
+        state = self.root / "runtime-state"
+        state.mkdir(mode=0o700)
+        state_fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        self.addCleanup(os.close, state_fd)
+        now = time.monotonic()
+        original = dict(installation_id="synthetic", attempt_id="11111111-1111-4111-8111-111111111111",
+            intent_sha256="a"*64, request_sha256="b"*64, topology_sha256="c"*64,
+            original_boot_id="boot-original", original_arm=now, failure_monotonic=now, recovery_deadline=self.deadline)
+        generation = dict(boot_id="boot-original", broker_invocation_id="22222222-2222-4222-8222-222222222222",
+                          runtime_epoch="33333333-3333-4333-8333-333333333333")
+        # Original request, forward return, epoch and authority are synthetic.
+        journal = OperationJournal(state_fd, binding=original, epoch=generation, clock=time.monotonic,
+                                   boot_id=lambda:"boot-original")
+        forward = journal.pending("contain_forward", target_sha256="e"*64, deadline=self.deadline)
+        journal.returned(forward, result="returned")
+        path = Path("/etc/systemd/system")
+        info = path.stat()
+        context = open_approved_directory(DirectoryApproval(str(path), info.st_dev, info.st_ino, 0, 0, 0o755))
+        directory = context.__enter__()
+        self.addCleanup(context.__exit__, None, None, None)
+        masks = PersistentUnitMasks(directory=directory, units=units)
+        def current():
+            self.current()
+            # Before the source recursive write, both third-fixture pidfds must
+            # remain live, even after both fixed units have actually completed.
+            if not sequence._domain_killed:
+                for key in ("parent_fd", "child_fd"):
+                    poller = select.poll()
+                    poller.register(processes["task"][key], select.POLLIN)
+                    self.assertFalse(poller.poll(0), "unaddressed task died before recursive slice kill")
+        session = ManagerJobSession(library=self.library, library_sha256=self.library_sha256, units=units,
+            deadline=self.deadline, clock=time.monotonic, check=self.current)
+        self.addCleanup(session.close)
+        busctl = shutil.which("busctl", path=os.defpath)
+        self.assertIsNotNone(busctl)
+        jobs = RuntimeStopJobs(journal=journal, units=units, busctl=busctl, busctl_sha256=digest(Path(busctl).read_bytes()),
+            commands=None, read_helper_hash=lambda path:digest(Path(path).read_bytes()), session=session)
+        sequence = MaskedRuntimeStop(journal=journal, masks=masks, jobs=jobs, domain=domain)
+        # No manager/library boundary is mocked. Only the fixture's original
+        # authority barrier additionally asserts the independent live-task witness.
+        session.check = current
+        operation = journal.pending("cold_quiesce_runtime", target_sha256=sequence.target_sha256, deadline=self.deadline)
+        receipt = sequence.stop(operation=operation)
+        self.assertTrue(receipt["recursive_domain_kill_returned"] and receipt["domain_empty_observed"])
+        self.assertEqual(receipt["runtime_stop_completion_count"], 2)
+        self.assertFalse(receipt["runtime_containment_coverage_proven"])
+        self.assertFalse(receipt["pending_drained"] or receipt["complete_fence_proven"] or receipt["start_allowed"])
+        self.assertNotIn("cold_quiesce_runtime", journal._returned)
+        self.assertFalse(domain.populated())
+        for role in ("dockerd", "containerd"):
+            saved = json.loads((state/completion_name(2,role)).read_bytes())
+            self.assertEqual((saved["unit"],saved["result"]), (units[role].unit,"done"))
+            self.stopped(units[role], processes[role], observe=self.masked_observation)
+            refused = subprocess.run((self.systemctl,"start","--",units[role].unit),
+                env={"PATH":os.defpath,"LANG":"C"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15.)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertEqual(os.readlink(masks_paths[role]), "/dev/null")
+        for key in ("parent_fd", "child_fd"):
+            poller = select.poll()
+            poller.register(processes["task"][key], select.POLLIN)
+            self.assertTrue(poller.poll(max(1,int((self.deadline-time.monotonic())*1000))))
+        print(json.dumps({"source_masked_runtime_sequence":receipt, "inert_task_pidfds_dead":True,
+                          "populated":False, "actual_daemon_or_shim_coverage":False}), flush=True)
+
     def test_actual_stop_kills_term_ignoring_parent_and_descendant(self):
         binding, pids = self.fixture("active")
         self.stop_and_witness(binding)
@@ -652,5 +815,6 @@ if __name__ == "__main__":
         cleanup_units("active", "inactive")
         cleanup_activation()
         cleanup_activation(queued=True)
+        cleanup_runtime()
     else:
         unittest.main(verbosity=2)

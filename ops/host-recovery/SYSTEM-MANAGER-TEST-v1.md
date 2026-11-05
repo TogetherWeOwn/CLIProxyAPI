@@ -4,7 +4,7 @@ The `recovery-system-manager` job in `pr-test-build.yml` exercises the existing
 `ManagerJobSession` against **real systemd PID1 on a disposable GitHub-hosted
 Ubuntu runner**. It is separate from the synthetic private-bus matrix and ordinary
 Python discovery. Missing capabilities fail the separate job; ordinary discovery
-skips the five methods explicitly. Never run this fixture on a workstation, shared
+skips the six methods explicitly. Never run this fixture on a workstation, shared
 agent host, self-hosted runner or production machine.
 
 ## Boundaries exercised
@@ -55,6 +55,30 @@ or cancellation; the native runtime cap and ephemeral runner destruction remain
 backstops. Cleanup never enumerates a prefix to choose kill targets. Raw test and
 cleanup logs are retained even on failure. Do not call an unsuccessful or skipped
 cleanup a pass.
+
+## Dedicated runtime-domain source qualification
+
+A sixth method exercises [the masked-runtime composition](MASKED-RUNTIME-STOP-v1.md)
+with three inert TERM-ignoring parent/child services in one explicitly started,
+run/attempt-scoped child slice of `system.slice`. It writes exactly four owned
+`/run` fragments and two exclusive persistent masks; no real daemon is contacted.
+The source cancels any accepted fixed waiting starts, reloads masks, stops/KILLs
+and durably observes each fixed role on the original manager connection, then
+writes the actual pinned slice's `cgroup.kill`. The third service's pidfds must
+remain live before that recursive write and subsequently die; it receives no
+fixed unit stop/KILL from the source. Explicit kernel `populated=false`, both
+fixed-unit completions/deaths and fresh direct-start refusals are required.
+
+This adds real kernel-domain mechanics, not daemon/shim containment or complete
+cold-runtime acceptance. Original request/authority/epoch and forward return are
+synthetic. The original fixture deadline includes all waits, without a renewed
+allowance. All service lifetimes are capped at 60 seconds; the otherwise empty
+slice is a kernel grouping, not an always-on billed runtime. Cleanup is registered
+before any fragment write and repeated by the existing `always()` step. It
+terminates only the three exact owned services, stops the exact slice, verifies
+owned fragments/masks before removal, fsyncs/reloads and requires `not-found`.
+The ephemeral runner remains the cancellation backstop. No shared-host operation,
+operational installer, credential, release pin or production action is authorized.
 
 ## Idle job display compatibility
 
