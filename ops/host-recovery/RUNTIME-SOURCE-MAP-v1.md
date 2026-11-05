@@ -102,7 +102,50 @@ verification, authenticated provisioning, operational runners, reboot/replay
 source completeness, fault/timing matrix and positive measured phase caps remain
 separate gates. No runtime startup, source lookup or metadata read clears them.
 
+## Actual runtime fixture source (qualification pending)
+
+`tests/runtime_task_fixture.py` adds a separate hosted-Actions-only diagnostic.
+It refuses tool drift against the retained containerd/ctr/shim/runc byte hashes
+before service effects. No install or image pull is performed. The tools' clean
+embedded VCS/source correspondence is recorded above; these hashes are not an
+authenticated production build or an approved release manifest.
+
+The fixture creates one private root, an explicit source-only v4 configuration,
+private gRPC/ttrpc and shim socket directories, and one manager-owned slice and
+transient containerd service. It creates a synthetic OCI rootfs containing only
+a statically built source-bound probe, with private mount/PID/IPC/UTS/network
+namespaces, no host bind mounts, no process capabilities and no new privileges.
+Metadata inspection precedes task start but is **not** durable host registration.
+The actual daemon, shim, task and TERM-ignoring child must have live pidfds and
+observed cgroup memberships before the source recursive-domain kill primitive.
+Task membership must be outside the daemon service but inside the dedicated
+slice. The pidfds and source process inventory must then show death, followed
+by a kernel empty-domain observation and exact owned-resource cleanup. Cleanup
+also runs in a separate always step; unexpected mounts preserve state and fail,
+never trigger lazy unmount or broad deletion. The disposable hosted runner is
+retired after its job, including failed/cancelled jobs; RuntimeMaxSec bounds the
+service if the fixture process is lost. No recurring staging runtime is added.
+
+Two additional exact-source constraints were inspected for this fixture:
+
+- [`ShimConfig.SocketDir`](https://github.com/containerd/containerd/blob/b7a25261e029d68978bbf290df0a62fc819b3c51/core/runtime/v2/shim_manager.go#L48-L107)
+  otherwise defaults to `/run/containerd/s`. The
+  [Linux maximum](https://github.com/containerd/containerd/blob/b7a25261e029d68978bbf290df0a62fc819b3c51/core/runtime/v2/socket_linux.go#L19-L25)
+  is 42 bytes; an oversized private path refuses before service creation.
+- [`ctr` runtime options](https://github.com/containerd/containerd/blob/b7a25261e029d68978bbf290df0a62fc819b3c51/cmd/ctr/commands/commands_unix.go#L62-L98)
+  permit explicit runc binary/root only with `io.containerd.runc.v2`, not an
+  absolute shim runtime name. The clean environment resolves the pinned shim
+  through `/usr/bin`; actual executable and cgroup observation are required.
+  `shim_cgroup` is intentionally unset for this inheritance witness, not claimed
+  to be an independently configured migration policy.
+
+This source is unqualified until its exact-head Actions job passes. Even a pass
+will qualify only this one containerd/task diagnostic, not Docker restoration,
+complete activation/writer/old-epoch exclusion, all-job retirement, cold/quarantine
+registration/drain, reboot, operational authority or full recovery acceptance.
+Current supervisor/worker/IPC execution, restore/start and settlement denies stay.
+
 REA angle: use the shipped tools' own build identifiers and the exact public
-upstream source to identify discovery, cgroup migration and restart actors before
-attempting a dedicated fixture. No opaque-binary reverse engineering, paid
-service or shared-daemon experiment is required.
+upstream source to identify discovery, socket placement, cgroup migration and
+restart actors before attempting a dedicated fixture. No opaque-binary reverse
+engineering, paid service or shared-daemon experiment is required.

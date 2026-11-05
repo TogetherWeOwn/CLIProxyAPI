@@ -217,6 +217,56 @@ jobs:
             ${{ runner.temp }}/recovery-offline-containerd-config.log
           if-no-files-found: error
 
+  recovery-runtime-task:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build inert static runtime probe from this head
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/recovery-runtime-probe" ./ops/host-recovery/tests/fixtures/runtime-probe
+          sha256sum "$RUNNER_TEMP/recovery-runtime-probe"
+      - name: Dedicated runtime and actual shim task cgroup witnesses
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            git rev-parse HEAD
+            sudo env -i PATH=/usr/bin:/bin LANG=C CPA_RECOVERY_RUNTIME_TASK_TEST=1 \
+              GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+              GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+              /usr/bin/timeout 120s /usr/bin/python3 -I ops/host-recovery/tests/runtime_task_fixture.py "$RUNNER_TEMP/recovery-runtime-probe"
+          } 2>&1 | tee "$RUNNER_TEMP/recovery-runtime-task.log"
+      - name: Collect only the exact owned runtime fixture
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo env -i PATH=/usr/bin:/bin LANG=C CPA_RECOVERY_RUNTIME_TASK_TEST=1 \
+            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            /usr/bin/timeout 45s /usr/bin/python3 -I ops/host-recovery/tests/runtime_task_fixture.py --cleanup \
+            2>&1 | tee "$RUNNER_TEMP/recovery-runtime-task-cleanup.log"
+      - name: Retain raw actual runtime result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-runtime-task-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/recovery-runtime-task.log
+            ${{ runner.temp }}/recovery-runtime-task-cleanup.log
+          if-no-files-found: error
+
   recovery-race:
     runs-on: ubuntu-24.04
     steps:
