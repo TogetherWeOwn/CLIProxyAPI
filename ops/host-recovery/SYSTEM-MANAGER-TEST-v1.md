@@ -162,9 +162,14 @@ require the actual gate process's pidfd death, successful gate completion, zero
 payload execution timestamp and inactive/no-PID/no-job state. An empty job list
 alone cannot supply any of those results.
 
-Start/cancel/stop calls and the multi-job signal observer here are **test-only**;
-they do not expand `ManagerJobSession.stop`, expose arbitrary broker methods or
-supply a durable operational cancellation/retirement record. Both positive and
+Start/stop calls and the multi-job signal observer here are **test-only**.
+The fenced branch now uses `WaitingStartCancellation` and `PersistentUnitMasks`
+for actual source journal/persistence/native cancellation, and independently
+requires the same accepted job's `canceled` completion. The target has not run:
+its nonzero invocation pin and the original request/authority are explicitly
+synthetic, not observed execution or operational provisioning. See
+[fixed waiting-start cancellation](JOB-CANCELLATION-v1.md). No arbitrary broker
+method, operational retirement or drain grant is exposed. Both positive and
 negative cases must pass in Actions before this method is called qualified. The
 existing exact-owned cleanup validates/removes only these four fragments and the
 one new mask; the separate `always()` cleanup repeats it. Gates have bounded

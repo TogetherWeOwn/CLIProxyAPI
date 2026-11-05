@@ -105,8 +105,10 @@ real root/PID1 connection and uses actual typed property decoding. Its original
 independent systemctl state, live/dead pidfd, explicit stop/whole-unit kill,
 authenticated completion and refused fresh direct/dependency-launch assertions
 remain. Original request/authority provisioning in that fixture is synthetic,
-not a running supervisor or installed broker. The queued-start fixture remains
-separate and unchanged; it cannot claim operational cancellation from this API.
+not a running supervisor or installed broker. The separate queued-start fixture
+now invokes the [fixed waiting-start cancellation phase](JOB-CANCELLATION-v1.md),
+not this reload API, while retaining its independent completion/execution checks.
+Neither fixture supplies operational cancellation/retirement authority.
 No source change alone claims a passing Actions result. No local suite or build
 is run; exact-head GitHub Actions remains CI of record.
 

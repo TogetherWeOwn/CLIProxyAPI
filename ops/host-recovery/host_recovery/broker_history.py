@@ -18,8 +18,9 @@ from .journal import validate_intent
 from .loading import RecoveryInputs, owner, pin
 from .manager_jobs import STOP_ROLES, classify_completion, classify_records, completion_name, record_names
 from .mask_reload import classify_records as classify_reload, record_names as reload_names
+from .job_cancellation import classify_records as classify_cancellation, record_names as cancellation_names
 
-MAX_FILES = 1 + 4 * MAX_OPERATIONS + 3 * len(STOP_ROLES)
+MAX_FILES = 1 + 4 * MAX_OPERATIONS + 6 * len(STOP_ROLES)
 PENDING_FIELDS = ("schema", "state", "binding_sha256", "epoch_sha256", "sequence", "method",
                   "target_sha256", "deadline", "operation_id")
 RETURN_FIELDS = ("schema", "operation_id", "result", "pending_drained")
@@ -94,6 +95,7 @@ def _capture(fd, *, uid, gid):
         for role in STOP_ROLES:
             allowed.update(record_names(sequence, role))
             allowed.add(completion_name(sequence, role))
+            allowed.update(cancellation_names(sequence, role))
     # Unknown/staged bytes are retained, not guessed away as unsubmitted calls.
     if "epoch.json" not in names or not set(names) <= allowed:
         raise Rejected("broker-history-incomplete-or-ambiguous")
@@ -203,6 +205,36 @@ def _classify(records, *, binding):
             jobs.append(job)
         if jobs:
             item["manager_jobs"] = jobs
+        cancellations, cancel_identity, cancel_ids, cancel_uncertain = [], None, set(), False
+        for role in sorted(STOP_ROLES):
+            cancel_pending, cancel_return, cancel_completion = cancellation_names(sequence, role)
+            if cancel_pending not in records:
+                continue
+            if cancel_uncertain:
+                raise Rejected("broker-history-cancellation-after-uncertainty")
+            submitted, observed, completed = classify_cancellation(records[cancel_pending], records.get(cancel_return),
+                records.get(cancel_completion), operation=pending, role=role)
+            identity = (submitted["manager_owner"], submitted["bus_id"], submitted["target_sha256"])
+            if cancel_identity not in (None, identity) or submitted["job"][0] in cancel_ids:
+                raise Rejected("broker-history-cancellation-identity-conflict")
+            stop_pending = record_names(sequence, role)[0]
+            if ((job_owner is not None and identity[:2] != job_owner[:2]) or submitted["job"][0] in job_ids
+                    or stop_pending in records and submitted["job"][1] != _record(records[stop_pending])["unit"]):
+                raise Rejected("broker-history-cancellation-stop-conflict")
+            cancel_identity = identity
+            cancel_ids.add(submitted["job"][0])
+            consumed.add(cancel_pending)
+            if observed is not None:
+                consumed.add(cancel_return)
+            if completed is not None:
+                consumed.add(cancel_completion)
+            cancel_uncertain = completed is None
+            if cancel_uncertain and (jobs or return_name in records or reload_names(sequence)[0] in records):
+                raise Rejected("broker-history-effect-after-uncertain-cancellation")
+            cancellations.append({"role": role, "classification": "canceled_observed" if completed is not None else
+                "return_without_completion" if observed is not None else "unreturned", "retirement_proven": False})
+        if cancellations:
+            item["waiting_start_cancellations"] = cancellations
         reload_pending, reload_return = reload_names(sequence)
         if reload_pending in records:
             _, reloaded = classify_reload(records[reload_pending], records.get(reload_return), operation=pending)

@@ -3,8 +3,9 @@
 This embedding transport is not an installed broker, activation interlock or cold
 barrier. The caller retains the original authority/journal and protected library
 handle. Fixed forward OR runtime StopUnit calls and the separate journaled
-mask_reload phase use it; no arbitrary dispatch or numeric job cancellation is
-exposed. Completion delivery and reload return do not prove runtime drain.
+mask_reload and waiting-start cancellation phases use it; no arbitrary dispatch
+or numeric job cancellation is exposed. Completion delivery and reload return do
+not prove runtime drain.
 """
 import ctypes as C
 import math
@@ -259,6 +260,8 @@ class ManagerJobSession:
         self.failed, self.owner, self.bus_id = False, None, None
         self._attempted, self._submitted, self._events, self._inflight = set(), {}, {}, None
         self._event_count, self._last_cookie = 0, 0
+        self._cancel_targets, self._cancel_events, self._cancel_attempted = {}, {}, set()
+        self._cancel_watched = False
         try:
             self._current()
             if library.checksum() != library_sha256:
@@ -380,6 +383,13 @@ class ManagerJobSession:
         if not roles:
             return
         role = roles[0]
+        target = self._cancel_targets.get(role)
+        if target is not None and number == target[0]:
+            if (path != target[4] or role not in self._cancel_attempted or role in self._cancel_events):
+                raise Rejected("manager-bus-cancellation-identity-conflict")
+            self._cancel_events[role] = {"job_id": number, "job_path": path, "unit": unit, "result": result,
+                                         "sender_cookie": cookie.value}
+            return
         if number in self._events or role not in self._attempted:
             raise Rejected("manager-bus-untracked-or-duplicate-completion")
         expected = self._submitted.get(role)
@@ -424,6 +434,56 @@ class ManagerJobSession:
             self.failed = True
             raise Rejected("manager-bus-inventory-unconfirmed") from None
 
+    def _watch_waiting_starts(self):
+        """Internal cancellation phase only; never adopt caller-supplied job IDs."""
+        try:
+            if self._cancel_watched or self._attempted:
+                raise Rejected("manager-bus-cancellation-watch-exhausted")
+            self._cancel_watched = True
+            rows = self.jobs()
+            for role, unit in self.units.items():
+                selected = [row for row in rows.values() if row[1] == unit.unit]
+                if selected:
+                    row = selected[0]
+                    if row[2:4] != ("start", "waiting"):
+                        raise Rejected("manager-bus-only-waiting-start-supported")
+                    self._cancel_targets[role] = row
+            self.identity()
+            return dict(self._cancel_targets)
+        except BaseException:
+            self.failed = True
+            raise Rejected("manager-bus-waiting-start-watch-unconfirmed") from None
+
+    def _cancel_waiting_start(self, role, *, check):
+        """Call only after the embedding phase durably publishes exact pending."""
+        try:
+            target = self._cancel_targets.get(role)
+            if target is None or role in self._cancel_attempted:
+                raise Rejected("manager-bus-fixed-cancellation-exhausted")
+            rows = self.jobs()
+            if rows.get(target[0]) != target:
+                raise Rejected("manager-bus-original-waiting-start-lost")
+            check()
+            self._current()
+            self._cancel_attempted.add(role)
+            self._call(self.owner, MANAGER + ".Job", "Cancel", "", (), "", path=target[4])
+            self.identity()
+            check()
+        except BaseException:
+            self.failed = True
+            raise Rejected("manager-bus-cancellation-unconfirmed") from None
+
+    def _cancellation(self, role):
+        try:
+            self.identity()
+            if role not in self._cancel_attempted:
+                raise Rejected("manager-bus-original-cancellation-required")
+            value = self._cancel_events.get(role)
+            return None if value is None else decode(canonical(value))
+        except BaseException:
+            self.failed = True
+            raise Rejected("manager-bus-cancellation-completion-unconfirmed") from None
+
     def stop(self, role):
         try:
             self.identity()
@@ -433,7 +493,8 @@ class ManagerJobSession:
             self._inflight = role
             path = self._call(self.owner, MANAGER+".Manager", "StopUnit", "ss", (self.units[role].unit, "fail"), "o")[0]
             number = job_path(path)
-            if any(number == item[0] for item in self._submitted.values()):
+            if (any(number == item[0] for item in self._submitted.values())
+                    or any(number == item[0] for item in self._cancel_targets.values())):
                 raise Rejected("manager-bus-job-identity-reused")
             self._submitted[role] = (number, path)
             # JobRemoved can precede the StopUnit reply; do not discard it or

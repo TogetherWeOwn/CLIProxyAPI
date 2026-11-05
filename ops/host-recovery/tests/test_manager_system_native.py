@@ -522,17 +522,42 @@ class SystemManagerTests(unittest.TestCase):
                 print(json.dumps({"queued_variant": variant, "waiting_job": waiting,
                                   "gate_main_pid": pid, "payload_executed_before_release": False}), flush=True)
                 if variant == "fenced":
-                    os.symlink("/dev/null", mask)
-                    fd = os.open(mask.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-                    try:
-                        os.fsync(fd)
-                    finally:
-                        os.close(fd)
-                    # Cancel while the accepted job still belongs to the loaded
-                    # configuration. Reload may remove it; absence is not proof
-                    # of this explicit cancellation or a matching completion.
+                    from host_recovery.broker_operations import OperationJournal
+                    from host_recovery.job_cancellation import WaitingStartCancellation, record_names
+                    target_row = self.observe(target)
+                    target_binding = UnitBinding(target, "a" * 32, "/system.slice/" + target, str(paths["queue-fenced"]),
+                        digest(paths["queue-fenced"].read_bytes()), digest(canonical(static_properties(target_row))))
+                    # The queued target has not run. Its nonzero invocation pin
+                    # here is synthetic, never a claim that one was observed.
+                    cancel_session = self.session(target_binding)
+                    state = self.root / "cancel-state"
+                    state.mkdir(mode=0o700)
+                    fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                    self.addCleanup(os.close, fd)
+                    now = time.monotonic()
+                    original = dict(installation_id="synthetic", attempt_id="11111111-1111-4111-8111-111111111111",
+                        intent_sha256="a" * 64, request_sha256="b" * 64, topology_sha256="c" * 64,
+                        original_boot_id="boot-original", original_arm=now, failure_monotonic=now,
+                        recovery_deadline=self.deadline)
+                    generation = dict(boot_id="boot-original", broker_invocation_id="22222222-2222-4222-8222-222222222222",
+                                      runtime_epoch="33333333-3333-4333-8333-333333333333")
+                    journal = OperationJournal(fd, binding=original, epoch=generation, clock=time.monotonic,
+                                               boot_id=lambda: "boot-original")
+                    operation = journal.pending("contain_forward", target_sha256="d" * 64, deadline=self.deadline)
+                    masks = self.publish_mask(target_binding)
+                    canceler = WaitingStartCancellation(journal=journal, masks=masks, session=cancel_session)
+                    # Real source cancellation/journal/transport; original request
+                    # and authority remain synthetic. The independent fixture
+                    # witness still requires the exact accepted start completion.
                     self.assertEqual(witness.jobs()[number], waiting)
-                    witness._call(witness.owner, MANAGER + ".Job", "Cancel", "", (), "", path=start)
+                    receipt = canceler.cancel(operation=operation)
+                    self.assertEqual(receipt["canceled_waiting_start_count"], 1)
+                    self.assertFalse(receipt["manager_jobs_retired"])
+                    completion = json.loads((state / record_names(operation["sequence"], "forward")[2]).read_bytes())
+                    self.assertEqual((completion["job_id"], completion["job_path"], completion["result"]),
+                                     (number, start, "canceled"))
+                    print(json.dumps({"source_waiting_start_cancellation": receipt, "completion": completion}), flush=True)
+                    cancel_session.close()
                     witness.completed(start, "canceled")
                     command(self.systemctl, "daemon-reload")
                     self.assertEqual(self.masked_observation(target)["LoadState"], "masked")
