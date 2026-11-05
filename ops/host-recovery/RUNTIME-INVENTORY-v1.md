@@ -5,13 +5,20 @@ kernel release/architecture, PID1 name, cgroup filesystem type, and hosted-image
 `dockerd`, `containerd`, `containerd-shim-runc-v2`, `runc`, Docker CLI, `ctr` and
 systemd executable paths, SHA256 values and local `--version` output. For the six
 Go executables it also records `go version -m` build/module metadata, using the
-explicit setup-go reader with its path, version and before/after SHA256. The
-reader must be in the hosted tool cache or standard Go installation, owned by
-root or the runner, and not group/world writable. It inspects bytes, not by
-loading the target program. Go environment-file/workspace lookup, automatic
-toolchain selection and module proxy/checksum services are disabled. It does not contact any daemon,
-inspect workloads, discover sockets, change the host, install dependencies, or
-start/stop a unit. There is no runtime provisioning or cleanup to perform.
+explicit setup-go reader with its source path/ownership/mode, version and
+before/after SHA256. Its source must be in the hosted tool cache or standard Go
+installation. A fresh mode-0700 temporary directory holds a runner-owned,
+mode-0500 copy of that reader, with matching source/copy hashes before and after
+inspection. The existing shared tool cache is never chmodded or treated as
+protected provisioning. The EXIT trap removes only the new reader file and
+empty directory and records cleanup; runner teardown collects interrupted-job
+fixtures. This copy is a disposable inspection tool, not approved runtime bytes.
+It inspects bytes, not by loading the target program. Go environment-file/workspace
+lookup, automatic toolchain selection and module proxy/checksum services are
+disabled; the original toolchain root is explicit. It does not contact any daemon,
+inspect workloads, discover sockets, change existing host files, install runtime
+dependencies, or start/stop a unit. There is no runtime provisioning or runtime
+cleanup to perform.
 
 The script runs only on the disposable hosted Actions image, under an empty
 environment and fixed system PATH. Missing tools, unexpected executable locations,

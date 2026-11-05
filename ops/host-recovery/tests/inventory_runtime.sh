@@ -8,23 +8,52 @@ if [[ ${GITHUB_ACTIONS:-} != true || ${RUNNER_ENVIRONMENT:-} != github-hosted ||
   exit 2
 fi
 
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C
+export GOENV=off GOTOOLCHAIN=local GOWORK=off GOPROXY=off GOSUMDB=off
 # The setup-go reader only inspects build metadata; it never builds or runs the
-# inspected program. Do not resolve it through an inherited executable search path.
-go_reader="$(readlink -e -- "$2")"
-case "$go_reader" in
+# inspected program. Shared tool-cache ownership is not a private-reader grant.
+go_source="$(readlink -e -- "$2")"
+case "$go_source" in
   /opt/hostedtoolcache/go/*/x64/bin/go|/usr/local/go/bin/go) ;;
   *) printf '%s\n' 'unsupported Go metadata reader' >&2; exit 2 ;;
 esac
-if [[ ! -f $go_reader || ! -x $go_reader ||
-      ( $(stat -c %u -- "$go_reader") != 0 && $(stat -c %u -- "$go_reader") != "$EUID" ) ||
-      $(find "$go_reader" -maxdepth 0 -perm /022 -print) != '' ]]; then
-  printf '%s\n' 'unprotected Go metadata reader' >&2
+if [[ ! -f $go_source || ! -x $go_source ]]; then
+  printf '%s\n' 'unreadable Go metadata reader source' >&2
   exit 2
 fi
+printf 'go_reader_source=%s\n' "$go_source"
+stat -c 'go_reader_source_uid=%u gid=%g mode=%a' -- "$go_source"
+source_before="$(sha256sum -- "$go_source")"
+reader_dir="$(mktemp -d /tmp/cpa-go-metadata.XXXXXXXXXX)"
+cleanup_reader() {
+  local result=$?
+  if [[ -e $reader_dir/go ]]; then
+    rm -- "$reader_dir/go" || result=1
+  fi
+  if rmdir -- "$reader_dir"; then
+    printf '%s\n' 'go_metadata_reader_cleanup=removed'
+  else
+    result=1
+  fi
+  exit "$result"
+}
+trap cleanup_reader EXIT
+install -m 0500 -- "$go_source" "$reader_dir/go"
+go_reader="$reader_dir/go"
 reader_before="$(sha256sum -- "$go_reader")"
-
-export PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C
-export GOENV=off GOTOOLCHAIN=local GOWORK=off GOPROXY=off GOSUMDB=off
+if [[ ${source_before%% *} != "${reader_before%% *}" ||
+      $(sha256sum -- "$go_source") != "$source_before" ||
+      $(stat -c %u -- "$reader_dir") != "$EUID" ||
+      $(stat -c %a -- "$reader_dir") != 700 ||
+      $(stat -c %u -- "$go_reader") != "$EUID" ||
+      $(stat -c %a -- "$go_reader") != 500 ||
+      $(stat -c %h -- "$go_reader") != 1 ]]; then
+  printf '%s\n' 'unprotected or changed Go metadata reader copy' >&2
+  exit 2
+fi
+# Only the command binary is copied; its original toolchain root is explicit.
+# version/-m need no compiler, module download or automatic toolchain selection.
+export GOROOT="${go_source%/bin/go}"
 unset DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG CONTAINERD_ADDRESS CONTAINERD_NAMESPACE
 printf 'schema=host-recovery-runtime-inventory-v1\nsource_revision=%s\n' "$1"
 printf '%s\n' 'qualification=not_performed' 'source_mapping_verified=false' \
@@ -82,7 +111,8 @@ for tool in dockerd containerd containerd-shim-runc-v2 runc docker ctr systemd; 
 done
 
 reader_after="$(sha256sum -- "$go_reader")"
-if [[ $reader_before != "$reader_after" ]]; then
+if [[ $reader_before != "$reader_after" ||
+      $(sha256sum -- "$go_source") != "$source_before" ]]; then
   printf '%s\n' 'state=go_metadata_reader_changed'
   failed=1
 fi
