@@ -378,4 +378,3 @@ with supervisor.recovery_owner(root, owner=owner, manager=ScriptedManager(),
             if child.poll() is None:
                 child.kill()
             child.communicate(timeout=10)
-

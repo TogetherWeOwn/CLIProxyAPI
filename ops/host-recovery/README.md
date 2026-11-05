@@ -8,6 +8,13 @@ as a substitute for the accepted production binaries.
 
 ## Implemented so far
 
+- `host_recovery/topology.py`: closed dedicated-runtime expectation validation and
+  root-content/external-pin/source/installation snapshot binding. Shared/unknown
+  runtimes, autonomous restart/activation, overlapping resources and unsupported
+  identities refuse. Immutable input/status never grants a fence or execution.
+  This is **not provisioning, a privileged broker, actual containment/lock proof
+  or a recovery oracle**; existing deny-only runners remain unchanged. See
+  [topology input and required operational boundaries](TOPOLOGY-v1.md).
 - `host_recovery/service_units.py`, `service_anchor.py` and `service_entry.py`:
   deterministic offline hardened manager definitions and fixed conservative runner
   routing through protected root-owned anchors. Anchor indirection avoids embedding
