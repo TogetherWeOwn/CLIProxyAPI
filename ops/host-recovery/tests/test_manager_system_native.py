@@ -465,9 +465,8 @@ class SystemManagerTests(unittest.TestCase):
                 self.assertEqual(json.loads(raw), {"gate": pid})
                 gate_row = self.observe(gate)
                 self.assertEqual(gate_row["ActiveState"], "activating")
-                # A oneshot's ExecStart process is its control PID until completion.
-                control = command(self.systemctl, "show", "--property=ControlPID", "--value", "--", gate).strip()
-                self.assertEqual(control, str(pid).encode())
+                # ExecStart is the main process even while a oneshot is activating.
+                self.assertEqual(gate_row["MainPID"], str(pid))
                 self.assertEqual(Path("/proc/%d/cgroup" % pid).read_text(), "0::" + gate_row["ControlGroup"] + "\n")
                 pidfd = os.pidfd_open(pid, 0)
                 self.addCleanup(os.close, pidfd)
@@ -486,7 +485,7 @@ class SystemManagerTests(unittest.TestCase):
                                    "--value", "--", target).strip()
                 self.assertEqual(executed, b"0")
                 print(json.dumps({"queued_variant": variant, "waiting_job": waiting,
-                                  "gate_control_pid": pid, "payload_executed_before_release": False}), flush=True)
+                                  "gate_main_pid": pid, "payload_executed_before_release": False}), flush=True)
                 if variant == "fenced":
                     os.symlink("/dev/null", mask)
                     fd = os.open(mask.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)

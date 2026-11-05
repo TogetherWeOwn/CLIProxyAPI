@@ -165,6 +165,16 @@ one new mask; the separate `always()` cleanup repeats it. Gates have bounded
 native start/stop limits, the socket read is bounded and the runner is ephemeral.
 No new recurring preview/staging runtime is created.
 
+The first reached run failed before queue submission: the fixture incorrectly
+expected the oneshot ExecStart PID in `ControlPID`, which was zero. The corrected
+fixture requires its authenticated socket peer PID to equal actual `MainPID`;
+cgroup and live pidfd checks remain. This matches systemd v255
+[`service.c`](https://github.com/systemd/systemd/blob/v255/src/core/service.c),
+`service_enter_start`'s oneshot branch, which calls `service_set_main_pidref` before
+entering `SERVICE_START`. The raw failure and exact first fixture are retained;
+it is not a production defect or a reached cancellation result. Both cleanup
+paths passed despite this initial failure.
+
 This is a controlled queued-before-exec case, not already-executing launch
 revocation, manager re-exec/reboot, arbitrary activation-graph exclusion, old-epoch
 death or complete pending drain. Durable mask transitions and operational job
