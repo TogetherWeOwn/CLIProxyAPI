@@ -76,12 +76,30 @@ class JobTests(unittest.TestCase):
 
     def test_unknown_or_noncanonical_numbers_refuse(self):
         for key in ("Job", "MainPID"):
-            for text in ("01", "-1", "1 2", "1/start", "4294967296", "", "True"):
+            invalid = ("01", "-1", "1 2", "1/start", "4294967296", "True", " ")
+            if key == "MainPID":
+                invalid += ("",)
+            for text in invalid:
                 original = self.row[key]
                 self.row[key] = text
                 with self.subTest(key=key, text=text), self.assertRaises(durable.Rejected):
                     self.observe()
                 self.row[key] = original
+
+    def test_explicit_idle_job_display_is_not_dispatch_or_completion_proof(self):
+        self.row["Job"] = ""
+        value = self.observe()
+        self.assertEqual(value["job_id"], 0)
+        self.assertEqual(value["state"], "running")
+        self.row.update(ActiveState="inactive", SubState="dead", MainPID="0", ControlGroup="")
+        value = self.observe()
+        self.assertEqual(value["job_id"], 0)
+        self.assertEqual(value["state"], "inactive_unverified")
+
+    def test_missing_job_property_is_not_an_idle_job(self):
+        del self.row["Job"]
+        with self.assertRaisesRegex(durable.Rejected, "manager-properties-incomplete"):
+            self.observe()
 
     def test_foreign_request_cannot_even_query_manager(self):
         with self.assertRaises(durable.Rejected):
