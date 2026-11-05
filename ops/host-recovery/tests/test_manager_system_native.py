@@ -396,17 +396,20 @@ class SystemManagerTests(unittest.TestCase):
         self.assertEqual(binding.fragment_path, str(paths["masked"]))
         from host_recovery.broker_operations import OperationJournal
         from host_recovery.mask_reload import ManagerMaskReload
-        from test_broker_operations import binding as synthetic_binding, epoch as synthetic_epoch
         state = self.root / "reload-state"
         state.mkdir(mode=0o700)
         fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
         self.addCleanup(os.close, fd)
         now = time.monotonic()
-        original = synthetic_binding()
-        original.update(original_arm=now, failure_monotonic=now, recovery_deadline=self.deadline)
+        original = dict(installation_id="synthetic", attempt_id="11111111-1111-4111-8111-111111111111",
+            intent_sha256="a" * 64, request_sha256="b" * 64, topology_sha256="c" * 64,
+            original_boot_id="boot-original", original_arm=now, failure_monotonic=now,
+            recovery_deadline=self.deadline)
+        generation = dict(boot_id="boot-original", broker_invocation_id="22222222-2222-4222-8222-222222222222",
+                          runtime_epoch="33333333-3333-4333-8333-333333333333")
         # Synthetic original request/authority, but real durable files, pinned
         # library, root PID1 connection, Reload reply and typed properties.
-        journal = OperationJournal(fd, binding=original, epoch=synthetic_epoch(), clock=time.monotonic,
+        journal = OperationJournal(fd, binding=original, epoch=generation, clock=time.monotonic,
                                    boot_id=lambda: "boot-original")
         operation = journal.pending("contain_forward", target_sha256="d" * 64, deadline=self.deadline)
         masks = self.publish_mask(binding)
