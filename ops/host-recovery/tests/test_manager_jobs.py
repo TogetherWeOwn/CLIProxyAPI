@@ -24,7 +24,7 @@ class RuntimeJobTrackingTests(unittest.TestCase):
     contain = fixture.RuntimeContainmentTests.contain
     refused = fixture.RuntimeContainmentTests.refused
 
-    def row(self, role='dockerd', number=41, kind='stop'):
+    def job_row(self, role='dockerd', number=41, kind='stop'):
         return [number, self.units[role].unit, kind, 'running', manager_jobs.JOB_PREFIX+str(number),
                 manager_jobs.MANAGER_PATH+'/unit/fixture_service']
 
@@ -53,7 +53,7 @@ class RuntimeJobTrackingTests(unittest.TestCase):
             raw = actual(argv, deadline=deadline)
             if 'StopUnit' in argv and argv[-2] == self.units['dockerd'].unit:
                 self.rows['dockerd']['Job'] = '41'
-                self.manager_rows = [self.row()]
+                self.manager_rows = [self.job_row()]
             return raw
         self.transport.run = run
         receipt = self.contain()
@@ -67,7 +67,7 @@ class RuntimeJobTrackingTests(unittest.TestCase):
         def run(argv, *, deadline):
             raw = actual(argv, deadline=deadline)
             if 'StopUnit' in argv and argv[-2] == self.units['dockerd'].unit:
-                self.manager_rows = [self.row()]
+                self.manager_rows = [self.job_row()]
             return raw
         self.transport.run = run
         receipt = self.contain()
@@ -76,13 +76,13 @@ class RuntimeJobTrackingTests(unittest.TestCase):
         self.assertFalse(receipt['pending_drained'])
 
     def test_untracked_job_inventory_refuses_even_when_unit_job_is_zero(self):
-        self.manager_rows = [self.row(number=88, kind='start')]
+        self.manager_rows = [self.job_row(number=88, kind='start')]
         self.refused()
         self.assertEqual(self.effects, [])
         self.assertFalse((self.state / 'operation-02-pending.json').exists())
 
     def test_unrelated_jobs_are_not_stopped_or_cancelled(self):
-        row = self.row(number=88, kind='start')
+        row = self.job_row(number=88, kind='start')
         row[1] = 'unrelated.socket'
         self.manager_rows = [row]
         self.contain()
@@ -139,7 +139,7 @@ class RuntimeJobTrackingTests(unittest.TestCase):
                 def run(argv, *, deadline):
                     raw = actual(argv, deadline=deadline)
                     if 'StopUnit' in argv:
-                        row = self.row()
+                        row = self.job_row()
                         if mismatch == 'unit': row[1] = 'other.service'
                         else: row[2] = 'start'
                         self.manager_rows = [row]
@@ -147,6 +147,8 @@ class RuntimeJobTrackingTests(unittest.TestCase):
                 self.transport.run = run
                 self.refused()
                 self.assertEqual(len(self.effects), 1)
+                self.assertEqual(self.manager_rows[0][0], 41)
+                self.assertTrue((self.state / 'operation-02-job-01-return.json').exists())
                 self.assertEqual(self.kill_file.read_bytes(), b'')
 
     def test_same_job_id_returned_for_second_unit_is_unresolved(self):
@@ -288,12 +290,12 @@ class RuntimeJobTrackingTests(unittest.TestCase):
 
 
 class ManagerJobReplyTests(unittest.TestCase):
-    def row(self):
+    def job_row(self):
         return [41, 'fixture.service', 'stop', 'running', manager_jobs.JOB_PREFIX+'41',
                 manager_jobs.MANAGER_PATH+'/unit/fixture_2eservice']
 
     def test_typed_listjobs_accepts_bounded_unique_waiting_and_running_rows(self):
-        row = self.row()
+        row = self.job_row()
         for state in ('waiting','running'):
             row[3] = state
             value = manager_jobs.jobs_reply(durable.canonical({'type':'a(usssoo)', 'data':[[row]]}))
@@ -303,10 +305,10 @@ class ManagerJobReplyTests(unittest.TestCase):
         for index, value in ((0,True),(0,0),(0,4294967296),(1,'bad\nservice'),(2,'StopUnit'),(3,'done'),
                              (4,manager_jobs.JOB_PREFIX+'42'),(5,'/other/unit')):
             with self.subTest(index=index, value=value):
-                row = self.row(); row[index] = value
+                row = self.job_row(); row[index] = value
                 with self.assertRaises(durable.Rejected):
                     manager_jobs.jobs_reply(durable.canonical({'type':'a(usssoo)', 'data':[[row]]}))
-        for rows in ([self.row(), self.row()], [self.row()]*(manager_jobs.MAX_JOBS+1)):
+        for rows in ([self.job_row(), self.job_row()], [self.job_row()]*(manager_jobs.MAX_JOBS+1)):
             with self.assertRaises(durable.Rejected):
                 manager_jobs.jobs_reply(durable.canonical({'type':'a(usssoo)', 'data':[rows]}))
 
