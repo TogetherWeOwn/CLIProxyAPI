@@ -14,6 +14,7 @@ from .broker_authority import SupervisorPeerAuthority
 from .broker_operations import OperationJournal
 from .durable import Rejected, canonical, decode, digest, directory, read_file
 from .manager import PROPERTIES, UnitBinding, properties, static_properties
+from .manager_jobs import RuntimeStopJobs
 from .topology import RUNTIME_ROLES, Topology, within
 
 
@@ -132,13 +133,15 @@ class RuntimeContainment:
     by a reusable numeric ID. Concrete job retirement remains a separate barrier.
     """
     def __init__(self, *, authority, journal, topology, units, domain, systemctl, commands,
-                 read_fragment_hash):
+                 read_fragment_hash, jobs):
         if (not isinstance(authority, SupervisorPeerAuthority) or not isinstance(journal, OperationJournal)
                 or not isinstance(topology, Topology) or not isinstance(domain, RuntimeDomain)
                 or type(units) is not dict or set(units) != set(RUNTIME_ROLES)
                 or any(not isinstance(unit, UnitBinding) for unit in units.values())
-                or type(systemctl) is not str or not os.path.isabs(systemctl)):
+                or type(systemctl) is not str or not os.path.isabs(systemctl)
+                or not isinstance(jobs, RuntimeStopJobs) or jobs.journal is not journal or jobs.units != units):
             raise Rejected("runtime-containment-explicit-boundaries-required")
+        self.jobs = jobs
         self.authority, self.journal, self.topology = authority, journal, topology
         self.units, self.domain = dict(units), domain
         self.systemctl, self.commands, self.read_fragment_hash = systemctl, commands, read_fragment_hash
@@ -147,6 +150,7 @@ class RuntimeContainment:
         runtime = value["runtime"]
         if (authority._binding != journal._binding or topology.sha256 != binding["topology_sha256"]
                 or value["installation_id"] != binding["installation_id"]
+                or jobs.busctl_sha256 != value["tools"]["busctl"]["sha256"]
                 or value["roles"]["supervisor"]["unit"] != owner["unit"]
                 or (value["roles"]["supervisor"]["uid"], value["roles"]["supervisor"]["gid"])
                     != (authority.manager.binding.uid, authority.manager.binding.gid)
@@ -164,7 +168,7 @@ class RuntimeContainment:
             "binding_sha256": digest(self.authority._binding), "epoch_sha256": digest(self.journal._epoch),
             "topology_sha256": self.topology.sha256, "systemctl": self.systemctl,
             "units": {role: asdict(self.units[role]) for role in RUNTIME_ROLES},
-            "domain": decode(self.domain.configuration())})
+            "domain": decode(self.domain.configuration()), "manager_jobs": decode(self.jobs.configuration())})
 
     @property
     def target_sha256(self):
@@ -190,7 +194,7 @@ class RuntimeContainment:
         return (row["ActiveState"] in ("inactive", "failed") and row["SubState"] in ("dead", "failed")
                 and row["MainPID"] == "0" and row["Job"] == "0")
 
-    def _observe(self, role, deadline):
+    def _observe_unit(self, role, deadline):
         self._current(deadline)
         unit = self.units[role]
         raw = self.commands.run((self.systemctl, "--no-pager", "show",
@@ -209,10 +213,16 @@ class RuntimeContainment:
         if (row["InvocationID"] != unit.invocation_id and not (inactive and row["InvocationID"] == "")
                 or row["ControlGroup"] != unit.cgroup and not (inactive and row["ControlGroup"] == "")):
             raise Rejected("runtime-containment-invocation-changed")
-        # Queued/running jobs must be reconciled by their actual identities first.
-        # Do not kill/cancel a numeric ID whose ownership may have changed.
-        if row["Job"] != "0":
+        # Only this adapter's exact returned stop job may remain pending. Unknown
+        # jobs refuse; disappearance from ListJobs still never proves retirement.
+        if row["Job"] != "0" and not self.jobs.matches(role, row["Job"]):
             raise Rejected("runtime-containment-job-retirement-required")
+        self._current(deadline)
+        return row
+
+    def _observe(self, role, deadline):
+        row = self._observe_unit(role, deadline)
+        self.jobs.observe(deadline=deadline, check=lambda: self._current(deadline))
         self._current(deadline)
         return row
 
@@ -236,8 +246,8 @@ class RuntimeContainment:
                 for role in RUNTIME_ROLES:
                     row = self._observe(role, deadline)
                     if not self._inactive(row):
-                        self.commands.run((self.systemctl, "--no-block", "stop", "--", self.units[role].unit),
-                                          deadline=deadline)
+                        self.jobs.submit(role, operation=operation, deadline=deadline,
+                                         check=lambda: self._observe_unit(role, deadline))
                         self._current(deadline)
                 for role in RUNTIME_ROLES:
                     self._observe(role, deadline)
@@ -250,8 +260,11 @@ class RuntimeContainment:
                 trailing_populated = self.domain.populated()
                 final = [self._observe(role, deadline) for role in RUNTIME_ROLES]
                 empty = empty and after == final and trailing_populated is False
+                job_observations = self.jobs.observe(deadline=deadline, check=lambda: self._current(deadline))
+                empty = empty and all(value == "absent_not_retired" for value in job_observations.values())
                 self._current(deadline)
                 return {"schema": "host-recovery-runtime-containment-return-v1",
+                    "manager_job_observations": job_observations,
                     "operation_id": operation["operation_id"], "return_sha256": digest(canonical(returned)),
                     "runtime_empty_observed": empty, "manager_jobs_retired": False,
                     "activation_exclusion_proven": False, "containment_qualified": False,

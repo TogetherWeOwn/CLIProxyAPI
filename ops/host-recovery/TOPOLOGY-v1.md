@@ -146,9 +146,9 @@ relaunch, runtime API, restoration, business-object start or settlement method.
   activation exclusion, complete containment qualification, quarantine inventory,
   pending drain, complete fence, restoration/start/settlement and production
   acceptance remain false even if the slice appears empty.
-- Any queued manager job refuses; a stop that leaves a job pending retains an
-  unresolved operation. This adapter cannot retire/cancel it or resume after a lost
-  reply. Missing/malformed events, failed/short kill writes, D-state population,
+- Unknown manager jobs refuse. Only this adapter's exact returned StopUnit job
+  can remain pending (see below); it is not retirement or drain evidence. This
+  adapter cannot retire/cancel jobs or resume after a lost reply. Missing/malformed events, failed/short kill writes, D-state population,
   peer/input/clock/configuration drift and uncertain persistence retain history and
   close the adapter/journal. Its embedding owner still must attempt independent
   escalation despite storage faults and retain helper ownership.
@@ -159,6 +159,44 @@ separate synthetic tests. No test writes to the host's cgroup hierarchy or calls
 its systemd/daemon. These are component negatives, not installed privilege,
 activation/retirement, kernel-kill or complete runtime qualification. Exact-head
 GitHub Actions, not a local suite/build, supplies execution evidence.
+
+## Tracked runtime manager-job submissions
+
+`host_recovery/manager_jobs.py:RuntimeStopJobs` replaces fire-and-forget runtime
+stops in `RuntimeContainment` with fixed system-bus `StopUnit(unit, "fail")` calls.
+It does not change the forward-unit adapter or enable any operational IPC/runner.
+
+- The topology now requires a separate `tools.busctl` source/version/binary pin;
+  old topology inputs without it refuse rather than silently inheriting a helper.
+  Trusted embedding must provide the protected helper reader and command owner;
+  scripted hash readers in tests are not provisioning or executable-load proof.
+- Original request/epoch/outer pending and exact unit/invocation bindings precede
+  a durable per-role stop-pending record. Record the observed system-bus ID and
+  unique manager name, use that unique destination (never a replacement name),
+  and durably retain the actual returned job ID/object path. Lost replies,
+  persistence faults or drift preserve history and prohibit redispatch. Mode
+  `fail` avoids deliberately replacing an incompatible queued job.
+- Typed bounded `ListJobs` reads reject malformed, duplicate, conflicting or
+  untracked jobs for either fixed runtime unit. Unrelated jobs are never targets.
+  Only exact returned stop identities may remain pending during recursive kill.
+  Live original peer/flock/input/deadline and helper/configuration checks revoke
+  at bus and persistence boundaries. No numeric-job cancellation is implemented.
+- `pending_observed` and `absent_not_retired` are observations only. There is no
+  subscribed `JobRemoved`/completion witness. Separate busctl connections cannot
+  atomically bind a submission to one bus generation or unit invocation; observed
+  bus/name drift refuses, but unobserved replacement races remain a qualification
+  prerequisite. Empty job/unit/cgroup snapshots do not establish retirement or
+  exclude activation. All retirement/drain/fence/restore/start/settlement claims
+  remain false. Complete cold recovery still requires an authenticated continuous
+  manager witness and independently qualified launch/activation exclusion.
+- Read-only crash history recognizes the bounded pending/returned job records,
+  rejects orphan/conflicting/uncertain ordering, and never reconstructs a permit.
+
+The method signatures and JSON nesting were checked against public systemd v255
+`src/core/dbus-manager.c` (`StopUnit`: `ss` to `o`; `ListJobs`: `a(usssoo)`) and
+`src/busctl/busctl.c` (`json_transform_message`/array/struct serialization).
+This is source inspection, not installed-version or real-manager qualification.
+New tests script all bus responses and helper hashes; no host bus is contacted.
 
 ## Required next boundaries
 

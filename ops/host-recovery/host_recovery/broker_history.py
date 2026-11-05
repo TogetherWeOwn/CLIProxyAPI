@@ -16,8 +16,10 @@ from .dispatch import validate_request
 from .durable import Rejected, canonical, decode, digest, read_file, signature
 from .journal import validate_intent
 from .loading import RecoveryInputs, owner, pin
+from .manager_jobs import classify_records, record_names
+from .topology import RUNTIME_ROLES
 
-MAX_FILES = 1 + 2 * MAX_OPERATIONS
+MAX_FILES = 1 + 2 * MAX_OPERATIONS + 2 * len(RUNTIME_ROLES)
 PENDING_FIELDS = ("schema", "state", "binding_sha256", "epoch_sha256", "sequence", "method",
                   "target_sha256", "deadline", "operation_id")
 RETURN_FIELDS = ("schema", "operation_id", "result", "pending_drained")
@@ -88,6 +90,8 @@ def _capture(fd, *, uid, gid):
     allowed = {"epoch.json"}
     for sequence in range(1, MAX_OPERATIONS + 1):
         allowed.update("operation-%02d-%s.json" % (sequence, kind) for kind in ("pending", "return"))
+        for role in RUNTIME_ROLES:
+            allowed.update(record_names(sequence, role))
     # Unknown/staged bytes are retained, not guessed away as unsubmitted calls.
     if "epoch.json" not in names or not set(names) <= allowed:
         raise Rejected("broker-history-incomplete-or-ambiguous")
@@ -162,8 +166,35 @@ def _classify(records, *, binding):
             consumed.add(return_name)
             classification = "returned_unproven" if returned["result"] == "returned" else returned["result"]
         stopped = classification != "returned_unproven"
-        operations.append({"sequence": sequence, "method": method, "operation_id": pending["operation_id"],
-                           "classification": classification})
+        item = {"sequence": sequence, "method": method, "operation_id": pending["operation_id"],
+                "classification": classification}
+        jobs, job_owner, job_ids, job_uncertain = [], None, set(), False
+        for role in RUNTIME_ROLES:
+            job_pending, job_return = record_names(sequence, role)
+            if job_pending not in records:
+                continue
+            if job_uncertain:
+                raise Rejected("broker-history-job-after-uncertainty")
+            submitted, observed = classify_records(records[job_pending], records.get(job_return),
+                                                   operation=pending, role=role)
+            manager_identity = (submitted["manager_owner"], submitted["bus_id"], submitted["target_sha256"])
+            if job_owner not in (None, manager_identity):
+                raise Rejected("broker-history-manager-owner-conflict")
+            job_owner = manager_identity
+            consumed.add(job_pending)
+            job_uncertain = observed is None
+            if observed is not None:
+                if observed["job_id"] in job_ids:
+                    raise Rejected("broker-history-job-id-reused")
+                job_ids.add(observed["job_id"])
+                consumed.add(job_return)
+            elif return_name in records:
+                raise Rejected("broker-history-return-before-job-identity")
+            jobs.append({"role": role, "classification": "submission_unreturned" if job_uncertain else "submitted_unproven",
+                         "job_id": None if job_uncertain else observed["job_id"], "retirement_proven": False})
+        if jobs:
+            item["manager_jobs"] = jobs
+        operations.append(item)
     if consumed != set(records):
         raise Rejected("broker-history-gap-or-orphan-return")
     return saved["epoch"], operations

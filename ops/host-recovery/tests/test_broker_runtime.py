@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from host_recovery import broker_operations, broker_runtime, commands, durable, topology
+from host_recovery import broker_operations, broker_runtime, commands, durable, manager_jobs, topology
 import test_broker_authority as fixture
 from test_manager import binding, encoded, observed
 from test_topology import manifest
@@ -66,19 +66,39 @@ class RuntimeContainmentTests(unittest.TestCase):
         self.domain = broker_runtime.RuntimeDomain(fd=domain_fd, mount_root=str(self.mount_root),
             cgroup=value['runtime']['cgroup_path'], device=st.st_dev, inode=st.st_ino)
         self.effects, self.reads, self.effect_hook, self.unit_hook = [], [], lambda: None, lambda: None
+        self.manager_owner, self.manager_rows, self.bus_calls = ':1.7', [], []
+        self.bus_id = 'a'*32
+        self.bus_hook = lambda: None
         self.transport = SimpleNamespace(run=self.run_effect)
         self.adapter = self.make_adapter()
 
     def make_adapter(self, **overrides):
         args = dict(authority=self.engine, journal=self.operations, topology=self.topology,
             units=self.units, domain=self.domain, systemctl='/accepted/systemctl', commands=self.transport,
-            read_fragment_hash=lambda _: 'f'*64)
+            read_fragment_hash=lambda _: 'f'*64,
+            jobs=manager_jobs.RuntimeStopJobs(journal=self.operations, units=self.units,
+                busctl='/accepted/busctl', busctl_sha256='d'*64, commands=self.transport,
+                read_helper_hash=lambda _: 'd'*64))
         args.update(overrides)
         return broker_runtime.RuntimeContainment(**args)
 
     def run_effect(self, argv, *, deadline):
         self.assertEqual(deadline, 1090.)
-        role = next(role for role in topology.RUNTIME_ROLES if self.units[role].unit == argv[-1])
+        if argv[0] == '/accepted/busctl':
+            self.bus_calls.append(argv)
+            self.bus_hook()
+            if 'GetId' in argv:
+                return durable.canonical({'type':'s', 'data':[self.bus_id]})
+            if 'GetNameOwner' in argv:
+                return durable.canonical({'type':'s', 'data':[self.manager_owner]})
+            self.assertEqual(argv[5], self.manager_owner)
+            if 'ListJobs' in argv:
+                return durable.canonical({'type':'a(usssoo)', 'data':[self.manager_rows]})
+            self.assertEqual(argv[8], 'StopUnit')
+            self.assertEqual(argv[-3], 'ss')
+            self.assertEqual(argv[-1], 'fail')
+        target = argv[-2] if 'StopUnit' in argv else argv[-1]
+        role = next(role for role in topology.RUNTIME_ROLES if self.units[role].unit == target)
         if 'show' in argv:
             self.reads.append(role)
             raw = encoded(self.rows[role])
@@ -88,10 +108,16 @@ class RuntimeContainmentTests(unittest.TestCase):
         self.assertEqual(pending['method'], 'cold_quiesce_runtime')
         self.assertEqual(pending['target_sha256'], self.adapter.target_sha256)
         self.assertFalse((self.state / 'operation-02-return.json').exists())
+        job_pending, job_return = manager_jobs.record_names(2, role)
+        saved = durable.decode((self.state / job_pending).read_bytes())
+        self.assertEqual(saved['operation_id'], pending['operation_id'])
+        self.assertEqual(saved['unit'], self.units[role].unit)
+        self.assertFalse((self.state / job_return).exists())
         self.effects.append(argv)
         self.effect_hook()
         self.rows[role].update(ActiveState='inactive', SubState='dead', MainPID='0', Job='0')
-        return b''
+        number = 41 + topology.RUNTIME_ROLES.index(role)
+        return durable.canonical({'type':'o', 'data':[manager_jobs.JOB_PREFIX+str(number)]})
 
     def contain(self):
         return self.adapter.contain_runtime(deadline=1090.)
@@ -105,8 +131,11 @@ class RuntimeContainmentTests(unittest.TestCase):
     def test_durable_pending_before_fixed_stops_and_descriptor_recursive_kill(self):
         original = {p.name:p.read_bytes() for p in self.journal.iterdir()}
         receipt = self.contain()
-        self.assertEqual(self.effects, [('/accepted/systemctl', '--no-block', 'stop', '--', self.units[r].unit)
-                                       for r in topology.RUNTIME_ROLES])
+        self.assertEqual(self.effects, [('/accepted/busctl', '--system', '--json=short', '--no-pager', 'call',
+            ':1.7', manager_jobs.MANAGER_PATH, manager_jobs.MANAGER+'.Manager', 'StopUnit', 'ss',
+            self.units[r].unit, 'fail') for r in topology.RUNTIME_ROLES])
+        self.assertEqual(receipt.pop('manager_job_observations'),
+                         {role:'absent_not_retired' for role in topology.RUNTIME_ROLES})
         self.assertEqual(self.kill_file.read_bytes(), b'1\n')
         self.assertTrue(receipt.pop('runtime_empty_observed'))
         for key, value in receipt.items():
@@ -204,7 +233,7 @@ class RuntimeContainmentTests(unittest.TestCase):
         actual = self.run_effect
         def run(argv, *, deadline):
             raw = actual(argv, deadline=deadline)
-            if 'stop' in argv: self.rows['dockerd']['Job'] = '29'
+            if 'StopUnit' in argv: self.rows['dockerd']['Job'] = '29'
             return raw
         self.transport.run = run
         self.refused()
