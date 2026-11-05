@@ -113,7 +113,9 @@ jobs:
       - name: Remove empty fixture root
         if: always() && env.CPA_RECOVERY_TEST_ROOT != ''
         shell: bash
-        run: rmdir -- "$CPA_RECOVERY_TEST_ROOT"
+        # Only remove the exact empty directory created above. Removing an entry
+        # from / needs privilege even when that entry is owned by the runner.
+        run: sudo rmdir -- "$CPA_RECOVERY_TEST_ROOT"
       - name: Retain raw component result
         if: always()
         uses: actions/upload-artifact@v4

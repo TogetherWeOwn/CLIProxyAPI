@@ -374,7 +374,10 @@ request=decode(open(path.replace("approval.json","journal/reconcile-request.json
 job={"schema":"host-recovery-job-observation-v1","request_id":request["request_id"],"boot_id":"boot-a",
      "unit":jobs.recovery_unit(request["request_id"]),"invocation_id":"c"*32,"state":"running","job_id":0}
 actual=observation.observe_request
-origin=time.monotonic()
+# CLI and recovery deadlines share the fixture clock, independent of host uptime.
+real_clock=time.monotonic
+origin=real_clock()
+clock=lambda:1050.0+real_clock()-origin
 RealEvent=cli.threading.Event
 class Event:
     def __init__(self):
@@ -384,11 +387,12 @@ class Event:
     def wait(self,seconds):
         os.write(ready,b"R");return self.inner.wait(seconds)
 def observe(*a,**kw):
-    kw.update(clock=lambda:1050.0+time.monotonic()-origin,boot_id=lambda:"boot-a")
+    kw.update(clock=clock,boot_id=lambda:"boot-a")
     return actual(*a,**kw)
 with patch.object(launch,"SystemdSupervisorIdentity",return_value=identity), \\
      patch.object(observation,"SystemdRecoveryJobs",return_value=SimpleNamespace(observe=lambda *a,**kw:job)), \\
-     patch.object(cli,"observe_request",side_effect=observe),patch.object(cli.threading,"Event",Event):
+     patch.object(cli,"observe_request",side_effect=observe),patch.object(cli.threading,"Event",Event), \\
+     patch.object(cli.time,"monotonic",clock):
     code=cli.main(["--approval",path,"--sha256",pin,"--uid",str(os.geteuid()),"--gid",str(os.getegid()),
         "--deadline",str(time.monotonic()+100),"--interval","30","--max-observations","3"])
 sys.exit(code)
