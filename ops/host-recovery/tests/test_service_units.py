@@ -50,12 +50,13 @@ class ServiceUnitTests(unittest.TestCase):
             self.assertNotIn(forbidden, self.unit.render().decode())
         self.assertNotIn("[Install]", self.unit.render().decode())
 
-    def test_whole_group_unprivileged_no_restart_and_no_output_pipe(self):
+    def test_whole_group_unprivileged_role_restart_and_no_output_pipe(self):
         for unit in (self.unit, self.worker()):
             rows = dict(line.split("=", 1) for line in unit.render().decode().splitlines() if "=" in line)
             expected = {"Type": "exec", "User": "1000", "Group": "1000", "KillMode": "control-group",
                 "SendSIGKILL": "yes", "Delegate": "no", "ProtectControlGroups": "yes",
-                "NoNewPrivileges": "yes", "Restart": "no", "CapabilityBoundingSet": "",
+                "NoNewPrivileges": "yes", "Restart": "on-failure" if unit.role == "supervisor" else "no",
+                "StartLimitIntervalSec": "30s", "StartLimitBurst": "3", "RestartSec": "1s", "CapabilityBoundingSet": "",
                 "AmbientCapabilities": "", "RestrictNamespaces": "yes", "ProtectSystem": "strict",
                 "RestrictSUIDSGID": "yes", "WorkingDirectory": "/", "StandardOutput": "null",
                 "StandardError": "null", "RestrictAddressFamilies": "AF_UNIX"}

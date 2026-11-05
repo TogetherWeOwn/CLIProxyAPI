@@ -11,8 +11,11 @@ as a substitute for the accepted production binaries.
 - `host_recovery/service_units.py`, `service_anchor.py` and `service_entry.py`:
   deterministic offline hardened manager definitions and fixed conservative runner
   routing through protected root-owned anchors. Anchor indirection avoids embedding
-  the launch digest in the unit whose hashes the launch itself pins. No shell,
-  automatic restart, install target, root/capability grant or worker write roots.
+  the launch digest in the unit whose hashes the launch itself pins. Supervisor
+  on-failure restart matches bootstrap, with explicit manager start-rate bounds;
+  the worker never auto-restarts. No shell, install target, root/capability grant
+  or worker write roots. Supervisor names and final fragment sizes match the
+  existing runtime owner/reader contracts.
   Real offline systemd parser and owned-file/CLI-refusal checks are **not installed
   manager, sandbox-enforcement or administrative-provisioning proof**. The supervisor
   remains unresolved-only and the worker identity-only; recovery/start authority,

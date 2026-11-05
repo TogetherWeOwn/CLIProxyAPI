@@ -84,9 +84,12 @@ is not exposed by the CLI and is not evidence of real root provisioning.
 
 `ServiceUnit` renders bytes only. Every unit name, numeric unprivileged UID/GID,
 interpreter, package, anchor, read-only inputs and permitted write roots is
-explicit. Worker names are exact request-digest instances. No shell, environment
-file, install target, automatic restart, failure-hook rollback, root/capability
-grant, broad cgroup delegation or supervisor-to-worker stop dependency is emitted.
+explicit. Worker names are exact request-digest instances; supervisor names must
+also fit the durable owner protocol (no instance marker, at most 128 characters).
+Final fragments exceeding the runtime reader's 65,536-byte limit refuse before
+publication. No shell, environment file, install target, failure-hook rollback,
+root/capability grant, broad cgroup delegation or supervisor-to-worker stop
+dependency is emitted.
 The manager must place each separate unit in its own cgroup; this source does not
 claim to have observed that placement.
 
@@ -106,9 +109,14 @@ the unresolved runner's evidence; null output is never proof of recovery. Both
 runners retain their existing nonzero unresolved/refusal exit semantics. Unit
 `TimeoutStopSec=1s` is manager shutdown escalation, **not** an additional recovery
 allowance, a measured phase cap or a 300-second availability guarantee. Uninterruptible
-I/O can still prevent timely termination. `Restart=no` deliberately avoids
-relaunching an old original-owner request as a new invocation. Boot/expired-request
-reconciliation and separately authorized continuation remain unfinished.
+I/O can still prevent timely termination. The supervisor uses `Restart=on-failure`
+to match the existing authenticated bootstrap contract. Both unit definitions
+carry explicit `StartLimitIntervalSec=30s`, `StartLimitBurst=3` and `RestartSec=1s`;
+these are process-lifetime bounds, not recovery retries or additional reserve.
+A replacement invocation cannot adopt the old original-owner request and remains
+unresolved under the existing loading/lifecycle rules. The identity worker uses
+`Restart=no`. Boot/expired-request reconciliation and separately authorized
+continuation remain unfinished.
 
 A render receipt records only schema, role/name and rendered hash; installed,
 recovery authority, complete fence and production acceptance are always false.

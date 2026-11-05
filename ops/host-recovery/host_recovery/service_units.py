@@ -9,6 +9,7 @@ import os
 import re
 
 from .durable import Rejected, digest
+from .journal import identity
 from .manager import UNIT
 
 
@@ -49,6 +50,8 @@ class ServiceUnit:
         if (worker != (self.role == "worker")
                 or self.role == "supervisor" and self.unit.startswith("cpa-recovery@")):
             raise Rejected("service-unit-request-instance-required")
+        if self.role == "supervisor" and not identity(self.unit):
+            raise Rejected("service-unit-supervisor-owner-name-required")
         if any(type(value) is not int or not 1 <= value <= 2147483647 for value in (self.uid, self.gid)):
             raise Rejected("service-unit-unprivileged-owner-required")
         for value in (self.python, self.package, self.anchor):
@@ -75,16 +78,19 @@ class ServiceUnit:
         """Return bytes only. Independently provision and pin installed readback.
 
         Paths and numeric identities are explicit; there is no install target,
-        dependency edge, shell, environment file, automatic restart or root grant.
+        dependency edge, shell, environment file or root grant. Only the
+        supervisor restarts on failure, matching the existing bootstrap contract.
         Supervisor and worker definitions must remain distinct manager units.
         """
         readonly = sorted(set((self.python, self.package, self.anchor, *self.read_only)))
         command = (self.python, "-I", self.package + "/service_entry.py", "--role", self.role,
                    "--anchor", self.anchor)
         lines = ["[Unit]", "Description=Conservative host recovery " + self.role,
+                 "StartLimitIntervalSec=30s", "StartLimitBurst=3",
                  "", "[Service]", "Type=exec", "User=" + str(self.uid), "Group=" + str(self.gid),
                  "WorkingDirectory=/", "ExecStart=" + " ".join(command),
-                 "Restart=no", "KillMode=control-group", "KillSignal=SIGTERM", "SendSIGKILL=yes",
+                 "Restart=" + ("on-failure" if self.role == "supervisor" else "no"), "RestartSec=1s",
+                 "KillMode=control-group", "KillSignal=SIGTERM", "SendSIGKILL=yes",
                  "TimeoutStopSec=1s", "Delegate=no", "ProtectControlGroups=yes", "NoNewPrivileges=yes",
                  "CapabilityBoundingSet=", "AmbientCapabilities=", "RestrictNamespaces=yes",
                  "RestrictSUIDSGID=yes", "ProtectSystem=strict", "ProtectKernelTunables=yes",
@@ -95,7 +101,10 @@ class ServiceUnit:
                  # Neither pipe backpressure nor incidental paths/errors belong
                  # in a manager-controlled service's health or completion signal.
                  "StandardInput=null", "StandardOutput=null", "StandardError=null", ""]
-        return "\n".join(lines).encode("ascii")
+        raw = "\n".join(lines).encode("ascii")
+        if len(raw) > 65536:
+            raise Rejected("service-unit-fragment-size-limit")
+        return raw
 
     def receipt(self):
         return {"schema": "host-recovery-service-unit-v1", "role": self.role,
