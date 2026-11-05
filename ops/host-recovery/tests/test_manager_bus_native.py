@@ -109,15 +109,18 @@ class NativeManagerBusTests(unittest.TestCase):
         self.assertEqual(session.completions(),{})
         self.assertEqual(self.count(peer),1)
 
-    def test_real_failed_and_canceled_events_are_preserved(self):
-        # Each session/peer owns a distinct name lifetime on the private bus.
-        for result in ('failed','canceled'):
-            with self.subTest(result=result):
-                session,peer = self.session(result)
-                session.stop('dockerd')
-                self.assertEqual(session.completions()['dockerd']['result'],result)
-                session.close()
-                peer.stdin.write('quit\n');peer.stdin.flush();peer.wait(timeout=5.)
+    def assert_result_preserved(self, result):
+        session,peer = self.session(result)
+        session.stop('dockerd')
+        self.assertEqual(session.completions()['dockerd']['result'],result)
+        self.assertEqual(self.count(peer),1)
+
+    def test_real_failed_event_is_preserved(self):
+        self.assert_result_preserved('failed')
+
+    def test_real_canceled_event_is_preserved(self):
+        # Independent test cleanup restores address/credential patches first.
+        self.assert_result_preserved('canceled')
 
     def test_real_duplicate_completion_revokes_without_retry(self):
         session,peer = self.session('duplicate')
