@@ -2,6 +2,8 @@
 from dataclasses import replace
 import errno
 import os
+import select
+import signal
 import unittest
 from unittest.mock import Mock, patch
 
@@ -10,6 +12,7 @@ from host_recovery.broker_operations import OperationJournal
 from host_recovery.broker_runtime import RuntimeDomain
 from host_recovery.manager_jobs import RuntimeStopJobs, completion_name, record_names
 from host_recovery.masked_runtime_stop import MaskedRuntimeStop
+from host_recovery.runtime_kill import record_names as kill_names
 from host_recovery.unit_masks import PersistentUnitMasks
 from test_broker_operations import binding, epoch
 from test_manager import binding as unit_binding, observed
@@ -283,6 +286,122 @@ class MaskedRuntimeStopTests(unittest.TestCase):
         self.assertNotIn(('KillUnit','dockerd'), self.effects)
         self.assertNotIn(('StopUnit','containerd'), self.effects)
         self.domain.kill.assert_not_called()
+
+    def test_domain_kill_records_bind_original_stops_and_do_not_grant_drain(self):
+        from host_recovery import runtime_kill, broker_history
+        reached = []
+        names = kill_names(2)
+        def kill(*, check):
+            check()
+            reached.append('kill')
+            self.assertTrue((self.path_state/names[0]).exists())
+            self.assertFalse((self.path_state/names[1]).exists())
+        self.domain.kill.side_effect = kill
+        self.apply()
+        records = {p.name:p.read_bytes() for p in self.path_state.iterdir()}
+        completions = {role:durable.digest(records[completion_name(2,role)]) for role in self.units}
+        self.assertEqual(runtime_kill.classify_records(*(records[name] for name in names),
+            operation=self.operation, completions=completions), 'empty_observed_unproven')
+        _, operations = broker_history._classify(records, binding=durable.decode(self.journal._binding))
+        self.assertEqual(operations[1]['runtime_kill']['classification'], 'empty_observed_unproven')
+        self.assertEqual(reached, ['kill'])
+        self.assertNotIn('cold_quiesce_runtime', self.journal._returned)
+
+    def test_each_domain_publication_fault_is_reached_and_never_retries(self):
+        for phase, name in enumerate(kill_names(2)):
+            for point in ('create','write','file-fsync','rename','directory-fsync','readback'):
+                for code in (errno.EIO, errno.ENOSPC):
+                    with self.subTest(phase=phase, point=point, code=code):
+                        self.setUp()
+                        reached = []
+                        def fault(actual):
+                            # _write supplies the phase filename to atomic_write;
+                            # count completed earlier phase publications instead
+                            # of guessing which repeated hook failed.
+                            prior = kill_names(2)[:phase]
+                            if (all(item in self.journal._records for item in prior)
+                                    and all(completion_name(2,role) in self.journal._records for role in self.units)
+                                    and name not in self.journal._records and actual == point):
+                                reached.append(actual)
+                                raise OSError(code, 'synthetic')
+                        self.journal.fault = fault
+                        with self.assertRaises(durable.Rejected): self.apply()
+                        self.assertEqual(reached, [point])
+                        self.assertEqual(self.domain.kill.call_count, int(phase > 0))
+                        with self.assertRaises(durable.Rejected): self.apply()
+                        self.assertEqual(self.domain.kill.call_count, int(phase > 0))
+                        self.assertFalse(self.sequence.completed)
+                        self.assertFalse((self.path_state/'operation-02-return.json').exists())
+
+    def test_empty_publication_repopulation_or_peer_loss_refuses_live_result(self):
+        for action in ('repopulate', 'peer', 'deadline'):
+            with self.subTest(action=action):
+                self.setUp()
+                reached = []
+                def fault(point):
+                    if point == 'directory-fsync' and (self.path_state/kill_names(2)[2]).exists():
+                        reached.append(point)
+                        if action == 'repopulate': self.domain.populated.return_value = True
+                        elif action == 'deadline': self.now = 1090.
+                        else: self.check_hook = lambda:(_ for _ in ()).throw(durable.Rejected('lost'))
+                self.journal.fault = fault
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertEqual(reached, ['directory-fsync'])
+                self.assertTrue((self.path_state/kill_names(2)[2]).exists())
+                self.assertFalse(self.sequence.completed)
+                self.assertEqual(self.domain.kill.call_count, 1)
+
+    def test_kill_exception_retains_pending_without_return_or_empty(self):
+        self.domain.kill.side_effect = OSError(errno.EIO, 'synthetic')
+        with self.assertRaises(durable.Rejected): self.apply()
+        names = kill_names(2)
+        self.assertTrue((self.path_state/names[0]).exists())
+        self.assertFalse(any((self.path_state/name).exists() for name in names[1:]))
+        reopened = OperationJournal(self.journal.fd, binding=durable.decode(self.journal._binding),
+            epoch=durable.decode(self.journal._epoch), clock=lambda:self.now, boot_id=lambda:'boot-original')
+        with self.assertRaises(durable.Rejected):
+            reopened.pending('cold_quiesce_runtime', target_sha256=self.sequence.target_sha256, deadline=1090.)
+        self.assertEqual(self.domain.kill.call_count, 1)
+
+    def test_sigkill_at_each_domain_publication_retains_nonreplayable_history(self):
+        from host_recovery import broker_history
+        phases = ('unreturned','returned_without_empty_observation','empty_observed_unproven')
+        for phase, name in enumerate(kill_names(2)):
+            with self.subTest(phase=phase):
+                self.setUp()
+                read_fd, write_fd = os.pipe()
+                pid = os.fork()
+                if pid == 0:
+                    os.close(read_fd)
+                    try:
+                        def fault(point):
+                            if point == 'directory-fsync' and (self.path_state/name).exists():
+                                os.write(write_fd, b'P')
+                                signal.pause()
+                        self.journal.fault = fault
+                        self.apply()
+                    except BaseException:
+                        os.write(write_fd, b'E')
+                    finally:
+                        os._exit(1)
+                os.close(write_fd)
+                try:
+                    self.assertTrue(select.select([read_fd], [], [], 5.)[0], 'child publication not reached')
+                    self.assertEqual(os.read(read_fd,1), b'P')
+                finally:
+                    os.kill(pid, signal.SIGKILL)
+                    _, status = os.waitpid(pid, 0)
+                    os.close(read_fd)
+                self.assertTrue(os.WIFSIGNALED(status))
+                self.assertEqual(os.WTERMSIG(status), signal.SIGKILL)
+                records = {p.name:p.read_bytes() for p in self.path_state.iterdir()}
+                _, operations = broker_history._classify(records, binding=durable.decode(self.journal._binding))
+                self.assertEqual(operations[1]['runtime_kill']['classification'], phases[phase])
+                reopened = OperationJournal(self.journal.fd, binding=durable.decode(self.journal._binding),
+                    epoch=durable.decode(self.journal._epoch), clock=lambda:self.now, boot_id=lambda:'boot-original')
+                with self.assertRaises(durable.Rejected):
+                    reopened.pending('cold_quiesce_runtime', target_sha256=self.sequence.target_sha256, deadline=1090.)
+                self.assertEqual(records, {p.name:p.read_bytes() for p in self.path_state.iterdir()})
 
     def test_new_fixed_job_after_domain_kill_refuses_final_observation(self):
         def kill(*,check):

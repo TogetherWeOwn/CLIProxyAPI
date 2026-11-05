@@ -19,8 +19,10 @@ from .loading import RecoveryInputs, owner, pin
 from .manager_jobs import STOP_ROLES, classify_completion, classify_records, completion_name, record_names
 from .mask_reload import classify_records as classify_reload, record_names as reload_names
 from .job_cancellation import classify_records as classify_cancellation, record_names as cancellation_names
+from .runtime_kill import classify_records as classify_kill, record_names as kill_names
+from .topology import RUNTIME_ROLES
 
-MAX_FILES = 1 + 4 * MAX_OPERATIONS + 6 * len(STOP_ROLES)
+MAX_FILES = 1 + 4 * MAX_OPERATIONS + 6 * len(STOP_ROLES) + 3
 PENDING_FIELDS = ("schema", "state", "binding_sha256", "epoch_sha256", "sequence", "method",
                   "target_sha256", "deadline", "operation_id")
 RETURN_FIELDS = ("schema", "operation_id", "result", "pending_drained")
@@ -92,6 +94,7 @@ def _capture(fd, *, uid, gid):
     for sequence in range(1, MAX_OPERATIONS + 1):
         allowed.update("operation-%02d-%s.json" % (sequence, kind) for kind in ("pending", "return"))
         allowed.update(reload_names(sequence))
+        allowed.update(kill_names(sequence))
         for role in STOP_ROLES:
             allowed.update(record_names(sequence, role))
             allowed.add(completion_name(sequence, role))
@@ -248,6 +251,23 @@ def _classify(records, *, binding):
                 consumed.add(reload_return)
             item["mask_reload"] = {"classification": "unreturned" if reloaded is None else "returned_unproven",
                                    "pending_drained": False}
+        kill_pending, kill_return, kill_empty = kill_names(sequence)
+        if kill_pending in records:
+            if (method != "cold_quiesce_runtime"
+                    or not any(prior["method"] == "contain_forward" and prior["classification"] == "returned_unproven"
+                               for prior in operations)
+                    or item.get("mask_reload", {}).get("classification") != "returned_unproven"
+                    or {job["role"] for job in jobs} != set(RUNTIME_ROLES)
+                    or any(job["classification"] != "completion_done_observed" for job in jobs)):
+                raise Rejected("broker-history-kill-before-runtime-stop-completions")
+            phase = classify_kill(records[kill_pending], records.get(kill_return), records.get(kill_empty),
+                operation=pending, completions={role: digest(records[completion_name(sequence, role)])
+                                               for role in RUNTIME_ROLES})
+            consumed.update(name for name in (kill_pending, kill_return, kill_empty) if name in records)
+            if return_name in records and phase != "empty_observed_unproven":
+                raise Rejected("broker-history-outer-return-after-uncertain-runtime-kill")
+            item["runtime_kill"] = {"classification": phase, "pending_drained": False,
+                                    "runtime_containment_coverage_proven": False}
         operations.append(item)
     if consumed != set(records):
         raise Rejected("broker-history-gap-or-orphan-return")

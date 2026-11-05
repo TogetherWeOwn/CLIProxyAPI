@@ -34,25 +34,52 @@ Under the journal's existing mutex:
    already completed, issue at most one whole-unit KILL. Wait for the exact
    authenticated `done` completion and persist/recheck it. Repeat for containerd,
    in that order. Inactive projections still need their own stop completions.
-5. Only after both stop completions, perform one descriptor-relative recursive
-   `cgroup.kill` write. Wait for explicit `populated=false` under the same original
-   inclusive deadline, not a renewed kill/collection allowance. Missing domain,
-   unknown values, read/write failure, peer/lock/manager/input/configuration drift
-   or expiration refuses. Recheck empty observations across trailing authority
-   and effective-mask reads.
+5. Only after both stop completions, durably publish the recursive-kill pending
+   phase, binding the original operation, pinned domain configuration and both
+   exact completion-record hashes. Recheck original authority before one
+   descriptor-relative `cgroup.kill` write. Separately persist its returned phase;
+   a successful write alone is not an empty-domain observation.
+6. Wait for explicit `populated=false` under the same original inclusive deadline,
+   not a renewed kill/collection allowance. Separately persist the digest-linked
+   empty observation, then recheck live authority and emptiness after publication
+   and across trailing effective-mask reads. Missing domain, unknown values,
+   read/write failure, peer/lock/manager/input/configuration drift or expiration
+   refuses even if the last observation was saved.
 
 The adapter never publishes the **outer** cold-quiesce return or drains the
 operation. Lost replies, persistence faults and partial effects permanently close
 this instance, its manager session and journal. No replay, repair, new epoch,
 deadline renewal, restoration, service start or settlement follows.
 
+## Retained recursive-kill history
+
+Three canonical restricted records use the original operation sequence:
+`runtime-kill-pending`, `runtime-kill-return` and `runtime-kill-empty`. Each
+publication uses the existing create/write/file-fsync/rename/directory-fsync and
+readback barrier. Partial files and staged bytes remain for reconciliation;
+there is no overwrite, adoption or redispatch.
+
+The read-only history reader requires the prior original forward return,
+returned mask reload, both matching `done` stop completions and their exact raw
+hashes before accepting kill correspondence. It distinguishes `unreturned`,
+`returned_without_empty_observation` and `empty_observed_unproven`. Orphan,
+noncanonical, staged or conflicting records and an outer return hiding an
+uncertain kill refuse. A saved empty observation is not a current kernel read,
+old-epoch death, runtime coverage, pending drain or a start/settlement grant.
+The bounded history inventory includes these three additional records. Reboot
+still requires a separately identified continuation; no original budget resets.
+
 ## Evidence and limits
 
 Ordinary tests use actual private masks/journal files but **scripted manager and
-cgroup-domain boundaries**. They cover both-role ordering, all 14 separate phase
-publications with reached EIO/ENOSPC hooks, absent/failed completions, changed
-pins, deadline/peer loss, failed recursive kill and late repopulation. They are
-component evidence, not an installed cold-runtime barrier.
+cgroup-domain boundaries**. They cover both-role ordering, the original 14 phase
+publications plus three recursive-kill publications with reached EIO/ENOSPC
+hooks, absent/failed completions, changed pins, deadline/peer loss, failed
+recursive kill and late repopulation. New separate-process SIGKILL cases stop at
+each actual kill-record directory-fsync hook; they test retained files and refusal
+to replay, not kernel containment. History tests use synthetic records. All new
+methods must pass in exact-head Actions before a test result is claimed. These
+are component checks, not an installed cold-runtime barrier.
 
 The separate Actions-only native fixture adds an inert two-service pair and a
 third TERM-ignoring parent/child service in one explicitly started owned slice.

@@ -8,8 +8,9 @@ old-epoch death, quarantine reconciliation, pending drain or recovery authority.
 from .broker_operations import OperationJournal
 from .broker_runtime import RuntimeDomain
 from .durable import Rejected, canonical, decode, digest
-from .manager_jobs import RuntimeStopJobs
+from .manager_jobs import RuntimeStopJobs, completion_name
 from .masked_forward_stop import _MaskedFixedStop
+from .runtime_kill import record_names
 from .topology import RUNTIME_ROLES
 
 
@@ -52,8 +53,23 @@ class MaskedRuntimeStop(_MaskedFixedStop):
         self._current()
         if self._domain_killed:
             raise Rejected("masked-runtime-domain-kill-exhausted")
+        operation = decode(self._operation)
+        pending_name, return_name, empty_name = record_names(operation["sequence"])
+        pending = {"schema": "host-recovery-runtime-kill-pending-v1", "operation_id": operation["operation_id"],
+            "domain_sha256": digest(self.domain.configuration()),
+            "stop_completions_sha256": {role: digest(self.journal._records[completion_name(operation["sequence"], role)][0])
+                                        for role in self.roles}}
+        # Durable intent precedes the kernel write. A lost return never permits
+        # redispatch, including when the last durable record is only pending.
+        self.journal._write(pending_name, pending)
+        self._current()
         self._domain_killed = True
         self.domain.kill(check=self._current)
+        self._current()
+        returned = {"schema": "host-recovery-runtime-kill-return-v1", "pending_sha256": digest(canonical(pending)),
+                    "recursive_domain_kill_returned": True, "pending_drained": False}
+        self.journal._write(return_name, returned)
+        self._current()
         while True:
             self._current()
             populated = self.domain.populated()
@@ -66,6 +82,12 @@ class MaskedRuntimeStop(_MaskedFixedStop):
             if remaining <= 0:
                 raise Rejected("masked-runtime-domain-deadline")
             self.session._connection.wait(max(1, min(50000, int(remaining * 1000000))))
+        self._final_check()
+        self.journal._write(empty_name, {"schema": "host-recovery-runtime-kill-empty-v1",
+            "return_sha256": digest(canonical(returned)), "domain_empty_observed": True,
+            "runtime_containment_coverage_proven": False})
+        # Publication can itself lose authority or observe repopulation. Saved
+        # observations cannot replace the final live check or grant a cold return.
         self._final_check()
         return {"recursive_domain_kill_returned": True, "domain_empty_observed": True,
                 "runtime_stop_completion_count": len(self.roles), "runtime_containment_coverage_proven": False}

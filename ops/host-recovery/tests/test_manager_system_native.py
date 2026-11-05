@@ -792,6 +792,11 @@ class SystemManagerTests(unittest.TestCase):
         receipt = sequence.stop(operation=operation)
         self.assertTrue(receipt["recursive_domain_kill_returned"] and receipt["domain_empty_observed"])
         self.assertEqual(receipt["runtime_stop_completion_count"], 2)
+        from host_recovery.runtime_kill import classify_records, record_names
+        kill_records = tuple((state/name).read_bytes() for name in record_names(operation["sequence"]))
+        completion_pins = {role:digest((state/completion_name(2,role)).read_bytes()) for role in units}
+        self.assertEqual(classify_records(*kill_records, operation=operation, completions=completion_pins),
+                         "empty_observed_unproven")
         self.assertFalse(receipt["runtime_containment_coverage_proven"])
         self.assertFalse(receipt["pending_drained"] or receipt["complete_fence_proven"] or receipt["start_allowed"])
         self.assertNotIn("cold_quiesce_runtime", journal._returned)
