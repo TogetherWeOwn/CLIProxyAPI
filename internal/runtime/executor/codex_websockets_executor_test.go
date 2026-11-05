@@ -2642,8 +2642,14 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 	serverPongCh := make(chan string, 1)
 	inWriteHook := make(chan struct{})
 	pongDeliveredDuringWrite := make(chan struct{})
+	var connections atomic.Int32
+	var writes atomic.Int32
 
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
+		if writes.Add(1) != 1 {
+			t.Error("unexpected payload write retry")
+			return
+		}
 		close(inWriteHook)
 		// Wait until server confirms pong was received before allowing write to finish.
 		select {
@@ -2667,15 +2673,28 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 			return nil
 		})
 
-		// Start server reader loop so server processes control frames.
-		readErrCh := make(chan error, 1)
+		if connections.Add(1) != 1 {
+			t.Error("unexpected websocket connection retry")
+			return
+		}
+
+		// ReadMessage processes the pong while the upload is held, then returns
+		// the actual request after the hook releases the payload write.
+		type uploadResult struct {
+			messageType int
+			payload     []byte
+			err         error
+		}
+		uploadCh := make(chan uploadResult, 1)
+		readerDone := make(chan struct{})
 		go func() {
-			for {
-				if _, _, errRead := conn.ReadMessage(); errRead != nil {
-					readErrCh <- errRead
-					return
-				}
-			}
+			defer close(readerDone)
+			messageType, payload, errRead := conn.ReadMessage()
+			uploadCh <- uploadResult{messageType, payload, errRead}
+		}()
+		defer func() {
+			_ = conn.Close()
+			<-readerDone
 		}()
 
 		// Wait until client has entered writeMessage and is actively holding writeMu.
@@ -2687,7 +2706,10 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 		}
 
 		// Upstream sends Ping WHILE client payload write is in progress holding writeMu.
-		_ = conn.WriteControl(websocket.PingMessage, []byte("session-ping"), time.Now().Add(time.Second))
+		if errPing := conn.WriteControl(websocket.PingMessage, []byte("session-ping"), time.Now().Add(time.Second)); errPing != nil {
+			t.Errorf("send keepalive ping: %v", errPing)
+			return
+		}
 
 		// Server asserts Pong arrives while client write is still blocked in the hook.
 		select {
@@ -2701,9 +2723,27 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 			return
 		}
 
-		// Now send terminal response.
+		// Do not close the persistent connection before the held upload completes:
+		// EOF can invalidate it and trigger a write retry before the hook returns.
+		select {
+		case upload := <-uploadCh:
+			if upload.err != nil {
+				t.Errorf("read uploaded request: %v", upload.err)
+				return
+			}
+			if upload.messageType != websocket.TextMessage || gjson.GetBytes(upload.payload, "type").String() != "response.create" {
+				t.Error("expected uploaded response.create text message")
+				return
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("timed out waiting for payload upload after pong delivery")
+			return
+		}
+
 		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
-		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, respPayload); errWrite != nil {
+			t.Errorf("write terminal response: %v", errWrite)
+		}
 	}))
 	defer server.Close()
 
@@ -2712,6 +2752,8 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 			DisableImageGeneration: config.DisableImageGenerationAll,
 		},
 	})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	defer exec.CloseExecutionSession("session-ping-test")
 	auth := &cliproxyauth.Auth{ID: "auth-session-ping", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.6-sol",
@@ -2734,6 +2776,12 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 		if chunk.Err != nil {
 			t.Fatalf("chunk error: %v", chunk.Err)
 		}
+	}
+	if got := connections.Load(); got != 1 {
+		t.Fatalf("websocket connections = %d, want 1", got)
+	}
+	if got := writes.Load(); got != 1 {
+		t.Fatalf("payload writes = %d, want 1", got)
 	}
 }
 

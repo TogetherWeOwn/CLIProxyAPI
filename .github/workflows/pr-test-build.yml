@@ -152,6 +152,10 @@ jobs:
         shell: bash
         run: |
           go test -race -count=25 -timeout=180s -run '^TestServiceHeartbeatFailoverDoesNotDrainBlockingScope$' ./sdk/cliproxy 2>&1 | tee "$RUNNER_TEMP/heartbeat-failover.log"
+      - name: Websocket keepalive upload regression at PR head
+        shell: bash
+        run: |
+          go test -race -count=100 -timeout=180s -run '^TestCodexWebsockets_KeepalivePingDuringUpload_WithSession$' ./internal/runtime/executor 2>&1 | tee "$RUNNER_TEMP/websocket-keepalive-upload.log"
       - name: Retain raw race result
         if: always()
         uses: actions/upload-artifact@v4
@@ -160,4 +164,5 @@ jobs:
           path: |
             ${{ runner.temp }}/recovery-race.log
             ${{ runner.temp }}/heartbeat-failover.log
+            ${{ runner.temp }}/websocket-keepalive-upload.log
           if-no-files-found: error
