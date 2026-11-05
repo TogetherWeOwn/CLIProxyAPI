@@ -177,20 +177,25 @@ jobs:
 
   recovery-runtime-inventory:
     runs-on: ubuntu-24.04
-    timeout-minutes: 2
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
       - name: Inventory runtime prerequisites without daemon contact
         shell: bash
         run: |
           set -euo pipefail
           head_sha="$(git rev-parse HEAD)"
+          go_reader="$(command -v go)"
           env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C GITHUB_ACTIONS=true \
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
-            timeout 45s bash ops/host-recovery/tests/inventory_runtime.sh "$head_sha" \
+            timeout 90s bash ops/host-recovery/tests/inventory_runtime.sh "$head_sha" "$go_reader" \
             2>&1 | tee "$RUNNER_TEMP/recovery-runtime-inventory.log"
       - name: Retain raw runtime prerequisite inventory
         if: always()
