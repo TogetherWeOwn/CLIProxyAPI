@@ -1,4 +1,4 @@
-"""Fixed runtime StopUnit submissions with durable manager job identities.
+"""Fixed forward/runtime StopUnit submissions with durable manager job identities.
 
 This is an embedding boundary, not an installed broker or complete fence.
 Legacy busctl calls are NOT connection-atomic. An optional ManagerJobSession
@@ -21,6 +21,20 @@ MANAGER_PATH = "/org/freedesktop/systemd1"
 JOB_PREFIX = MANAGER_PATH + "/job/"
 UNIQUE = re.compile(r":[0-9]{1,10}\.[0-9]{1,10}\Z")
 MAX_JOBS = 256
+STOP_ROLES = RUNTIME_ROLES + ("forward",)
+
+
+def roles_for_method(method):
+    if method == "cold_quiesce_runtime":
+        return RUNTIME_ROLES
+    if method == "contain_forward":
+        return ("forward",)
+    return ()
+
+
+def fixed_roles(units):
+    return type(units) is dict and set(units) in (set(RUNTIME_ROLES), {"forward"})
+
 JOB_PENDING_FIELDS = ("schema", "operation_id", "role", "target_sha256", "manager_owner",
                       "bus_id", "unit", "invocation_id")
 JOB_RETURN_FIELDS = ("schema", "pending_sha256", "job_id", "job_path", "retirement_proven")
@@ -88,7 +102,8 @@ def jobs_reply(raw):
 
 
 def record_names(sequence, role):
-    index = RUNTIME_ROLES.index(role) + 1
+    # Keep the existing runtime record names stable; forward uses its own slot.
+    index = STOP_ROLES.index(role) + 1
     prefix = "operation-%02d-job-%02d-" % (sequence, index)
     return prefix + "pending.json", prefix + "return.json"
 
@@ -98,7 +113,7 @@ def classify_records(pending_raw, returned_raw, *, operation, role):
     pending = decode(pending_raw)
     shape(pending, JOB_PENDING_FIELDS)
     if (pending_raw != canonical(pending) or pending["schema"] != "host-recovery-manager-stop-pending-v1"
-            or operation["method"] != "cold_quiesce_runtime" or pending["operation_id"] != operation["operation_id"]
+            or role not in roles_for_method(operation["method"]) or pending["operation_id"] != operation["operation_id"]
             or pending["role"] != role or type(pending["manager_owner"]) is not str
             or UNIQUE.fullmatch(pending["manager_owner"]) is None
             or type(pending["bus_id"]) is not str or INVOCATION.fullmatch(pending["bus_id"]) is None
@@ -117,22 +132,26 @@ def classify_records(pending_raw, returned_raw, *, operation, role):
     return pending, returned
 
 
-class RuntimeStopJobs:
-    """At most one StopUnit per fixed role, serialized by the broker journal.
+class _FixedStopJobs:
+    """Shared fixed-role bookkeeping, never a caller-selected method or role set.
 
     check is the embedding broker's original peer/lock/unit/input barrier, never
     an IPC-supplied callback. Commands and their retained helper lifetime belong
     to that broker. No cancel, restart, StartUnit or arbitrary method exists.
     """
+    method = None
+    target_schema = None
+
     def __init__(self, *, journal, units, busctl, busctl_sha256, commands, read_helper_hash, session=None):
         from .manager_bus import ManagerJobSession
         if session is not None and (not isinstance(session, ManagerJobSession) or session.units != units):
             raise Rejected("manager-job-original-session-required")
         self.session = self._original_session = session
         self._completions = {}
-        if (not isinstance(journal, OperationJournal) or type(units) is not dict
-                or set(units) != set(RUNTIME_ROLES) or any(not isinstance(x, UnitBinding) for x in units.values())
-                or len({x.unit for x in units.values()}) != len(RUNTIME_ROLES)
+        roles = roles_for_method(self.method)
+        if (not roles or not isinstance(journal, OperationJournal) or type(units) is not dict
+                or set(units) != set(roles) or any(not isinstance(x, UnitBinding) for x in units.values())
+                or len({x.unit for x in units.values()}) != len(roles)
                 or type(busctl) is not str or not os.path.isabs(busctl)):
             raise Rejected("manager-job-fixed-boundaries-required")
         pin(busctl_sha256)
@@ -143,9 +162,9 @@ class RuntimeStopJobs:
         self.failed = False
 
     def configuration(self):
-        return canonical({"schema": "host-recovery-runtime-stop-target-v1", "busctl": self.busctl,
+        return canonical({"schema": self.target_schema, "busctl": self.busctl,
             "busctl_sha256": self.busctl_sha256, "binding_sha256": digest(self.journal._binding), "epoch_sha256": digest(self.journal._epoch),
-            "units": {role: asdict(self.units[role]) for role in RUNTIME_ROLES},
+            "units": {role: asdict(self.units[role]) for role in roles_for_method(self.method)},
             "session": None if self.session is None else {"bus_id": self.session.bus_id,
                 "manager_owner": self.session.owner, "library_sha256": self.session.library_sha256,
                 "deadline": self.session.deadline}})
@@ -210,10 +229,10 @@ class RuntimeStopJobs:
         with self.journal._mutex:
             try:
                 self._current(deadline, check)
-                if (role not in RUNTIME_ROLES or role in self._attempted or type(operation) is not dict
-                        or operation.get("method") != "cold_quiesce_runtime"
-                        or canonical(operation) != self.journal._pending.get("cold_quiesce_runtime")
-                        or "cold_quiesce_runtime" in self.journal._returned or deadline != operation["deadline"]):
+                if (role not in roles_for_method(self.method) or role in self._attempted or type(operation) is not dict
+                        or operation.get("method") != self.method
+                        or canonical(operation) != self.journal._pending.get(self.method)
+                        or self.method in self.journal._returned or deadline != operation["deadline"]):
                     raise Rejected("manager-job-original-pending-required")
                 operation = decode(canonical(operation))
                 self._attempted.add(role)
@@ -250,7 +269,7 @@ class RuntimeStopJobs:
                 rows = self._snapshot(deadline, check)
                 if self.session is not None:
                     for role, event in self.session.completions().items():
-                        operation = decode(self.journal._pending["cold_quiesce_runtime"])
+                        operation = decode(self.journal._pending[self.method])
                         self._current(deadline, check)
                         returned = self._submitted[role]
                         if returned["job_id"] in rows:
@@ -278,3 +297,21 @@ class RuntimeStopJobs:
     def matches(self, role, value):
         item = self._submitted.get(role)
         return item is not None and value == str(item["job_id"])
+
+
+class RuntimeStopJobs(_FixedStopJobs):
+    """At most one StopUnit per dedicated runtime role under its pending operation."""
+    method = "cold_quiesce_runtime"
+    target_schema = "host-recovery-runtime-stop-target-v1"
+
+
+class ForwardStopJobs(_FixedStopJobs):
+    """One forward stop on a continuous session; no legacy busctl fallback."""
+    method = "contain_forward"
+    target_schema = "host-recovery-forward-stop-target-v1"
+
+    def __init__(self, **kwargs):
+        from .manager_bus import ManagerJobSession
+        if not isinstance(kwargs.get("session"), ManagerJobSession):
+            raise Rejected("manager-job-forward-session-required")
+        super().__init__(**kwargs)

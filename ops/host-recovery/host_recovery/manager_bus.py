@@ -1,8 +1,8 @@
-"""One non-reconnecting sd-bus connection for fixed runtime stop-job witnesses.
+"""One non-reconnecting sd-bus connection for fixed stop-job witnesses.
 
 This embedding transport is not an installed broker, activation interlock or cold
 barrier. The caller retains the original authority/journal and protected library
-handle. Only the two fixed StopUnit calls exist; no arbitrary dispatch or numeric
+handle. Only fixed forward OR runtime StopUnit calls exist; no arbitrary dispatch or numeric
 job cancellation is exposed. Completion delivery does not prove runtime drain.
 """
 import ctypes as C
@@ -11,9 +11,8 @@ import threading
 
 from .durable import Rejected, canonical, decode
 from .manager import INVOCATION, UnitBinding
-from .manager_jobs import JOB_PREFIX, MANAGER, MANAGER_PATH, UNIQUE, job_path, jobs_reply
+from .manager_jobs import JOB_PREFIX, MANAGER, MANAGER_PATH, UNIQUE, fixed_roles, job_path, jobs_reply
 from .protected_file import ProtectedFile
-from .topology import RUNTIME_ROLES
 
 SYSTEM_ADDRESS = b"unix:path=/run/dbus/system_bus_socket"
 DBUS = "org.freedesktop.DBus"
@@ -218,9 +217,9 @@ class ManagerJobSession:
     """
     def __init__(self, *, library, library_sha256, units, deadline, clock, check):
         if (not isinstance(library, ProtectedFile) or library.uid != 0 or library.gid != 0
-                or type(units) is not dict or set(units) != set(RUNTIME_ROLES)
+                or not fixed_roles(units)
                 or any(not isinstance(unit, UnitBinding) for unit in units.values())
-                or len({unit.unit for unit in units.values()}) != len(RUNTIME_ROLES)):
+                or len({unit.unit for unit in units.values()}) != len(units)):
             raise Rejected("manager-bus-protected-fixed-boundaries-required")
         from .loading import pin
         from dataclasses import asdict

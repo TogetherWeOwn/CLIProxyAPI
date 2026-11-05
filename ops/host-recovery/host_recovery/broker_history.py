@@ -16,10 +16,9 @@ from .dispatch import validate_request
 from .durable import Rejected, canonical, decode, digest, read_file, signature
 from .journal import validate_intent
 from .loading import RecoveryInputs, owner, pin
-from .manager_jobs import classify_completion, classify_records, completion_name, record_names
-from .topology import RUNTIME_ROLES
+from .manager_jobs import STOP_ROLES, classify_completion, classify_records, completion_name, record_names
 
-MAX_FILES = 1 + 2 * MAX_OPERATIONS + 3 * len(RUNTIME_ROLES)
+MAX_FILES = 1 + 2 * MAX_OPERATIONS + 3 * len(STOP_ROLES)
 PENDING_FIELDS = ("schema", "state", "binding_sha256", "epoch_sha256", "sequence", "method",
                   "target_sha256", "deadline", "operation_id")
 RETURN_FIELDS = ("schema", "operation_id", "result", "pending_drained")
@@ -90,7 +89,7 @@ def _capture(fd, *, uid, gid):
     allowed = {"epoch.json"}
     for sequence in range(1, MAX_OPERATIONS + 1):
         allowed.update("operation-%02d-%s.json" % (sequence, kind) for kind in ("pending", "return"))
-        for role in RUNTIME_ROLES:
+        for role in STOP_ROLES:
             allowed.update(record_names(sequence, role))
             allowed.add(completion_name(sequence, role))
     # Unknown/staged bytes are retained, not guessed away as unsubmitted calls.
@@ -170,7 +169,7 @@ def _classify(records, *, binding):
         item = {"sequence": sequence, "method": method, "operation_id": pending["operation_id"],
                 "classification": classification}
         jobs, job_owner, job_ids, job_uncertain = [], None, set(), False
-        for role in RUNTIME_ROLES:
+        for role in STOP_ROLES:
             job_pending, job_return = record_names(sequence, role)
             if job_pending not in records:
                 continue

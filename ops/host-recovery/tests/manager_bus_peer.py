@@ -27,6 +27,7 @@ def main():
     native._declare('sd_bus_flush',integer,pointer)
     connection = bus._Connection(native,address.encode())
     mode, subscribed, stopped = sys.argv[2], False, []
+    numbers = {'fixture-dockerd.service':41, 'fixture-containerd.service':42, 'fixture-forward.service':43}
     object_slot = C.c_void_p()
     def signal(unit, number=41):
         result = b'failed' if mode=='failed' else b'canceled' if mode=='canceled' else b'done'
@@ -52,16 +53,16 @@ def main():
                 rows = stopped if mode=='pending' else []
                 arguments = [C.c_uint(len(rows))]
                 for unit in rows:
-                    number = 41 if unit=='fixture-dockerd.service' else 42
+                    number = numbers[unit]
                     arguments.extend((C.c_uint32(number),unit.encode(),b'stop',b'running',
                         (bus.JOB_PREFIX+str(number)).encode(),(bus.MANAGER_PATH+'/unit/fixture_service').encode()))
                 bus._ok(native.sd_bus_reply_method_return(message,b'a(usssoo)',*arguments))
             elif member=='StopUnit':
                 unit, policy = connection.fields(message,'ss')
-                if not subscribed or policy!='fail' or unit not in ('fixture-dockerd.service','fixture-containerd.service'):
+                if not subscribed or policy!='fail' or unit not in numbers:
                     raise RuntimeError('unexpected-fixed-stop')
                 stopped.append(unit)
-                number = 41 if unit=='fixture-dockerd.service' else 42
+                number = numbers[unit]
                 if mode not in ('absent','pending'): signal(unit,number)
                 if mode=='duplicate': signal(unit,number)
                 returned = number+100 if mode=='wrong-id' else number

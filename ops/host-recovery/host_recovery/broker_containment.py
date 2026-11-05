@@ -12,6 +12,7 @@ from .broker_authority import SupervisorPeerAuthority
 from .broker_operations import OperationJournal
 from .durable import Rejected, canonical, decode, digest
 from .manager import SystemdMutators
+from .manager_jobs import ForwardStopJobs
 from .topology import Topology, within
 
 
@@ -22,12 +23,17 @@ class ForwardContainment:
     one. All constructor inputs and command/helper lifetimes belong to the trusted
     embedding broker, not an IPC packet, worker callback or returned receipt.
     """
-    def __init__(self, *, authority, journal, mutators, topology):
+    def __init__(self, *, authority, journal, mutators, topology, jobs=None):
         if (not isinstance(authority, SupervisorPeerAuthority) or not isinstance(journal, OperationJournal)
                 or not isinstance(mutators, SystemdMutators) or not isinstance(topology, Topology)):
             raise Rejected("broker-containment-explicit-boundaries-required")
         self.authority, self.journal, self.mutators, self.topology = authority, journal, mutators, topology
         value = topology.manifest()
+        if jobs is not None and (not isinstance(jobs, ForwardStopJobs) or jobs.journal is not journal
+                or jobs.units != {"forward": mutators.forward}
+                or jobs.busctl_sha256 != value["tools"]["busctl"]["sha256"]):
+            raise Rejected("broker-containment-original-forward-jobs-required")
+        self.jobs = self._original_jobs = jobs
         owner, binding = decode(authority._owner), decode(authority._binding)
         if (authority._binding != journal._binding or topology.sha256 != binding["topology_sha256"]
                 or value["installation_id"] != binding["installation_id"]
@@ -52,13 +58,16 @@ class ForwardContainment:
         return digest(self._configuration)
 
     def _config(self):
-        return canonical({"schema": "host-recovery-forward-containment-target-v1",
+        value = {"schema": "host-recovery-forward-containment-target-v1",
             "binding_sha256": digest(self.authority._binding), "epoch_sha256": digest(self.journal._epoch),
             "topology_sha256": self.topology.sha256, "systemctl": self.mutators.systemctl,
-            "forward": asdict(self.mutators.forward), "recovery": asdict(self.mutators.recovery)})
+            "forward": asdict(self.mutators.forward), "recovery": asdict(self.mutators.recovery)}
+        if self.jobs is not None:
+            value["manager_jobs"] = decode(self.jobs.configuration())
+        return canonical(value)
 
     def _current(self, deadline):
-        if self.failed or self._config() != self._configuration:
+        if self.failed or self.jobs is not self._original_jobs or self._config() != self._configuration:
             raise Rejected("broker-containment-configuration-changed")
         self.journal._current()
         self.journal._time(deadline)
@@ -69,7 +78,7 @@ class ForwardContainment:
             raise Rejected("broker-containment-separate-supervisor-required")
         self.journal._current()
         self.journal._time(deadline)
-        if self._config() != self._configuration:
+        if self.jobs is not self._original_jobs or self._config() != self._configuration:
             raise Rejected("broker-containment-configuration-changed")
 
     def _observe(self, deadline):
@@ -78,6 +87,8 @@ class ForwardContainment:
         role = decode(self._role)
         if (row["User"], row["Group"]) != (str(role["uid"]), str(role["gid"])):
             raise Rejected("broker-containment-forward-owner-unconfirmed")
+        if self.jobs is not None and row["Job"] != "0" and not self.jobs.matches("forward", row["Job"]):
+            raise Rejected("broker-containment-untracked-forward-job")
         # A unit read may outlive the peer or original lock, and vice versa.
         # These are revoking point checks, never an atomic manager transaction.
         self._current(deadline)
@@ -101,12 +112,19 @@ class ForwardContainment:
             self.attempted = True
             try:
                 self._observe(deadline)
+                if self.jobs is not None:
+                    self.jobs.observe(deadline=deadline, check=lambda: self._observe(deadline))
                 operation = self.journal.pending("contain_forward", target_sha256=self.target_sha256,
                                                  deadline=deadline)
                 before = self._observe(deadline)
                 if not self._inactive(before):
-                    self.mutators.commands.run((self._systemctl, "--no-block", "stop", "--", self._forward.unit),
-                                               deadline=deadline)
+                    if self.jobs is None:
+                        self.mutators.commands.run((self._systemctl, "--no-block", "stop", "--", self._forward.unit),
+                                                   deadline=deadline)
+                    else:
+                        self.jobs.submit("forward", operation=operation, deadline=deadline,
+                                         check=lambda: self._observe(deadline))
+                        self.jobs.observe(deadline=deadline, check=lambda: self._observe(deadline))
                     before_kill = self._observe(deadline)
                     if not self._inactive(before_kill):
                         self.mutators.commands.run((self._systemctl, "kill", "--kill-whom=all", "--signal=SIGKILL",
@@ -123,7 +141,15 @@ class ForwardContainment:
                 populated_after = self.mutators.cgroups.populated(self._forward.cgroup)
                 trailing = self._observe(deadline)
                 stopped = stopped and final == trailing and populated_after is False
+                job_observations = {}
+                if self.jobs is not None:
+                    job_observations = self.jobs.observe(deadline=deadline, check=lambda: self._observe(deadline))
+                    stopped = stopped and all(value == "completion_done_observed" for value in job_observations.values())
+                    stopped = stopped and trailing == self._observe(deadline)
+                self._current(deadline)
                 return {"schema": "host-recovery-forward-containment-return-v1",
+                        "manager_job_observations": job_observations, "manager_jobs_retired": False,
+                        "activation_exclusion_proven": False,
                         "operation_id": operation["operation_id"], "return_sha256": digest(canonical(returned)),
                         "forward_stopped_observed": stopped, "pending_drained": False,
                         "complete_fence_proven": False, "recovery_execution_allowed": False,

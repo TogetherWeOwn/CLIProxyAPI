@@ -230,8 +230,36 @@ address environment variables and never reconnects or falls back to busctl.
   compatible queued stop, and a unit-name call is not an invocation-atomic effect.
   Concurrent activations, activation graph/actual launch exclusion, service/task
   containment, old-epoch death, pending drain and quarantine remain separate required
-  proofs. No numeric-job cancel, restoration/start or settlement is enabled. The
-  forward-unit adapter still lacks this tracked completion transport.
+  proofs. No numeric-job cancel, restoration/start or settlement is enabled.
+
+### Fixed forward-stop witness
+
+`ForwardStopJobs` reuses the same journal and completion validator for the exact
+single `forward` role and original `contain_forward` operation. It requires a
+continuous `ManagerJobSession`; no busctl fallback is offered for this path. A
+session accepts either the two runtime roles or the single forward role, never
+arbitrary, mixed or recovery targets. These remain separate sessions; no atomic
+cross-role generation or activation-exclusion proof is claimed.
+
+`ForwardContainment(jobs=...)` checks the same journal, forward binding and pinned
+helper configuration. Its operation pending precedes the job pending, which is
+durable before StopUnit. The actual returned ID/path precedes the separate
+completion record. Only that returned job may appear in the unit Job property;
+untracked inventory jobs, conflicting completion/inventory, peer/lock/input/unit
+loss and publication uncertainty refuse without resubmission or legacy fallback.
+Whole-unit kill remains fixed and separately revalidated when the original unit
+is still active. A failed/canceled/missing completion cannot yield a positive
+stopped observation. A unit already inactive does not invent a stop or completion.
+
+Runtime record slots 1/2 and their target schemas remain unchanged. Forward uses
+slot 3 and a distinct target schema. Retained history validates the role against
+the original operation method and rejects orphan or cross-method records. It
+never revives the original session, clears pending or grants drain. Legacy
+`ForwardContainment(jobs=None)` remains its prior non-authorizing observation
+boundary, without a continuous completion witness. No operational IPC/runner
+constructs either adapter; actual launch/activation exclusion, retirement, cold
+reconciliation and independent stopped-baseline/readiness verification remain
+required before recovery/start authority can be enabled.
 
 Actions runs a separate `dbus-run-session` native matrix using libsystemd and a
 synthetic manager on its disposable private bus. Only those tests replace the

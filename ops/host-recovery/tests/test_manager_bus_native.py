@@ -55,7 +55,7 @@ class NativeManagerBusTests(unittest.TestCase):
         self.assertEqual(self.line(peer),'ready')
         return peer,path,address
 
-    def session(self,mode='done',*,root_credentials=False):
+    def session(self,mode='done',*,root_credentials=False,forward=False):
         peer,path,address = self.peer(mode)
         library = Mock(spec=ProtectedFile)
         library.uid = library.gid = 0
@@ -74,7 +74,11 @@ class NativeManagerBusTests(unittest.TestCase):
                     raise durable.Rejected('wrong-private-manager-credentials')
             credential_patch = patch.object(bus.ManagerJobSession,'_credentials',credentials)
             credential_patch.start(); self.addCleanup(credential_patch.stop)
-        session = bus.ManagerJobSession(library=library,library_sha256=checksum,units=units(),
+        fixed = units()
+        if forward:
+            from test_manager import binding, observed
+            fixed = {'forward':binding(observed('fixture-forward.service','d'*32,'/fixture/forward'))}
+        session = bus.ManagerJobSession(library=library,library_sha256=checksum,units=fixed,
             deadline=time.monotonic()+5.,clock=time.monotonic,check=lambda:None)
         self.addCleanup(session.close)
         return session,peer
@@ -147,6 +151,34 @@ class NativeManagerBusTests(unittest.TestCase):
         self.assertEqual(self.line(peer),'released')
         with self.assertRaises(durable.Rejected): session.stop('dockerd')
         self.assertEqual(self.count(peer),0)
+
+    def test_real_forward_early_signal_uses_its_fixed_single_role(self):
+        session,peer = self.session(forward=True)
+        self.assertEqual(session.stop('forward'),bus.JOB_PREFIX+'43')
+        event = session.completions()['forward']
+        self.assertEqual((event['unit'],event['job_id'],event['result']),('fixture-forward.service',43,'done'))
+        self.assertEqual(self.count(peer),1)
+        with self.assertRaises(durable.Rejected):session.stop('dockerd')
+        self.assertEqual(self.count(peer),1)
+
+    def test_real_forward_absence_is_not_a_completion(self):
+        session,peer = self.session('absent',forward=True)
+        session.stop('forward')
+        self.assertEqual(session.jobs(),{})
+        self.assertEqual(session.completions(),{})
+        self.assertEqual(self.count(peer),1)
+
+    def test_real_forward_failed_completion_is_preserved(self):
+        session,peer = self.session('failed',forward=True)
+        session.stop('forward')
+        self.assertEqual(session.completions()['forward']['result'],'failed')
+        self.assertEqual(self.count(peer),1)
+
+    def test_real_forward_duplicate_signal_revokes_without_reissue(self):
+        session,peer = self.session('duplicate',forward=True)
+        with self.assertRaises(durable.Rejected):session.stop('forward')
+        self.assertEqual(self.count(peer),1)
+        self.assertTrue(session.failed)
 
     def test_production_root_pid1_guard_rejects_private_peer(self):
         with self.assertRaises(durable.Rejected): self.session(root_credentials=True)
