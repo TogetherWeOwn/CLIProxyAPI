@@ -133,6 +133,7 @@ class ForwardAdmissionTests(unittest.TestCase):
     setUp = forward_fixture.MaskedForwardStopTests.setUp
     make = forward_fixture.MaskedForwardStopTests.make
     current = forward_fixture.MaskedForwardStopTests.current
+    publish = forward_fixture.MaskedForwardStopTests.publish
     apply = forward_fixture.MaskedForwardStopTests.apply
     effects = forward_fixture.MaskedForwardStopTests.effects
 
