@@ -1,9 +1,9 @@
 """Actions-only real system-manager stop/completion and descendant evidence.
 
 Unlike the private-bus matrix, neither the bus address, manager credentials nor
-native transport is patched. Test-local library pins and transient fixture units
-are NOT independently approved production provisioning, activation exclusion,
-daemon/shim containment, a cold runtime barrier or recovery acceptance.
+native transport is patched. Test-local library pins and owned fixture units
+are NOT independently approved production provisioning, complete activation
+exclusion, daemon/shim containment, a cold runtime barrier or recovery acceptance.
 """
 import hashlib
 import json
@@ -47,7 +47,7 @@ def unit_name(suffix):
     run, attempt = os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"]
     if not all(re.fullmatch(r"[1-9][0-9]{0,19}", value) for value in (run, attempt)):
         raise AssertionError("bounded Actions run identity required")
-    if suffix not in ("active", "inactive"):
+    if suffix not in ("active", "inactive", "masked", "dependent"):
         raise AssertionError("fixed fixture suffix required")
     return "cpa-manager-fixture-" + run + "-" + attempt + "-" + suffix + ".service"
 
@@ -67,6 +67,74 @@ def cleanup_units(*suffixes):
             if listed():
                 raise AssertionError("owned transient fixture was not collected")
         print(json.dumps({"cleanup_unit": unit, "remaining_loaded": False}), flush=True)
+
+
+def activation_paths():
+    return {suffix: Path("/run/systemd/system") / unit_name(suffix)
+            for suffix in ("masked", "dependent")}
+
+
+def owned_fragment(path):
+    # Never overwrite or collect another unit, even on the disposable runner.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        raw = os.read(fd, 8193)
+        marker = ("# cpa-owned-fixture=" + path.name + "\n").encode()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+                or len(raw) > 8192 or not raw.startswith(marker)):
+            raise AssertionError("owned activation fragment unconfirmed")
+        return raw
+    finally:
+        os.close(fd)
+
+
+def cleanup_activation():
+    systemctl = shutil.which("systemctl", path=os.defpath)
+    paths = activation_paths()
+    mask = Path("/etc/systemd/system") / unit_name("masked")
+    if os.path.lexists(mask):
+        info = mask.lstat()
+        if not stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or os.readlink(mask) != "/dev/null":
+            raise AssertionError("owned activation mask unconfirmed")
+    for path in paths.values():
+        if os.path.lexists(path):
+            owned_fragment(path)
+    for suffix in ("dependent", "masked"):
+        unit = unit_name(suffix)
+        loaded = command(systemctl, "list-units", "--all", "--no-legend", "--plain", "--", unit).strip()
+        if loaded:
+            command(systemctl, "stop", "--", unit)
+        if command(systemctl, "list-units", "--all", "--no-legend", "--plain",
+                   "--state=active,activating,deactivating", "--", unit).strip():
+            raise AssertionError("owned activation fixture still active")
+    # Inspect immediately before each exact-name unlink. No prefix sweep, recursive
+    # deletion or systemctl unmask that could remove a different file is used.
+    for path in paths.values():
+        if os.path.lexists(path):
+            owned_fragment(path)
+            path.unlink()
+    if os.path.lexists(mask):
+        if not mask.is_symlink() or os.readlink(mask) != "/dev/null":
+            raise AssertionError("owned activation mask changed")
+        mask.unlink()
+    for parent in (Path("/run/systemd/system"), Path("/etc/systemd/system")):
+        fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    command(systemctl, "daemon-reload")
+    for path in paths.values():
+        loaded = command(systemctl, "list-units", "--all", "--no-legend", "--plain", "--", path.name).strip()
+        if loaded:
+            command(systemctl, "reset-failed", "--", path.name)
+        state = command(systemctl, "show", "--property=LoadState", "--value", "--", path.name).strip()
+        if state != b"not-found":
+            raise AssertionError("owned activation fixture still loadable")
+        print(json.dumps({"cleanup_unit": path.name, "load_state": "not-found",
+                          "fragment_removed": True, "mask_removed": True}), flush=True)
 
 
 @unittest.skipUnless(ENABLED, "real system-manager matrix requires its disposable Actions step")
@@ -128,6 +196,9 @@ class SystemManagerTests(unittest.TestCase):
                 "--property=RuntimeMaxSec=60s", "--property=User=0", "--property=Group=0",
                 "--property=LimitCORE=0", "--", sys.executable, "-I",
                 str(ROOT / "tests/manager_system_fixture.py"), str(self.root / "ready.sock"))
+        return self.running_binding(unit)
+
+    def running_binding(self, unit):
         with self.listener.accept()[0] as peer:
             peer.settimeout(5.)
             pid, uid, gid = struct.unpack("3i", peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
@@ -206,6 +277,82 @@ class SystemManagerTests(unittest.TestCase):
         print(json.dumps({"manager_bus": session.bus_id, "manager_owner": session.owner,
                           "completion": event}), flush=True)
 
+    def test_persistent_mask_blocks_fresh_launches_but_does_not_quiesce(self):
+        paths = activation_paths()
+        mask = Path("/etc/systemd/system") / unit_name("masked")
+        self.assertFalse(os.path.lexists(mask))
+        self.assertTrue(all(not os.path.lexists(path) for path in paths.values()))
+        self.addCleanup(cleanup_activation)
+        fragments = {
+            "masked": ("[Service]\nType=exec\nRestart=no\nKillMode=control-group\n"
+                "SendSIGKILL=yes\nTimeoutStopSec=1s\nRuntimeMaxSec=60s\nUser=0\nGroup=0\nLimitCORE=0\n"
+                "ExecStart=" + sys.executable + " -I " + str(ROOT / "tests/manager_system_fixture.py")
+                + " " + str(self.root / "ready.sock") + "\n"),
+            "dependent": ("[Unit]\nRequires=" + unit_name("masked") + "\nAfter=" + unit_name("masked")
+                + "\n[Service]\nType=oneshot\nExecStart=/usr/bin/true\nRemainAfterExit=yes\n")}
+        for suffix, path in paths.items():
+            raw = ("# cpa-owned-fixture=" + path.name + "\n" + fragments[suffix]).encode()
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            try:
+                self.assertEqual(os.write(fd, raw), len(raw))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            self.assertEqual(owned_fragment(path), raw)
+        command(self.systemctl, "daemon-reload")
+        command(self.systemctl, "start", "--", unit_name("masked"))
+        binding, pids = self.running_binding(unit_name("masked"))
+        self.assertEqual(binding.fragment_path, str(paths["masked"]))
+        # The /etc mask has higher load-path precedence than this /run fragment.
+        # O_EXCL symlink creation (without force/overwrite) preserves collisions.
+        os.symlink("/dev/null", mask)
+        fd = os.open(mask.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        command(self.systemctl, "daemon-reload")
+        masked = self.observe(binding.unit)
+        self.assertEqual(masked["LoadState"], "masked")
+        self.assertEqual(masked["ActiveState"], "active")
+        self.assertEqual(masked["InvocationID"], binding.invocation_id)
+        self.assertEqual(masked["MainPID"], str(pids["parent"]))
+        for key in ("parent_fd", "child_fd"):
+            poller = select.poll()
+            poller.register(pids[key], select.POLLIN)
+            self.assertFalse(poller.poll(0), "mask alone killed a fixture process")
+        print(json.dumps({"masked_active_unit": binding.unit, "mask_path": str(mask),
+                          "load_state": masked["LoadState"], "active_state": masked["ActiveState"],
+                          "same_invocation": True, "both_pidfds_live": True,
+                          "mask_is_quiescence": False}), flush=True)
+        # A separate authenticated stop/completion plus pidfd deaths is required.
+        self.stop_and_witness(binding)
+        self.stopped(binding, pids)
+        for suffix in ("masked", "dependent"):
+            result = subprocess.run((self.systemctl, "start", "--", unit_name(suffix)),
+                env={"PATH": os.defpath, "LANG": "C"}, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, timeout=15.)
+            self.assertNotEqual(result.returncode, 0, "masked fixture was startable")
+            print(json.dumps({"refused_start_unit": unit_name(suffix), "returncode": result.returncode,
+                              "stdout": result.stdout.decode(), "stderr": result.stderr.decode()}), flush=True)
+        final = self.observe(binding.unit)
+        self.assertEqual(final["LoadState"], "masked")
+        self.assertEqual(final["MainPID"], "0")
+        self.assertEqual(final["Job"], "0")
+        self.assertEqual(os.readlink(mask), "/dev/null")
+        dependent = self.observe(unit_name("dependent"))
+        self.assertEqual(dependent["MainPID"], "0")
+        self.assertEqual(dependent["Job"], "0")
+        executed = command(self.systemctl, "show", "--property=ExecMainStartTimestampMonotonic",
+                           "--value", "--", unit_name("dependent")).strip()
+        self.assertEqual(executed, b"0", "dependent payload actually executed")
+        poller = select.poll()
+        poller.register(self.listener, select.POLLIN)
+        self.assertFalse(poller.poll(0), "a replacement payload reached readiness")
+        print(json.dumps({"direct_and_dependency_starts_refused": True,
+                          "dependent_payload_executed": False, "pending_drained": False,
+                          "boot_exclusion_qualified": False, "complete_fence_proven": False}), flush=True)
+
     def test_actual_stop_kills_term_ignoring_parent_and_descendant(self):
         binding, pids = self.fixture("active")
         self.stop_and_witness(binding)
@@ -226,5 +373,6 @@ if __name__ == "__main__":
         if os.geteuid() != 0 or Path("/proc/1/comm").read_text().strip() != "systemd":
             raise SystemExit("disposable root system-manager required")
         cleanup_units("active", "inactive")
+        cleanup_activation()
     else:
         unittest.main(verbosity=2)

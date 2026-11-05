@@ -4,7 +4,7 @@ The `recovery-system-manager` job in `pr-test-build.yml` exercises the existing
 `ManagerJobSession` against **real systemd PID1 on a disposable GitHub-hosted
 Ubuntu runner**. It is separate from the synthetic private-bus matrix and ordinary
 Python discovery. Missing capabilities fail the separate job; ordinary discovery
-skips the two methods explicitly. Never run this fixture on a workstation, shared
+skips the three methods explicitly. Never run this fixture on a workstation, shared
 agent host, self-hosted runner or production machine.
 
 ## Boundaries exercised
@@ -76,10 +76,58 @@ The matching versioned source is systemd v255
 source correspondence, not permission to treat a missing field or absent job
 inventory as completion, retirement, activation exclusion or drain.
 
+## Persistent-mask reactivation qualification
+
+A third method adds exactly two run/attempt-scoped fixture fragments under
+`/run/systemd/system` and one exclusive `/etc/systemd/system/<owned-unit>` symlink
+to `/dev/null`. This is **test-only installation on the disposable hosted runner**,
+not an operational package installer or shared-host change. Existing files or
+masks refuse; no overwrite, force mask, general unmask or directory deletion is
+allowed. A root-owned marker and strict file metadata are checked before cleanup.
+There is no `[Install]` section, enablement, schedule or recurring resource.
+
+The method starts an inert TERM-ignoring parent/child service, captures its actual
+invocation, cgroup and live pidfds using the same helper as the transient methods,
+then creates/fsyncs the higher-precedence persistent mask and reloads the manager.
+It asserts that the mask **does not stop existing processes**: the original
+invocation/MainPID remains active and both pidfds remain live. A separate actual
+`ManagerJobSession` stop and matching completion must terminate them. Only then
+are a fresh direct start and a new `Requires`/`After` dependency start attempted;
+both must refuse. The dependency payload's actual execution timestamp must remain
+zero and no new process may reach the fixture readiness socket. Raw command
+statuses/errors and observed manager states are retained, not normalized into a
+complete-fence receipt.
+
+The test also exposes a necessary integration distinction: masking changes the
+manager's `LoadState` from `loaded` to `masked`. Existing strict containment
+adapters require their original loaded fragment/effective-property pins; they do
+**not** consume these fixture masks or gain permission to ignore changed pins.
+Operational integration needs a separately bound mask/configuration transition
+and its durable intent, rather than relaxing those readers or declaring mask
+presence to be authority.
+
+Cleanup is registered before writing either fragment or starting the payload. It
+stops only the two exact names, validates and removes only their owned fragments
+and mask, fsyncs both directories, reloads the manager and requires `not-found`.
+The separate `always()` cleanup repeats this exact procedure after failure or
+cancellation, with the existing runtime cap and ephemeral runner as backstops.
+No cleanup step selects targets from a prefix inventory. Missing or failing
+cleanup remains a failing Actions step.
+
+This qualification covers only **fresh** direct/dependency starts after masking
+and a completed owned stop. It does not prove cancellation of already-queued or
+already-authorized launches, template/alias/socket/timer/path/boot coverage, manager
+re-exec/reboot behavior, root/broker exclusivity, actual daemon/shim/task containment
+or old-epoch death. Durable mask intent/history, full pending-job retirement and
+actual-exec launch exclusion remain required. The fixture must not be mistaken
+for an implementation of those mechanisms. Tests execute only in Actions; no
+local full suite, manager contact or build substitutes for exact-head results.
+
 ## What a green job does not prove
 
 This fixture supplies manager ABI, actual completion, tested whole-unit descendant
-termination and cleanup evidence for these two inert units only. It does **not**
+termination and cleanup evidence for the inert units, plus the narrowly tested
+fresh-launch mask behavior above. It does **not**
 prove exclusive activation/actual-exec admission, arbitrary pending-job retirement,
 Docker task/shim placement, cold runtime teardown/quarantine relaunch, durable
 registration/drain, installation writer exclusion, independent baseline/readiness

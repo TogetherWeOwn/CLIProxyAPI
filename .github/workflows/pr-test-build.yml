@@ -147,14 +147,15 @@ jobs:
           set -euo pipefail
           {
             git rev-parse HEAD
-            # Only the two inert run-scoped transient units on this disposable
-            # hosted runner are touched. No daemon, deployment or host install.
+            # Only four exact inert run-scoped fixtures on this disposable hosted
+            # runner are touched: two transient units, two /run fragments and one
+            # /etc mask. No runtime daemon, deployment or shared-host installation.
             sudo env -i PATH=/usr/bin:/bin LANG=C CPA_RECOVERY_SYSTEM_MANAGER_TEST=1 \
               GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
               GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
               /usr/bin/timeout 120s /usr/bin/python3 -I ops/host-recovery/tests/test_manager_system_native.py
           } 2>&1 | tee "$RUNNER_TEMP/recovery-system-manager.log"
-      - name: Collect only owned transient fixtures
+      - name: Collect only owned manager fixtures
         if: always()
         shell: bash
         run: |
