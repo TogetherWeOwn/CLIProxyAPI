@@ -604,13 +604,49 @@ A returned call is explicitly **not drain**. Ambiguous/refused returns, persiste
 faults, deadline/clock/boot discontinuity, record drift and duplicate admission
 latch reconciliation required. All reopened history, even only an epoch or a
 returned record, stays closed and unmodified; pending/returned counts become
-unknown rather than a false zero. Cold teardown, quarantine inventory and crash
-reconciliation across broker/original-journal registration remain unimplemented.
-No reset/new epoch can turn an old pending record into replay permission.
+unknown rather than a false zero. Cold teardown, quarantine inventory and durable
+registration/settlement reconciliation remain unimplemented. No reset/new epoch
+can turn an old pending record into replay permission.
 
 New tests use synthetic owned files, injected EIO/ENOSPC and actual child-process
 SIGKILL at pending-publication barriers. They are authored for GitHub Actions,
 not locally executed full-system or privileged-broker qualification evidence.
+
+## Retained broker crash history (read-only, non-authorizing)
+
+`host_recovery/broker_history.py` binds retained broker records to the original
+`RecoveryInputs` produced by the protected original-journal loader. It derives
+the intent/request/topology binding from canonical original bytes, checks the
+original arm and capped recovery deadline, and refuses split, missing or
+conflicting publication. A historical validation instant checks request shape
+only; it is never a live authorization clock or a renewed recovery allowance.
+Independent approval, pinned directory handles, exclusion of writers and the
+original supervisor lock remain mandatory caller prerequisites.
+
+The private reader bounds names, file count and bytes, rejects stages/unknown
+entries and unsupported metadata, and rereads both bytes and metadata. It checks
+consecutive operation sequences, original binding/epoch digests, unique fixed
+methods, operation IDs/deadlines and exact return linkage. Missing returns are
+`unreturned`; recorded returns are `returned_unproven`, `ambiguous` or `refused`.
+Orphan returns, gaps and later operations after uncertainty reject the whole
+capture instead of reporting a partial count. Complete captured bytes receive a
+hash; this is correspondence, not approval or a durability attestation.
+
+Even epoch-only or fully returned history requires **cold reconciliation**.
+Changed broker/runtime epochs do not revive operations; a changed boot requires
+a separately authenticated cross-boot continuation. No elapsed time is inferred
+across boots. All reports keep `pending_drained`, complete fence, recovery
+execution, start, settlement and production acceptance **false**. A rejected
+capture supplies no counts. No records are deleted, repaired or rewritten, and
+inspection cannot make `OperationJournal` adopt or replay old work.
+
+Tests include actual synthetic original-journal loading, changed publications,
+malformed/partial history, nonblocking special-file refusal, injected read faults,
+late byte/name drift and separate-process SIGKILL before pending/return directory
+fsync. Those are filesystem/bookkeeping components, not installed broker IPC,
+a qualified cold barrier, quarantine inventory or full-system recovery evidence.
+The privileged fixed-method server/client, actual manager/kernel/runtime proof,
+original-lock/live-peer effect barriers and independent verifier remain due.
 
 ## Remaining acceptance work (not implemented or not proved)
 
