@@ -679,6 +679,34 @@ lock-owning separate processes with **scripted manager replies**, not installed
 systemd/runtime containment or root provisioning; use exact-head Actions results
 for their verification status.
 
+## Separate broker connected-session observation (non-authorizing)
+
+`broker_identity.py`, `privileged_broker.py` and `broker_client.py` add a fixed
+one-shot `SOCK_SEQPACKET` observation exchange. The client pins an explicitly
+expected root/root peer by kernel credentials/pidfd and fresh exact manager
+MainPID, invocation, unit/fragment/static properties, process cgroup and boot.
+The existing worker session still rejects root. Connection and message credentials
+must agree; descriptor passing, truncated packets and unsupported kernels refuse.
+
+The server borrows the original supervisor's connection and rechecks its original
+lock/manager/journal observations before receive, before response and after the
+transport ACK. The packet carries only the method, original binding/epoch hashes,
+fresh client nonce and a shortened original deadline. There is no caller path,
+argv, unit, module, daemon request or lock-descriptor override. Client response
+validation is exact (including boolean types) and repeats broker identity after
+the reply. Lost replies are not retried. The ACK is not durable publication or
+proof that the server's final check succeeded; a received response describes only
+the earlier point observation. No response/ACK authorizes any later operation.
+
+Only the original-supervisor projection of `observe_installation` exists. Every
+mutation method is denied before pending publication or any effect. No installed
+root service, socket/ACL/anchor provisioning, privileged effect adapter, runtime
+inventory, cold/quarantine barrier, drain, restore/start or settlement authority
+is implemented here. Existing runner denies remain intact. Protocol tests use a
+real synthetic lock-owning Unix peer with scripted manager replies; root identity
+and client tests use scripted credentials/transport, **not** a real root-service
+or full-system drill. New methods require exact-head Actions verification.
+
 ## Remaining acceptance work (not implemented or not proved)
 
 1. Persistent systemd supervisor with admission, durable active-attempt latch,
