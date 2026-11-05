@@ -116,6 +116,50 @@ with **scripted manager/stop/kill/cgroup replies**. They are not installed-syste
 root-broker or runtime qualification. New methods run on GitHub Actions; no local
 suite or build is required to substitute for exact-head Actions evidence.
 
+## Fixed dedicated-runtime containment submission
+
+`host_recovery/broker_runtime.py:RuntimeContainment` adds fixed stop submissions for
+both pinned dedicated runtime units, then one recursive `cgroup.kill` write through
+a separately preopened exact slice descriptor. **Embedding source only, not an
+installed broker, enabled IPC mutation or complete cold barrier.** There is no
+relaunch, runtime API, restoration, business-object start or settlement method.
+
+- Borrow the original supervisor authority and existing broker operation journal;
+  serialize the whole operation under its mutex without acquiring an installation
+  lock. Require the prior original forward-containment return, not a stopped/drained
+  assertion derived from that return. Publish/sync/read back the one-shot
+  `cold_quiesce_runtime` pending record before either stop or the kernel write.
+- Runtime units, numeric root ownership, effective configuration, fragment hashes,
+  original invocation/cgroups and dedicated slice match independent bindings and
+  the original topology. Stop dockerd before external containerd. Each submission
+  rechecks the live supervisor peer/flock, original inputs, original capped clock,
+  unit and configuration. No caller argv, arbitrary unit, PID or numeric job cancel
+  is supported. Manager unit-name calls remain non-atomic with invocation reads.
+- `RuntimeDomain` borrows an independently pinned device/inode descriptor. Recheck
+  its exact no-follow path and cgroup2 mount/fd mount-ID correspondence before use;
+  refuse bind/subtree mounts, disappearance or recreation. The calling broker must
+  be outside the target. Open only descriptor-relative `cgroup.kill`, validate the
+  kernel file and run the broker's internal authority check immediately before and
+  after the single write. No PID fallback, retries or alternate cgroup path.
+- Fresh unit and recursive populated observations bracket return persistence.
+  `runtime_empty_observed` describes **point observations only**. Manager retirement,
+  activation exclusion, complete containment qualification, quarantine inventory,
+  pending drain, complete fence, restoration/start/settlement and production
+  acceptance remain false even if the slice appears empty.
+- Any queued manager job refuses; a stop that leaves a job pending retains an
+  unresolved operation. This adapter cannot retire/cancel it or resume after a lost
+  reply. Missing/malformed events, failed/short kill writes, D-state population,
+  peer/input/clock/configuration drift and uncertain persistence retain history and
+  close the adapter/journal. Its embedding owner still must attempt independent
+  escalation despite storage faults and retain helper ownership.
+
+Tests use real synthetic lock/Unix peers and ordinary disposable files, **scripted
+manager replies and a patched cgroup2 mount boundary**. The proc mount parser has
+separate synthetic tests. No test writes to the host's cgroup hierarchy or calls
+its systemd/daemon. These are component negatives, not installed privilege,
+activation/retirement, kernel-kill or complete runtime qualification. Exact-head
+GitHub Actions, not a local suite/build, supplies execution evidence.
+
 ## Required next boundaries
 
 The independently provisioned privileged broker remains unimplemented. It must
