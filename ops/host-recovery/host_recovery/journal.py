@@ -56,6 +56,20 @@ def validate_intent(value):
         raise Rejected("intent-policy-pin-mismatch")
 
 
+def validate_registration(record, intent):
+    """Validate a stopped candidate record, never grant adoption or startup."""
+    expected = {"object_id", "image_id", "ownership_id", "running", "restart_policy"}
+    if type(record) is not dict or set(record) != expected:
+        raise Rejected("daemon-registration-schema")
+    object_id = record["object_id"]
+    if type(object_id) is not str or not OBJECT_ID.fullmatch(object_id) or object_id == intent["old_object_id"]:
+        raise Rejected("daemon-registration-id")
+    if (record["image_id"] != intent["candidate_image_id"]
+            or record["ownership_id"] != intent["candidate_ownership_id"]
+            or record["running"] is not False or record["restart_policy"] != "no"):
+        raise Rejected("daemon-registration-not-stopped-and-fenced")
+
+
 class Journal:
     def __init__(self, fd, *, fault=None):
         st = os.fstat(fd)
@@ -108,16 +122,8 @@ class Journal:
     def register(self, record):
         if self.intent is None or self.armed is None or self.reopened or self.uncertain or self.terminal or self.forward_revoked:
             raise Rejected("registration-not-authorized")
-        expected = {"object_id", "image_id", "ownership_id", "running", "restart_policy"}
-        if type(record) is not dict or set(record) != expected:
-            raise Rejected("daemon-registration-schema")
+        validate_registration(record, self.intent)
         object_id = record["object_id"]
-        if type(object_id) is not str or not OBJECT_ID.fullmatch(object_id) or object_id == self.intent["old_object_id"]:
-            raise Rejected("daemon-registration-id")
-        if (record["image_id"] != self.intent["candidate_image_id"]
-                or record["ownership_id"] != self.intent["candidate_ownership_id"]
-                or record["running"] is not False or record["restart_policy"] != "no"):
-            raise Rejected("daemon-registration-not-stopped-and-fenced")
         if object_id in self.registered:
             if self.registered[object_id] != record:
                 raise Rejected("daemon-registration-conflict")

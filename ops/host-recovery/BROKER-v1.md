@@ -5,6 +5,11 @@ broker, complete host fence, recovery execution/outcome oracle or production
 acceptance.** No service is installed or started by its tests. No credential,
 permission, live configuration or release pin changes are provided.
 
+The separate [whole-runtime inventory observation](QUARANTINE-INVENTORY-v1.md)
+compares unfiltered full daemon IDs and fixed containerd namespace/task metadata
+with the protected original journal. It remains read-only/non-authorizing and
+neither implements nor substitutes for activation exclusion or the cold barrier.
+
 ## Same-owner dispatch and result composition
 
 `host_recovery/broker.py:dispatch_claim` adds an opt-in enqueue-to-result path
