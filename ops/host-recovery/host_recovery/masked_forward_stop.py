@@ -158,6 +158,7 @@ class _MaskedFixedStop:
                 canceled = self.cancellation.cancel(operation=operation)
                 self._execution_current()
                 self.reload.reload(operation=operation)
+                self.session._watch_referenced_units()
                 self._execution_current()
                 # Even an inactive projection requires its own exact stop reply
                 # and completion. Cancellation evidence cannot supply either.

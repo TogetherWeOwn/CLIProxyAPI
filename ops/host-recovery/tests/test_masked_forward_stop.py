@@ -97,6 +97,36 @@ class MaskedForwardStopTests(unittest.TestCase):
         self.assertEqual(self.connection.references[self.units['forward'].unit], [self.connection.client_name])
         self.assertFalse(result['activation_exclusion_proven'] or result['complete_fence_proven'])
 
+    def test_removal_watch_begins_only_after_durable_reload_return(self):
+        original = ScriptedConnection.match
+        reached = []
+        def match(connection, rule, callback):
+            if "member='UnitRemoved'" in rule:
+                reached.append(rule)
+                self.assertTrue((self.path_state/'operation-01-mask-reload-return.json').exists())
+                self.assertIn('Reload', self.effects())
+                self.assertNotIn('StopUnit', self.effects())
+            return original(connection, rule, callback)
+        with patch.object(ScriptedConnection, 'match', match): self.apply()
+        self.assertEqual(len(reached), 1)
+
+    def test_fixed_unit_removal_after_reload_refuses_without_outer_return(self):
+        reached = []
+        def hook(method):
+            if method == 'StopUnit':
+                callback = next(function for rule,function in self.connection.matches if "member='UnitRemoved'" in rule)
+                def removed():
+                    reached.append(method)
+                    callback(dict(signature='so', member='UnitRemoved', cookie=44,
+                        fields=[self.units['forward'].unit, self.session._fixed_unit_paths['forward']]))
+                self.connection.queue.append(removed)
+        self.hook = hook
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(reached, ['StopUnit'])
+        self.assertNotIn('contain_forward', self.journal._returned)
+        self.assertFalse(self.sequence.completed)
+        self.assertTrue(self.session.failed)
+
     def test_denied_reference_leaves_original_pending_and_no_mask_or_stop(self):
         reached = []
         def hook(method):

@@ -277,6 +277,7 @@ class FixedUnitReferenceTests(unittest.TestCase):
     session = ManagerSessionTests.session
 
     def removal(self, session, **overrides):
+        if not session._referenced_units_watched: session._watch_referenced_units()
         message = dict(signature='so', member='UnitRemoved', cookie=20,
             fields=[session.units['dockerd'].unit, bus.MANAGER_PATH + '/unit/dockerd_service'])
         message.update(overrides)
@@ -327,14 +328,16 @@ class FixedUnitReferenceTests(unittest.TestCase):
         with self.assertRaises(durable.Rejected): session.identity()
         self.assertTrue(session.failed)
 
-    def test_removal_before_reference_acknowledgment_refuses(self):
-        session = self.session()
-        def hook(method):
-            if method == 'RefUnit': self.removal(session)
-        self.connection.call_hook = hook
-        with self.assertRaises(durable.Rejected): session._retain_fixed_units()
-        self.assertEqual(sum(method == 'RefUnit' for _,method,_ in self.connection.calls), 1)
+    def test_post_reload_removal_match_requires_acknowledgment(self):
+        session = self.session(); session._retain_fixed_units()
+        def unacknowledged(connection, rule, callback):
+            self.assertIn("member='UnitRemoved'", rule)
+            connection.wait_hook = lambda:setattr(self, 'now', 1090.)
+            return []
+        with patch.object(ScriptedConnection, 'match', unacknowledged):
+            with self.assertRaises(durable.Rejected): session._watch_referenced_units()
         self.assertTrue(session.failed)
+        self.assertFalse(any(method == 'StopUnit' for _,method,_ in self.connection.calls))
 
     def test_other_unit_removal_is_not_adopted_or_a_fixed_removal(self):
         session = self.session(); session._retain_fixed_units()

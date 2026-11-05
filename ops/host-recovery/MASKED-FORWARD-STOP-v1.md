@@ -48,24 +48,30 @@ than being treated as successful merely because a later unit looks inactive.
 
 ## Same-connection unit-object retention
 
-Before mask publication, job watching or execution snapshots, the sequence
-acknowledges an authenticated `UnitRemoved` match and calls fixed-name `RefUnit`
-once per role on the original connection. It reads each exact unit object path
-and the typed `Unit.Refs` list, requiring exactly one reference owned by that
-connection's native unique bus name. Each subsequent execution snapshot checks
-the retained path and own reference again. A successful method return alone is
-not reference readback. Missing/duplicate own references, changed paths/client
-identity, removal of a fixed name or retained path, unsupported properties,
-permission refusal, lost replies and original-deadline loss permanently refuse.
-Unrelated removals are not adopted; all observed removals share the existing
-bounded event count and increasing manager-sender cookie.
+Before mask publication, job watching or execution snapshots, the sequence calls
+fixed-name `RefUnit` once per role on the original connection. It reads each exact
+unit object path and the typed `Unit.Refs` list, requiring exactly one reference
+owned by that connection's native unique bus name. Each subsequent execution
+snapshot checks the retained path and own reference again. A successful method
+return alone is not reference readback. Missing/duplicate own references, changed
+paths/client identity, unsupported properties, permission refusal, lost replies
+and original-deadline loss permanently refuse.
 
-This prevents ordinary manager garbage collection from silently resetting the
-sampled unit object's execution metadata. It does not freeze configuration,
-exclude execution, fence reexec/boot or prove control-process/writer coverage.
-The manager owns sender references for the original connection's lifetime;
-closing the connection releases them. A partial/ambiguous reference sequence is
-never retried, unreferenced-and-recreated or reconstructed from saved state.
+**Intentional reload is a reconstruction boundary, not uninterrupted lifetime.**
+After the separately durable reload return, acknowledge a `UnitRemoved` match
+and revalidate own references before any stop submission. A removal of a fixed
+name or retained path from that point onward refuses. Unrelated removals are not
+adopted; observed removals share the bounded event count and increasing manager
+cookie. No removal watcher is claimed across the deliberate reload: systemd
+v255 frees units and deserializes their state/references during `manager_reload`.
+Pre/post reference/path/timestamp readbacks do not prove continuity across it.
+
+References prevent ordinary garbage collection between reconstruction boundaries.
+They do not freeze configuration, exclude execution, fence reload/reexec/boot or
+prove control-process/writer coverage. The manager owns sender references for
+the original connection's lifetime; closing the connection releases them. A
+partial/ambiguous reference sequence is never retried, unreferenced-and-recreated
+or reconstructed from saved state.
 No separate connection or cleanup command extends the original deadline.
 The original pending target binds `sender-ref-unit-v1`, and receipts expose only
 `fixed_unit_reference_count`, not bus names or unit paths. All authority-denial
@@ -73,9 +79,11 @@ fields remain unchanged. Permission failure is not permission to change policy.
 
 REA/source semantics: systemd v255's [manager RefUnit dispatch](https://github.com/systemd/systemd/blob/v255/src/core/dbus-manager.c)
 loads and validates the unit; its [unit reference method and Refs getter](https://github.com/systemd/systemd/blob/v255/src/core/dbus-unit.c)
-track the calling sender and report each sender once per reference. These source
-references are not qualification of another manager version or an installed
-privilege policy. Components use scripted ABI/manager boundaries; the separate
+track the calling sender and report each sender once per reference. The
+[manager reload implementation](https://github.com/systemd/systemd/blob/v255/src/core/manager.c)
+and `unit_free` explicitly remove units before deserialization; that boundary
+cannot be advertised as the same in-memory object. These source references are
+not qualification of another manager version or an installed privilege policy. Components use scripted ABI/manager boundaries; the separate
 real-manager fixture requires independent `systemctl show Refs` readback for the
 same live connection after both composed shutdown paths.
 

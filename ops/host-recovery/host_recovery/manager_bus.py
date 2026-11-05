@@ -286,7 +286,7 @@ class ManagerJobSession:
         self._cancel_watched = False
         self._kill_attempted = set()
         self._fixed_jobs_watched, self._created = False, {}
-        self._reference_attempted, self._fixed_unit_paths = False, {}
+        self._reference_attempted, self._fixed_unit_paths, self._referenced_units_watched = False, {}, False
         try:
             self._current()
             if library.checksum() != library_sha256:
@@ -472,10 +472,6 @@ class ManagerJobSession:
                 raise Rejected("manager-bus-fixed-unit-reference-exhausted")
             self._reference_attempted = True
             self._reference_owner = self._connection.unique_name()
-            rule = "type='signal',sender='%s',path='%s',interface='%s.Manager',member='UnitRemoved'" % (
-                self.owner, MANAGER_PATH, MANAGER)
-            self._until(self._connection.match(rule, self._unit_removed))
-            self.identity()
             for role, unit in self.units.items():
                 self._call(self.owner, MANAGER + ".Manager", "RefUnit", "s", (unit.unit,), "")
                 self.identity()
@@ -512,9 +508,31 @@ class ManagerJobSession:
             self.failed = True
             raise Rejected("manager-bus-unit-reference-lost") from None
 
+    def _watch_referenced_units(self):
+        """After deliberate reload, watch the retained stop-phase objects.
+
+        Manager Reload itself reconstructs units. Never label pre/post reference
+        readback as uninterrupted object lifetime across that transition.
+        """
+        try:
+            self.identity()
+            if (not self._reference_attempted or self._referenced_units_watched or self._attempted
+                    or set(self._fixed_unit_paths) != set(self.units)):
+                raise Rejected("manager-bus-reference-watch-original-units-required")
+            self._referenced_units_watched = True
+            rule = "type='signal',sender='%s',path='%s',interface='%s.Manager',member='UnitRemoved'" % (
+                self.owner, MANAGER_PATH, MANAGER)
+            self._until(self._connection.match(rule, self._unit_removed))
+            for role, path in self._fixed_unit_paths.items():
+                self._fixed_unit_reference(role, path)
+            self.identity()
+        except BaseException:
+            self.failed = True
+            raise Rejected("manager-bus-reference-watch-unconfirmed") from None
+
     def _unit_removed(self, message):
         connection = self._connection
-        if (not self._reference_attempted
+        if (not self._referenced_units_watched
                 or _text(connection.lib.sd_bus_message_get_sender(message)) != self.owner
                 or _text(connection.lib.sd_bus_message_get_path(message)) != MANAGER_PATH
                 or _text(connection.lib.sd_bus_message_get_interface(message)) != MANAGER + ".Manager"
