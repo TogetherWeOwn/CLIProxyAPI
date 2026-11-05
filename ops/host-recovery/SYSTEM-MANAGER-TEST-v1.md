@@ -4,7 +4,7 @@ The `recovery-system-manager` job in `pr-test-build.yml` exercises the existing
 `ManagerJobSession` against **real systemd PID1 on a disposable GitHub-hosted
 Ubuntu runner**. It is separate from the synthetic private-bus matrix and ordinary
 Python discovery. Missing capabilities fail the separate job; ordinary discovery
-skips the six methods explicitly. Never run this fixture on a workstation, shared
+skips the seven methods explicitly. Never run this fixture on a workstation, shared
 agent host, self-hosted runner or production machine.
 
 ## Boundaries exercised
@@ -37,6 +37,18 @@ agent host, self-hosted runner or production machine.
   remains, require recursive `populated=0`; a removed group is recorded only in
   conjunction with this actual completed owned stop and both process deaths.
   A second method checks a fresh stop/completion for an already stopped unit.
+
+## Unexpected manager reload negative
+
+A seventh method reuses the exact owned transient `active` fixture and real
+root/PID1 transport. After original-connection references and acknowledged
+post-reload removal/reloading matches, a real test-only `daemon-reload` must
+revoke the session on its typed `Reloading(true)` signal, without a fixed stop
+submission. Bus/sender identity stays equal and both pidfds must remain live;
+rejection is not quiescence. A separate stop/completion/whole-unit KILL then
+requires both process deaths. This tests fail-closed observation, not a manager
+reload interlock, installed authority, reexec/boot continuity or complete fence.
+The existing exact-name cleanup and runtime cap apply without another resource.
 
 ## Startup, bounded use and cleanup
 

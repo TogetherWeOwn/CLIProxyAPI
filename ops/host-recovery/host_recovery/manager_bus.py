@@ -142,9 +142,13 @@ class _Connection:
 
     def basic(self, message, kind):
         value = (C.c_uint8() if kind == "y" else C.c_uint32() if kind == "u" else
-                 C.c_uint64() if kind == "t" else C.c_char_p())
+                 C.c_uint64() if kind == "t" else C.c_int() if kind == "b" else C.c_char_p())
         if self.lib.sd_bus_message_read_basic(message, kind.encode(), C.byref(value)) <= 0:
             raise Rejected("manager-bus-message-field-required")
+        if kind == "b":
+            if value.value not in (0, 1):
+                raise Rejected("manager-bus-boolean-unconfirmed")
+            return bool(value.value)
         return value.value if kind in ("u", "y", "t") else _text(value.value)
 
     def fields(self, message, signature):
@@ -189,7 +193,7 @@ class _Connection:
             _ok(self.lib.sd_bus_message_exit_container(message))
             values = [result]
         else:
-            if any(kind not in "sou" for kind in signature):
+            if any(kind not in "soub" for kind in signature):
                 raise Rejected("manager-bus-fixed-signature-required")
             values = [self.basic(message, kind) for kind in signature]
         if self.lib.sd_bus_message_at_end(message, 1) != 1:
@@ -287,6 +291,7 @@ class ManagerJobSession:
         self._kill_attempted = set()
         self._fixed_jobs_watched, self._created = False, {}
         self._reference_attempted, self._fixed_unit_paths, self._referenced_units_watched = False, {}, False
+        self._reload_change_seen = None
         try:
             self._current()
             if library.checksum() != library_sha256:
@@ -523,12 +528,35 @@ class ManagerJobSession:
             rule = "type='signal',sender='%s',path='%s',interface='%s.Manager',member='UnitRemoved'" % (
                 self.owner, MANAGER_PATH, MANAGER)
             self._until(self._connection.match(rule, self._unit_removed))
+            rule = "type='signal',sender='%s',path='%s',interface='%s.Manager',member='Reloading'" % (
+                self.owner, MANAGER_PATH, MANAGER)
+            self._until(self._connection.match(rule, self._manager_reloading))
             for role, path in self._fixed_unit_paths.items():
                 self._fixed_unit_reference(role, path)
             self.identity()
         except BaseException:
             self.failed = True
             raise Rejected("manager-bus-reference-watch-unconfirmed") from None
+
+    def _manager_reloading(self, message):
+        # Either edge is unexpected after the deliberate Reload return. A false
+        # edge alone cannot establish that no reconstruction happened in a gap.
+        connection = self._connection
+        if (not self._referenced_units_watched
+                or _text(connection.lib.sd_bus_message_get_sender(message)) != self.owner
+                or _text(connection.lib.sd_bus_message_get_path(message)) != MANAGER_PATH
+                or _text(connection.lib.sd_bus_message_get_interface(message)) != MANAGER + ".Manager"
+                or _text(connection.lib.sd_bus_message_get_member(message)) != "Reloading"):
+            raise Rejected("manager-bus-reload-sender-unconfirmed")
+        active, = connection.fields(message, "b")
+        cookie = C.c_uint64()
+        _ok(connection.lib.sd_bus_message_get_cookie(message, C.byref(cookie)))
+        self._event_count += 1
+        if (type(active) is not bool or self._event_count > MAX_EVENTS or cookie.value <= self._last_cookie):
+            raise Rejected("manager-bus-reload-event-unconfirmed")
+        self._last_cookie = cookie.value
+        self._reload_change_seen = active
+        raise Rejected("manager-bus-unexpected-reload-transition")
 
     def _unit_removed(self, message):
         connection = self._connection

@@ -24,7 +24,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from host_recovery.durable import canonical, digest
+from host_recovery.durable import Rejected, canonical, digest
 from host_recovery.installation import DirectoryApproval, open_approved_directory
 from host_recovery.manager import PROPERTIES, UnitBinding, properties, static_properties
 from host_recovery.manager_bus import MAX_EVENTS, RESULTS, ManagerJobSession, _ok, _text
@@ -445,6 +445,33 @@ class SystemManagerTests(unittest.TestCase):
         self.assertFalse(receipt["manager_reload_performed"])
         print(json.dumps({"source_mask_publication": receipt}), flush=True)
         return masks
+
+    def test_unexpected_reload_revokes_referenced_session_before_any_stop(self):
+        binding, pids = self.fixture("active")
+        session = self.session(binding)
+        session._retain_fixed_units()
+        session._watch_referenced_units()
+        original = (session.bus_id, session.owner)
+        command(self.systemctl, "daemon-reload")
+        with self.assertRaises(Rejected):
+            session.identity()
+        self.assertTrue(session.failed)
+        self.assertIs(session._reload_change_seen, True)
+        self.assertEqual((session.bus_id, session.owner), original)
+        self.assertEqual(session._submitted, {})
+        with self.assertRaises(Rejected):
+            session.stop("forward")
+        for key in ("parent_fd", "child_fd"):
+            poller = select.poll()
+            poller.register(pids[key], select.POLLIN)
+            self.assertFalse(poller.poll(0), "reload refusal is not process termination")
+        print(json.dumps({"unexpected_reload_signal_refused": True,
+                          "manager_identity_unchanged": True, "both_pidfds_still_live": True,
+                          "refused_session_stop_count": len(session._submitted),
+                          "complete_fence_proven": False}), flush=True)
+        # Independent fixture cleanup still needs its own stop/completion/deaths.
+        self.stop_and_witness(binding, kill=True)
+        self.stopped(binding, pids)
 
     def test_persistent_mask_blocks_fresh_launches_but_does_not_quiesce(self):
         self.masked_fixture(composed=False)

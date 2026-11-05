@@ -49,7 +49,7 @@ class _MaskedFixedStop:
             "masks": decode(self.masks.configuration()), "jobs": decode(self.jobs.configuration()),
             "cancellation": decode(self.cancellation.configuration()), "reload": decode(self.reload.configuration()),
             "kill_whom": "all", "kill_signal": 9, "fixed_job_admission_witness": "job-new-v1",
-            "fixed_unit_reference": "sender-ref-unit-v1"})
+            "fixed_unit_reference": "sender-ref-unit-v1", "post_reload_transition_witness": "reloading-v1"})
 
     @property
     def target_sha256(self):

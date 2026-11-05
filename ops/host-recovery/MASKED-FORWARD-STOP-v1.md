@@ -66,6 +66,25 @@ cookie. No removal watcher is claimed across the deliberate reload: systemd
 v255 frees units and deserializes their state/references during `manager_reload`.
 Pre/post reference/path/timestamp readbacks do not prove continuity across it.
 
+The same post-return barrier also acknowledges a `Manager.Reloading` signal match.
+Either boolean edge from then onward revokes the session, even if the manager's
+unique sender, bus identity, reference list and sampled timestamps stay equal.
+A lone false edge is not permission to adopt a reconstructed state. Headers, exact
+boolean signature/value, shared event bound and increasing manager cookie are
+validated before recording the observed edge; malformed or stale events refuse.
+The native decoder reads D-Bus booleans through an `int` pointer and rejects values
+other than zero/one. No operational effect or new deadline is introduced.
+
+This is a post-subscription rejection witness, **not prevention of reload** or
+continuity across the deliberate reload, the subscription gap, reexec or boot.
+Systemd v255 sends `Reloading(false)` before the pending Reload method reply in
+`manager_dispatch_dbus_queue`; the watcher starts only after that reply and its
+durable return. The original target also binds `reloading-v1`. The separate
+native negative requires an actual additional reload to revoke the watched
+session while both inert fixture processes remain live; its cleanup uses an
+independent stop/completion and requires both pidfds dead. Authored tests are
+not passing evidence until exact-head Actions finishes.
+
 References prevent ordinary garbage collection between reconstruction boundaries.
 They do not freeze configuration, exclude execution, fence reload/reexec/boot or
 prove control-process/writer coverage. The manager owns sender references for
