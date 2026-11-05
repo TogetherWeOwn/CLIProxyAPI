@@ -12,6 +12,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -23,3 +26,77 @@ jobs:
         run: |
           go build -o test-output ./cmd/server
           rm -f test-output
+
+  go-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Full Go suite at PR head
+        shell: bash
+        run: go test -count=1 ./... 2>&1 | tee "$RUNNER_TEMP/go-tests.log"
+      - name: Retain raw Go result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-tests-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/go-tests.log
+          if-no-files-found: error
+
+  recovery-components:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Record component environment
+        run: |
+          git rev-parse HEAD
+          python3 --version
+          uname -sr
+          systemd-analyze --version
+          go version
+      - name: Python recovery components at PR head
+        shell: bash
+        run: python3 -I ops/host-recovery/tests/run.py 2>&1 | tee "$RUNNER_TEMP/recovery-components.log"
+      - name: Retain raw component result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-components-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/recovery-components.log
+          if-no-files-found: error
+
+  recovery-race:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Affected Go race suites at PR head
+        shell: bash
+        run: |
+          go test -race -count=1 ./internal/recoverycorrelation ./internal/api/middleware ./internal/config ./internal/pluginhost ./internal/client/codex/live ./sdk/api/handlers ./sdk/api/handlers/openai ./ops/host-recovery/inputguard 2>&1 | tee "$RUNNER_TEMP/recovery-race.log"
+      - name: Retain raw race result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-race-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/recovery-race.log
+          if-no-files-found: error

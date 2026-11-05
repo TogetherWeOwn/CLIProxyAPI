@@ -551,6 +551,36 @@ failure. No external notification sink, installed independent service, superviso
 admission wiring, restart persistence or alternate route is implemented. Do not
 use a challenge alone to pass the full operational alert prerequisite.
 
+## Original lock observation and CI
+
+`host_recovery/lock_observation.py` adds a read-only Linux component for the
+privileged boundary's original-lock prerequisite. An already pidfd-bound Unix
+peer must hold the exact independently pinned journal directory's whole-file
+exclusive `FLOCK`, with that peer's PID in its own `/proc/<pid>/fdinfo/<fd>`.
+The descriptor number is only an observation hint. The observer never acquires
+another installation lock or receives/duplicates the supervisor's lock-bearing
+open file description. It checks protected path identity, directory metadata,
+PID/user namespaces, live connection, deadline and two fresh kernel reads.
+Unsupported/ambiguous observations permanently revoke that observer.
+
+This is **point-in-time evidence only**, not an atomic mutation lease, manager
+MainPID/invocation authentication, complete fence or start authority. It cannot
+prove that a trusted supervisor never released/reacquired its lock between reads.
+The separately provisioned broker must bind it to the original manager/request,
+qualified filesystem and protected approval roots and recheck inside each effect
+barrier. The fixed privileged server, durable operation/epoch state machine,
+cold runtime teardown and independent oracle are still required. No existing
+runner consumes the observation; supervisor/worker denies remain intact.
+
+The `pr-test-build` GitHub Actions workflow checks out the exact PR head and runs
+the required server build, uncached full Go suite, affected race suites and the
+complete isolated-mode Python component suite. Raw test logs are retained as
+SHA-named Actions artifacts even on test failure. Component passes do not qualify
+installed systemd/runtime containment, replay drain, recovery timing or production.
+Use exact-head Actions run/job links as CI evidence; do not substitute local
+full-suite/build transcripts. Local execution is limited to a permitted focused
+reproduction, never a CI mirror.
+
 ## Remaining acceptance work (not implemented or not proved)
 
 1. Persistent systemd supervisor with admission, durable active-attempt latch,
