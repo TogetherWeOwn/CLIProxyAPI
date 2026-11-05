@@ -5,6 +5,7 @@ native transport is patched. Test-local library pins and owned fixture units
 are NOT independently approved production provisioning, complete activation
 exclusion, daemon/shim containment, a cold runtime barrier or recovery acceptance.
 """
+import ctypes as C
 import hashlib
 import json
 import os
@@ -26,7 +27,8 @@ sys.path.insert(0, str(ROOT))
 from host_recovery.durable import canonical, digest
 from host_recovery.installation import DirectoryApproval, open_approved_directory
 from host_recovery.manager import PROPERTIES, UnitBinding, properties, static_properties
-from host_recovery.manager_bus import ManagerJobSession
+from host_recovery.manager_bus import MAX_EVENTS, RESULTS, ManagerJobSession, _ok, _text
+from host_recovery.manager_jobs import MANAGER, MANAGER_PATH, job_path
 from host_recovery.protected_file import ProtectedFile
 
 ENABLED = (os.environ.get("CPA_RECOVERY_SYSTEM_MANAGER_TEST") == "1"
@@ -47,7 +49,8 @@ def unit_name(suffix):
     run, attempt = os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"]
     if not all(re.fullmatch(r"[1-9][0-9]{0,19}", value) for value in (run, attempt)):
         raise AssertionError("bounded Actions run identity required")
-    if suffix not in ("active", "inactive", "masked", "dependent"):
+    if suffix not in ("active", "inactive", "masked", "dependent", "queue-control", "gate-control",
+                      "queue-fenced", "gate-fenced"):
         raise AssertionError("fixed fixture suffix required")
     return "cpa-manager-fixture-" + run + "-" + attempt + "-" + suffix + ".service"
 
@@ -69,9 +72,10 @@ def cleanup_units(*suffixes):
         print(json.dumps({"cleanup_unit": unit, "remaining_loaded": False}), flush=True)
 
 
-def activation_paths():
-    return {suffix: Path("/run/systemd/system") / unit_name(suffix)
-            for suffix in ("masked", "dependent")}
+def activation_paths(*, queued=False):
+    suffixes = (("queue-control", "queue-fenced", "gate-control", "gate-fenced")
+                if queued else ("masked", "dependent"))
+    return {suffix: Path("/run/systemd/system") / unit_name(suffix) for suffix in suffixes}
 
 
 def owned_fragment(path):
@@ -90,10 +94,10 @@ def owned_fragment(path):
         os.close(fd)
 
 
-def cleanup_activation():
+def cleanup_activation(*, queued=False):
     systemctl = shutil.which("systemctl", path=os.defpath)
-    paths = activation_paths()
-    mask = Path("/etc/systemd/system") / unit_name("masked")
+    paths = activation_paths(queued=queued)
+    mask = Path("/etc/systemd/system") / unit_name("queue-fenced" if queued else "masked")
     if os.path.lexists(mask):
         info = mask.lstat()
         if not stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or os.readlink(mask) != "/dev/null":
@@ -101,7 +105,8 @@ def cleanup_activation():
     for path in paths.values():
         if os.path.lexists(path):
             owned_fragment(path)
-    for suffix in ("dependent", "masked"):
+    for suffix in (("queue-control", "queue-fenced", "gate-control", "gate-fenced")
+                   if queued else ("dependent", "masked")):
         unit = unit_name(suffix)
         loaded = command(systemctl, "list-units", "--all", "--no-legend", "--plain", "--", unit).strip()
         active = command(systemctl, "list-units", "--all", "--no-legend", "--plain",
@@ -141,6 +146,47 @@ def cleanup_activation():
             raise AssertionError("owned activation fixture still loadable")
         print(json.dumps({"cleanup_unit": path.name, "load_state": "not-found",
                           "fragment_removed": True, "mask_removed": True}), flush=True)
+
+
+class QueuedLaunchWitness(ManagerJobSession):
+    """Test-only observer; arbitrary start/cancel calls NEVER enter the broker API."""
+    def __init__(self, *, target, **kwargs):
+        self.target, self.observed = target, {}
+        super().__init__(**kwargs)
+
+    def _job_removed(self, message):
+        connection = self._connection
+        if (_text(connection.lib.sd_bus_message_get_sender(message)) != self.owner
+                or _text(connection.lib.sd_bus_message_get_path(message)) != MANAGER_PATH
+                or _text(connection.lib.sd_bus_message_get_interface(message)) != MANAGER + ".Manager"
+                or _text(connection.lib.sd_bus_message_get_member(message)) != "JobRemoved"):
+            raise AssertionError("fixture completion sender unconfirmed")
+        number, path, unit, result = connection.fields(message, "uoss")
+        cookie = C.c_uint64()
+        _ok(connection.lib.sd_bus_message_get_cookie(message, C.byref(cookie)))
+        self._event_count += 1
+        if (self._event_count > MAX_EVENTS or cookie.value <= self._last_cookie
+                or number != job_path(path) or result not in RESULTS):
+            raise AssertionError("fixture completion identity unconfirmed")
+        self._last_cookie = cookie.value
+        if unit == self.target:
+            if path in self.observed:
+                raise AssertionError("duplicate fixture completion")
+            self.observed[path] = {"job_id": number, "job_path": path, "unit": unit,
+                                   "result": result, "sender_cookie": cookie.value}
+
+    def completed(self, path, expected):
+        while path not in self.observed:
+            self.pump()
+            if path not in self.observed:
+                self._current()
+                self._connection.wait(min(10000, max(1, int((self.deadline - self.clock()) * 1000000))))
+        self.identity()
+        event = self.observed[path]
+        if event["result"] != expected or event["job_id"] in self.jobs():
+            raise AssertionError("fixture completion result unconfirmed")
+        print(json.dumps({"manager_bus": self.bus_id, "manager_owner": self.owner,
+                          "queued_launch_completion": event}), flush=True)
 
 
 @unittest.skipUnless(ENABLED, "real system-manager matrix requires its disposable Actions step")
@@ -382,6 +428,109 @@ class SystemManagerTests(unittest.TestCase):
                           "dependent_payload_executed": False, "pending_drained": False,
                           "boot_exclusion_qualified": False, "complete_fence_proven": False}), flush=True)
 
+    def test_waiting_start_is_canceled_before_dependency_release(self):
+        paths = activation_paths(queued=True)
+        mask = Path("/etc/systemd/system") / unit_name("queue-fenced")
+        self.assertFalse(os.path.lexists(mask))
+        self.assertTrue(all(not os.path.lexists(path) for path in paths.values()))
+        self.addCleanup(cleanup_activation, queued=True)
+        for variant in ("control", "fenced"):
+            gate, target = unit_name("gate-" + variant), unit_name("queue-" + variant)
+            fragments = {
+                "gate-" + variant: ("[Service]\nType=oneshot\nRemainAfterExit=yes\nRestart=no\n"
+                    "KillMode=control-group\nTimeoutStartSec=30s\nTimeoutStopSec=1s\nUser=0\nGroup=0\nLimitCORE=0\n"
+                    "ExecStart=" + sys.executable + " -I " + str(ROOT / "tests/manager_queue_gate.py")
+                    + " " + str(self.root / "ready.sock") + "\n"),
+                "queue-" + variant: ("[Unit]\nRequires=" + gate + "\nAfter=" + gate
+                    + "\n[Service]\nType=oneshot\nRemainAfterExit=yes\nRestart=no\n"
+                    "TimeoutStartSec=30s\nTimeoutStopSec=1s\nExecStart=/usr/bin/true\n")}
+            for suffix, fragment in fragments.items():
+                path = paths[suffix]
+                raw = ("# cpa-owned-fixture=" + path.name + "\n" + fragment).encode()
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+                try:
+                    self.assertEqual(os.write(fd, raw), len(raw))
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                self.assertEqual(owned_fragment(path), raw)
+            command(self.systemctl, "daemon-reload")
+            command(self.systemctl, "start", "--no-block", "--", gate)
+            with self.listener.accept()[0] as peer:
+                peer.settimeout(5.)
+                pid, uid, gid = struct.unpack("3i", peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                self.assertEqual((uid, gid), (0, 0))
+                raw, _, flags, _ = peer.recvmsg(1024)
+                self.assertFalse(flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC))
+                self.assertEqual(json.loads(raw), {"gate": pid})
+                gate_row = self.observe(gate)
+                self.assertEqual(gate_row["ActiveState"], "activating")
+                # A oneshot's ExecStart process is its control PID until completion.
+                control = command(self.systemctl, "show", "--property=ControlPID", "--value", "--", gate).strip()
+                self.assertEqual(control, str(pid).encode())
+                self.assertEqual(Path("/proc/%d/cgroup" % pid).read_text(), "0::" + gate_row["ControlGroup"] + "\n")
+                pidfd = os.pidfd_open(pid, 0)
+                self.addCleanup(os.close, pidfd)
+                fragment = paths["gate-" + variant]
+                binding = UnitBinding(gate, gate_row["InvocationID"], gate_row["ControlGroup"], str(fragment),
+                                      digest(fragment.read_bytes()), digest(canonical(static_properties(gate_row))))
+                witness = QueuedLaunchWitness(target=target, library=self.library,
+                    library_sha256=self.library_sha256, units={"forward": binding},
+                    deadline=self.deadline, clock=time.monotonic, check=self.current)
+                self.addCleanup(witness.close)
+                start = witness._call(witness.owner, MANAGER + ".Manager", "StartUnit", "ss", (target, "fail"), "o")[0]
+                number = job_path(start)
+                waiting = witness.jobs()[number]
+                self.assertEqual(waiting[1:5], (target, "start", "waiting", start))
+                executed = command(self.systemctl, "show", "--property=ExecMainStartTimestampMonotonic",
+                                   "--value", "--", target).strip()
+                self.assertEqual(executed, b"0")
+                print(json.dumps({"queued_variant": variant, "waiting_job": waiting,
+                                  "gate_control_pid": pid, "payload_executed_before_release": False}), flush=True)
+                if variant == "fenced":
+                    os.symlink("/dev/null", mask)
+                    fd = os.open(mask.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                    command(self.systemctl, "daemon-reload")
+                    self.assertEqual(self.masked_observation(target)["LoadState"], "masked")
+                    # Masking new submissions is not cancellation of this queued job.
+                    self.assertEqual(witness.jobs()[number], waiting)
+                    witness._call(witness.owner, MANAGER + ".Job", "Cancel", "", (), "", path=start)
+                    witness.completed(start, "canceled")
+                    stop = witness._call(witness.owner, MANAGER + ".Manager", "StopUnit", "ss", (target, "fail"), "o")[0]
+                    self.assertNotEqual(stop, start)
+                    witness.completed(stop, "done")
+                poller = select.poll()
+                poller.register(pidfd, select.POLLIN)
+                self.assertFalse(poller.poll(0), "dependency gate escaped before explicit release")
+                peer.sendall(b"release")
+                self.assertTrue(poller.poll(max(1, int((self.deadline - time.monotonic()) * 1000))))
+                if variant == "control":
+                    witness.completed(start, "done")
+                else:
+                    # Join only the gate's existing job. Never resubmit the target.
+                    command(self.systemctl, "start", "--", gate)
+                    gate_done = self.observe(gate)
+                    self.assertEqual((gate_done["ActiveState"], gate_done["SubState"]), ("active", "exited"))
+                    self.assertEqual(command(self.systemctl, "show", "--property=ExecMainStatus", "--value", "--", gate).strip(), b"0")
+                self.current()
+                executed = command(self.systemctl, "show", "--property=ExecMainStartTimestampMonotonic",
+                                   "--value", "--", target).strip()
+                if variant == "control":
+                    self.assertGreater(int(executed), 0, "positive-control payload did not execute")
+                else:
+                    self.assertEqual(executed, b"0", "canceled payload executed after gate release")
+                    final = self.masked_observation(target)
+                    self.assertEqual((final["MainPID"], final["Job"], final["ActiveState"]), ("0", "0", "inactive"))
+                self.assertNotIn(number, witness.jobs())
+                print(json.dumps({"queued_variant": variant, "dependency_released": True,
+                                  "payload_executed_after_release": int(executed) > 0,
+                                  "complete_fence_proven": False, "pending_drained": False}), flush=True)
+                witness.close()
+
     def test_actual_stop_kills_term_ignoring_parent_and_descendant(self):
         binding, pids = self.fixture("active")
         self.stop_and_witness(binding)
@@ -403,5 +552,6 @@ if __name__ == "__main__":
             raise SystemExit("disposable root system-manager required")
         cleanup_units("active", "inactive")
         cleanup_activation()
+        cleanup_activation(queued=True)
     else:
         unittest.main(verbosity=2)

@@ -4,7 +4,7 @@ The `recovery-system-manager` job in `pr-test-build.yml` exercises the existing
 `ManagerJobSession` against **real systemd PID1 on a disposable GitHub-hosted
 Ubuntu runner**. It is separate from the synthetic private-bus matrix and ordinary
 Python discovery. Missing capabilities fail the separate job; ordinary discovery
-skips the three methods explicitly. Never run this fixture on a workstation, shared
+skips the four methods explicitly. Never run this fixture on a workstation, shared
 agent host, self-hosted runner or production machine.
 
 ## Boundaries exercised
@@ -131,6 +131,45 @@ or old-epoch death. Durable mask intent/history, full pending-job retirement and
 actual-exec launch exclusion remain required. The fixture must not be mistaken
 for an implementation of those mechanisms. Tests execute only in Actions; no
 local full suite, manager contact or build substitutes for exact-head results.
+
+## Already-queued launch cancellation fixture
+
+A fourth method uses four additional exact run/attempt-scoped `/run` fragments:
+two inert oneshot dependency gates and two `/usr/bin/true` payload units. A
+peer-credential-checked seqpacket socket holds each gate inside its real
+ExecStart. No sleep, quiet-time interval or synthetic manager callback establishes
+the ordering. The original fixture deadline, native job subscription, root/PID1
+checks and one non-reconnecting bus remain in force.
+
+A positive control submits a payload start through that bus, requires its actual
+job ID/path to be `start/waiting` behind the held gate, then releases the gate.
+Its matching authenticated `JobRemoved=done` and positive actual execution
+timestamp must establish that this fixture can execute the payload. A separate
+fresh pair is held in the same way, then receives an exclusive persistent mask
+and manager reload. The test requires the original waiting job to remain visible:
+masking fresh submissions must not be confused with canceling an accepted job.
+
+Only then does the fixture call `Job.Cancel` on that exact returned job object,
+require its matching authenticated `canceled` completion, submit a separate stop
+and require that stop's distinct `done` completion. After releasing the dependency,
+require the actual gate process's pidfd death, successful gate completion, zero
+payload execution timestamp and inactive/no-PID/no-job state. An empty job list
+alone cannot supply any of those results.
+
+Start/cancel/stop calls and the multi-job signal observer here are **test-only**;
+they do not expand `ManagerJobSession.stop`, expose arbitrary broker methods or
+supply a durable operational cancellation/retirement record. Both positive and
+negative cases must pass in Actions before this method is called qualified. The
+existing exact-owned cleanup validates/removes only these four fragments and the
+one new mask; the separate `always()` cleanup repeats it. Gates have bounded
+native start/stop limits, the socket read is bounded and the runner is ephemeral.
+No new recurring preview/staging runtime is created.
+
+This is a controlled queued-before-exec case, not already-executing launch
+revocation, manager re-exec/reboot, arbitrary activation-graph exclusion, old-epoch
+death or complete pending drain. Durable mask transitions and operational job
+retirement/actual-exec admission still remain separate requirements. No current
+fixture result is implied by this source description.
 
 ## What a green job does not prove
 
