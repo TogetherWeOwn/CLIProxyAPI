@@ -54,6 +54,11 @@ class MaskedRuntimeStopTests(unittest.TestCase):
             self.effects.append(('slice-kill', None))
             check()
         self.domain.kill.side_effect = kill
+        self.witness = Mock(count=6)
+        self.witness.require_dead.side_effect = lambda *,check:check()
+        patcher = patch('host_recovery.masked_runtime_stop.RuntimeProcessWitness.capture',
+                        side_effect=lambda **kwargs:self.witness)
+        self.capture_witness = patcher.start(); self.addCleanup(patcher.stop)
         self.sequence = self.make_sequence()
         self.operation = self.journal.pending('cold_quiesce_runtime', target_sha256=self.sequence.target_sha256,
                                                deadline=1090.)
@@ -402,6 +407,59 @@ class MaskedRuntimeStopTests(unittest.TestCase):
                 with self.assertRaises(durable.Rejected):
                     reopened.pending('cold_quiesce_runtime', target_sha256=self.sequence.target_sha256, deadline=1090.)
                 self.assertEqual(records, {p.name:p.read_bytes() for p in self.path_state.iterdir()})
+
+    def test_process_capture_precedes_masks_and_every_manager_effect(self):
+        def capture(**kwargs):
+            self.assertEqual(self.effects, [])
+            self.assertFalse(self.masks.attempted)
+            self.assertEqual(kwargs['domain'], self.domain)
+            kwargs['check']()
+            return self.witness
+        self.capture_witness.side_effect = capture
+        result = self.apply()
+        self.assertEqual(result['observed_runtime_process_count'], 6)
+        self.assertIs(result['observed_runtime_processes_dead'], True)
+        self.assertGreaterEqual(self.witness.require_dead.call_count, 3)
+        self.witness.close.assert_called_once_with()
+
+    def test_process_capture_failure_permits_no_mask_or_manager_effect(self):
+        self.capture_witness.side_effect = durable.Rejected('capture-uncertain')
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(self.effects, [])
+        self.assertFalse(self.masks.attempted)
+        self.domain.kill.assert_not_called()
+        self.assertTrue(self.sequence.failed)
+
+    def test_live_process_refuses_empty_receipt_even_when_domain_reports_empty(self):
+        self.witness.require_dead.side_effect = durable.Rejected('process-live')
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(self.domain.kill.call_count, 1)
+        self.assertFalse((self.path_state/kill_names(2)[2]).exists())
+        self.assertFalse(self.sequence.completed)
+        self.witness.close.assert_called_once_with()
+
+    def test_late_witness_failure_does_not_acknowledge_saved_empty_record(self):
+        reached = []
+        def dead(*,check):
+            check()
+            reached.append('dead-check')
+            if (self.path_state/kill_names(2)[2]).exists():
+                raise durable.Rejected('late-witness-loss')
+        self.witness.require_dead.side_effect = dead
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(reached, ['dead-check', 'dead-check'])
+        self.assertTrue((self.path_state/kill_names(2)[2]).exists())
+        self.assertFalse(self.sequence.completed)
+        self.witness.close.assert_called_once_with()
+
+    def test_process_witness_is_closed_on_stop_or_persistence_failure(self):
+        self.stop_results['dockerd'] = 'failed'
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.witness.close.assert_called_once_with()
+        self.setUp()
+        self.journal.fault = lambda point:(_ for _ in ()).throw(OSError(errno.EIO, 'synthetic'))
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.witness.close.assert_called_once_with()
 
     def test_new_fixed_job_after_domain_kill_refuses_final_observation(self):
         def kill(*,check):

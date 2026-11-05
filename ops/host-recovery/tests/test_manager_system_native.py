@@ -792,6 +792,9 @@ class SystemManagerTests(unittest.TestCase):
         receipt = sequence.stop(operation=operation)
         self.assertTrue(receipt["recursive_domain_kill_returned"] and receipt["domain_empty_observed"])
         self.assertEqual(receipt["runtime_stop_completion_count"], 2)
+        self.assertEqual(receipt["observed_runtime_process_count"], 6)
+        self.assertIs(receipt["observed_runtime_processes_dead"], True)
+        self.assertTrue(sequence._witness.closed)
         from host_recovery.runtime_kill import classify_records, record_names
         kill_records = tuple((state/name).read_bytes() for name in record_names(operation["sequence"]))
         completion_pins = {role:digest((state/completion_name(2,role)).read_bytes()) for role in units}

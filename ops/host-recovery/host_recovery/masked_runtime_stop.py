@@ -11,6 +11,7 @@ from .durable import Rejected, canonical, decode, digest
 from .manager_jobs import RuntimeStopJobs, completion_name
 from .masked_forward_stop import _MaskedFixedStop
 from .runtime_kill import record_names
+from .runtime_processes import RuntimeProcessWitness
 from .topology import RUNTIME_ROLES
 
 
@@ -33,6 +34,7 @@ class MaskedRuntimeStop(_MaskedFixedStop):
         if self._forward is None:
             raise Rejected("masked-runtime-original-forward-required")
         self._domain_killed = False
+        self._witness = None
         domain.current()
         super().__init__(journal=journal, masks=masks, jobs=jobs)
 
@@ -48,6 +50,14 @@ class MaskedRuntimeStop(_MaskedFixedStop):
             raise Rejected("masked-runtime-original-domain-or-forward-changed")
         self.domain.current()
         super()._current()
+
+    def _before_stops(self):
+        self._witness = RuntimeProcessWitness.capture(domain=self.domain, check=self._current)
+        self._current()
+
+    def _release(self):
+        if self._witness is not None:
+            self._witness.close()
 
     def _after_stops(self):
         self._current()
@@ -90,6 +100,7 @@ class MaskedRuntimeStop(_MaskedFixedStop):
         # observations cannot replace the final live check or grant a cold return.
         self._final_check()
         return {"recursive_domain_kill_returned": True, "domain_empty_observed": True,
+                "observed_runtime_process_count": self._witness.count, "observed_runtime_processes_dead": True,
                 "runtime_stop_completion_count": len(self.roles), "runtime_containment_coverage_proven": False}
 
     def _final_check(self):
@@ -97,6 +108,9 @@ class MaskedRuntimeStop(_MaskedFixedStop):
         if not self._domain_killed or self.domain.populated() is not False:
             raise Rejected("masked-runtime-empty-domain-unconfirmed")
         self._current()
+        if self._witness is None:
+            raise Rejected("masked-runtime-process-witness-required")
+        self._witness.require_dead(check=self._current)
         # Authority/projection reads are external boundaries too. Recheck the
         # kernel observation after them; never turn a missing cgroup into zero.
         if self.domain.populated() is not False:

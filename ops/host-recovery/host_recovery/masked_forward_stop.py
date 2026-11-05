@@ -83,6 +83,12 @@ class _MaskedFixedStop:
         self._current()
         return result
 
+    def _before_stops(self):
+        pass
+
+    def _release(self):
+        pass
+
     def _after_stops(self):
         return {}
 
@@ -100,6 +106,8 @@ class _MaskedFixedStop:
                     raise Rejected("masked-forward-original-operation-required")
                 self._operation = canonical(operation)
                 operation = decode(self._operation)
+                self._current()
+                self._before_stops()
                 self._current()
                 self.masks.publish(current=self._current)
                 self._published = True
@@ -148,6 +156,13 @@ class _MaskedFixedStop:
             except Exception:
                 self.failed = self._original[0]._failed = self._original[3].failed = True
                 raise Rejected("masked-forward-stop-unconfirmed") from None
+            finally:
+                try:
+                    self._release()
+                except Exception:
+                    self.failed = self._original[0]._failed = self._original[3].failed = True
+                    self.completed = False
+                    raise Rejected("masked-forward-resource-release-unconfirmed") from None
 
 
 class MaskedForwardStop(_MaskedFixedStop):

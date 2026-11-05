@@ -21,7 +21,15 @@ binding/epoch, both masks, both units, the manager connection/library/deadline,
 prior forward operation and recursive domain descriptor. The caller must durably
 publish `cold_quiesce_runtime` with this exact target and original deadline.
 
-Under the journal's existing mutex:
+Under the journal's existing mutex, first capture a bounded descriptor-relative
+inventory of the pinned runtime cgroup and its descendants. Two matching scans
+bracket live pidfd acquisition and exact `/proc` cgroup membership checks. Missing
+or changing groups, duplicate/migrating PIDs, overflow, unsupported pidfds, process
+exit during capture or deadline/authority loss refuses before masks/effects. There
+is no numeric-PID signal or fallback. Capture supports at most 128 groups, depth
+16, 256 processes, 4,096 entries per group and 8,192 bytes per process-list read.
+The same original deadline applies throughout; no retry/stabilization window is
+added. These are supported inventory limits, not measured recovery phase caps.
 
 1. Exclusively publish/fsync/read back both fixed masks. Partial publication is
    retained for reconciliation, never overwritten or adopted.
@@ -44,7 +52,18 @@ Under the journal's existing mutex:
    empty observation, then recheck live authority and emptiness after publication
    and across trailing effective-mask reads. Missing domain, unknown values,
    read/write failure, peer/lock/manager/input/configuration drift or expiration
-   refuses even if the last observation was saved.
+   refuses even if the last observation was saved. Every final barrier also
+   requires death of every captured process via its original pidfd. A live or
+   invalid witness refuses even when the domain reports empty. Owned pidfds are
+   released on both success and failure; a zero-process sample is explicitly
+   counted as zero, never silently upgraded to coverage.
+
+The result exposes only `observed_runtime_process_count` and
+`observed_runtime_processes_dead`, not PIDs or cgroup paths. The sampled process
+set is volatile, not a durable death certificate: retained kill-record schemas
+are unchanged and can never reconstruct these witnesses after a crash. No claim
+is made about processes escaped before capture, processes between the two sample
+boundaries, later launches, unobserved daemons/shims or external writers.
 
 The adapter never publishes the **outer** cold-quiesce return or drains the
 operation. Lost replies, persistence faults and partial effects permanently close
@@ -85,8 +104,10 @@ The separate Actions-only native fixture adds an inert two-service pair and a
 third TERM-ignoring parent/child service in one explicitly started owned slice.
 The third service is not targeted by either fixed stop/KILL: its pidfds must stay
 live through both stops and die only after the source recursive slice write.
+The source pre-stop witness must independently capture all six fixture processes
+and require their death, with all owned witness descriptors closed afterwards.
 Actual root/PID1 credentials, bus, library, typed properties, masks, job signals,
-pidfds and cgroup2 domain checks are not mocked. Each fixed service must also
+pidfds and cgroup2 domain/inventory checks are not mocked. Each fixed service must also
 refuse a fresh direct start. See [native fixture boundaries](SYSTEM-MANAGER-TEST-v1.md).
 New assertions must pass at the exact Actions head before qualification is claimed.
 
