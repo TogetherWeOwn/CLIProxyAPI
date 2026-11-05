@@ -8,8 +8,9 @@ remain prerequisites. Reopened history is never adopted or retried here.
 import os
 import re
 
-from .broker_operations import OperationJournal
+from .broker_operations import OperationJournal, shape
 from .durable import Rejected, canonical, decode, digest
+from .loading import pin
 from .manager_bus import ManagerJobSession
 from .manager_jobs import MANAGER, MANAGER_PATH, roles_for_method
 from .unit_masks import PersistentUnitMasks
@@ -17,6 +18,33 @@ from .unit_masks import PersistentUnitMasks
 PROPERTIES = {key: ("Unit", "s") for key in ("Id", "LoadState", "FragmentPath", "ActiveState", "SubState")}
 PROPERTIES.update({"DropInPaths": ("Unit", "as"), "Job": ("Unit", "(uo)"), "InvocationID": ("Unit", "ay"),
                    "MainPID": ("Service", "u"), "ControlGroup": ("Service", "s")})
+
+
+def record_names(sequence):
+    prefix = "operation-%02d-mask-reload-" % sequence
+    return prefix + "pending.json", prefix + "return.json"
+
+
+def classify_records(pending_raw, returned_raw, *, operation):
+    """Historical correspondence only, not a reconstructed reload/effective-mask grant."""
+    pending = decode(pending_raw)
+    shape(pending, ("schema", "operation_id", "target_sha256"))
+    if (pending_raw != canonical(pending) or not roles_for_method(operation["method"])
+            or pending["schema"] != "host-recovery-mask-reload-pending-v1"
+            or pending["operation_id"] != operation["operation_id"]):
+        raise Rejected("mask-reload-history-pending-unbound")
+    pin(pending["target_sha256"])
+    if returned_raw is None:
+        return pending, None
+    returned = decode(returned_raw)
+    shape(returned, ("schema", "pending_sha256", "manager_reload_returned",
+                     "effective_masks_observed", "pending_drained"))
+    if (returned_raw != canonical(returned) or returned["schema"] != "host-recovery-mask-reload-return-v1"
+            or returned["pending_sha256"] != digest(pending_raw)
+            or returned["manager_reload_returned"] is not True
+            or returned["effective_masks_observed"] is not True or returned["pending_drained"] is not False):
+        raise Rejected("mask-reload-history-return-unbound")
+    return pending, returned
 
 
 class ManagerMaskReload:
@@ -124,17 +152,17 @@ class ManagerMaskReload:
                     # Reload may discard accepted jobs. Never infer cancellation
                     # from their subsequent absence or issue a blind CancelJob.
                     raise Rejected("mask-reload-prior-job-requires-cancellation")
-                prefix = "operation-%02d-mask-reload-" % operation["sequence"]
+                pending_name, return_name = record_names(operation["sequence"])
                 pending = {"schema": "host-recovery-mask-reload-pending-v1",
                     "operation_id": operation["operation_id"], "target_sha256": digest(self._configuration)}
-                self.journal._write(prefix + "pending.json", pending)
+                self.journal._write(pending_name, pending)
                 self._current()
                 self.session._call(self.session.owner, MANAGER + ".Manager", "Reload", "", (), "")
                 self._current()
                 observations = self._observations()
                 returned = {"schema": "host-recovery-mask-reload-return-v1", "pending_sha256": digest(canonical(pending)),
                     "manager_reload_returned": True, "effective_masks_observed": True, "pending_drained": False}
-                self.journal._write(prefix + "return.json", returned)
+                self.journal._write(return_name, returned)
                 if observations != self._observations():
                     raise Rejected("mask-reload-return-boundary-changed")
                 self._current()

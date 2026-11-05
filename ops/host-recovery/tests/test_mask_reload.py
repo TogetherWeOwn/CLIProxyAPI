@@ -232,6 +232,33 @@ class MaskReloadTests(unittest.TestCase):
         self.assertFalse((self.path_state/'operation-06-mask-reload-pending.json').exists())
         self.assertEqual(self.reload_count(), 1)
 
+    def test_actual_phase_records_compose_with_original_history_without_replaying_reload(self):
+        from host_recovery import broker_history as history
+        from test_broker_history import original_inputs
+        inputs = original_inputs()
+        saved_epoch = {**epoch(), 'boot_id':'boot-a'}
+        path = self.root/'history-original'
+        path.mkdir(mode=0o700)
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        self.addCleanup(os.close, fd)
+        self.now = 1050.
+        journal = OperationJournal(fd, binding=history.original_binding(inputs, topology_sha256='c'*64),
+            epoch=saved_epoch, clock=lambda:self.now, boot_id=lambda:'boot-a')
+        reloader = ManagerMaskReload(journal=journal, masks=self.masks, session=self.session)
+        operation = journal.pending('contain_forward', target_sha256=durable.digest(reloader.configuration()),
+                                    deadline=self.session.deadline)
+        reloader.reload(operation=operation)
+        before = {p.name:p.read_bytes() for p in path.iterdir()}
+        report = history.inspect_history(fd, inputs=inputs, topology_sha256='c'*64, current_epoch=saved_epoch,
+                                         uid=os.geteuid(), gid=os.getegid())
+        self.assertEqual(report['operations'][0]['mask_reload']['classification'], 'returned_unproven')
+        self.assertEqual(report['operations'][0]['classification'], 'unreturned')
+        self.assertEqual(before, {p.name:p.read_bytes() for p in path.iterdir()})
+        self.assertEqual(self.reload_count(), 1)
+        for key in ('pending_drained', 'complete_fence_proven', 'recovery_execution_allowed',
+                    'start_allowed', 'settlement_allowed', 'production_acceptance'):
+            self.assertIs(report[key], False)
+
     def test_later_effective_drift_revokes_observer_without_retry(self):
         self.apply()
         self.row['InvocationID'] = 'b'*32

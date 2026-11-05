@@ -73,10 +73,18 @@ clock permanently closes this phase, original journal and session. Partial files
 and masks remain; no overwrite, cleanup, retry, unmask or automatic repair occurs.
 The original operation is **not** returned/settled by this phase. A lost return or
 process death is not a completed recovery, and an on-disk phase return is not a
-fresh authority grant. Existing historical readers fail closed on this new
-unreconciled subphase; no historical success or new cold-resume authority is
-inferred. Integrating its explicit retained-history classification with the
-complete cold reconciler remains required before operational use.
+fresh authority grant. The read-only broker history reader classifies a canonical,
+original-operation-bound phase as `unreturned` or `returned_unproven`. It checks
+both exact schemas, the phase target digest, the pending-to-return byte digest and
+literal boolean flags. An outer return or later stop record cannot hide an
+unreturned reload. Orphan returns, unsupported methods, unknown/staged records,
+noncanonical bytes and changed publication still reject the complete report.
+
+This classification preserves bytes and original deadlines across broker/boot
+epoch changes. It does not execute manager calls, reconstruct effective masks,
+adopt a journal, renew a deadline, retry a reload or report historical success.
+Even a returned phase requires fresh cold reconciliation; complete runtime
+reconciliation and operational composition remain required before use.
 
 The session's trusted original-authority check must not itself assume that the
 forward unit remains loaded across reload. That does not permit dropping those

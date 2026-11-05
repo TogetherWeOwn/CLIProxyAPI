@@ -17,8 +17,9 @@ from .durable import Rejected, canonical, decode, digest, read_file, signature
 from .journal import validate_intent
 from .loading import RecoveryInputs, owner, pin
 from .manager_jobs import STOP_ROLES, classify_completion, classify_records, completion_name, record_names
+from .mask_reload import classify_records as classify_reload, record_names as reload_names
 
-MAX_FILES = 1 + 2 * MAX_OPERATIONS + 3 * len(STOP_ROLES)
+MAX_FILES = 1 + 4 * MAX_OPERATIONS + 3 * len(STOP_ROLES)
 PENDING_FIELDS = ("schema", "state", "binding_sha256", "epoch_sha256", "sequence", "method",
                   "target_sha256", "deadline", "operation_id")
 RETURN_FIELDS = ("schema", "operation_id", "result", "pending_drained")
@@ -89,6 +90,7 @@ def _capture(fd, *, uid, gid):
     allowed = {"epoch.json"}
     for sequence in range(1, MAX_OPERATIONS + 1):
         allowed.update("operation-%02d-%s.json" % (sequence, kind) for kind in ("pending", "return"))
+        allowed.update(reload_names(sequence))
         for role in STOP_ROLES:
             allowed.update(record_names(sequence, role))
             allowed.add(completion_name(sequence, role))
@@ -201,6 +203,19 @@ def _classify(records, *, binding):
             jobs.append(job)
         if jobs:
             item["manager_jobs"] = jobs
+        reload_pending, reload_return = reload_names(sequence)
+        if reload_pending in records:
+            _, reloaded = classify_reload(records[reload_pending], records.get(reload_return), operation=pending)
+            consumed.add(reload_pending)
+            if reloaded is None:
+                # No live writer can proceed past an uncertain reload. Do not
+                # reinterpret a later outer return or stop record as its result.
+                if return_name in records or jobs:
+                    raise Rejected("broker-history-effect-after-uncertain-reload")
+            else:
+                consumed.add(reload_return)
+            item["mask_reload"] = {"classification": "unreturned" if reloaded is None else "returned_unproven",
+                                   "pending_drained": False}
         operations.append(item)
     if consumed != set(records):
         raise Rejected("broker-history-gap-or-orphan-return")
