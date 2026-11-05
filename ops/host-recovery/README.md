@@ -581,6 +581,37 @@ Use exact-head Actions run/job links as CI evidence; do not substitute local
 full-suite/build transcripts. Local execution is limited to a permitted focused
 reproduction, never a CI mirror.
 
+## Broker operation persistence (non-authorizing)
+
+`host_recovery/broker_operations.py` supplies the dedicated broker's first
+persistence slice. Its private append-only epoch/pending/return records bind the
+original request/intent/topology digests, attempt, original arm/failure/deadline,
+boot, broker invocation and runtime epoch. The recovery deadline cannot exceed
+either failure + 180 seconds or original arm + 300 seconds. Each fixed recovery
+method is recorded at most once, before any future effect submission; a lost
+reply cannot be retried using that method. Calls on one broker journal are
+serialized by an in-memory mutex, **not a second installation lock**.
+
+The owning broker must independently authenticate the approved inputs, protect
+and pin the state directory, exclude other broker writers, observe the original
+supervisor lock/peer/manager identity and recheck these inside actual effect
+barriers. These are prerequisites, not properties conferred by constructing a
+Python object or presenting a hash. This module has **no effect handlers, IPC,
+commands, runtime access, lock acquisition, restore/start grant or settlement**.
+Neither current runner consumes it; their fixed-deny/identity-only behavior stays.
+
+A returned call is explicitly **not drain**. Ambiguous/refused returns, persistence
+faults, deadline/clock/boot discontinuity, record drift and duplicate admission
+latch reconciliation required. All reopened history, even only an epoch or a
+returned record, stays closed and unmodified; pending/returned counts become
+unknown rather than a false zero. Cold teardown, quarantine inventory and crash
+reconciliation across broker/original-journal registration remain unimplemented.
+No reset/new epoch can turn an old pending record into replay permission.
+
+New tests use synthetic owned files, injected EIO/ENOSPC and actual child-process
+SIGKILL at pending-publication barriers. They are authored for GitHub Actions,
+not locally executed full-system or privileged-broker qualification evidence.
+
 ## Remaining acceptance work (not implemented or not proved)
 
 1. Persistent systemd supervisor with admission, durable active-attempt latch,
