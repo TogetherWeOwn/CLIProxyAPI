@@ -144,6 +144,17 @@ Two additional exact-source constraints were inspected for this fixture:
   `shim_cgroup` is intentionally unset for this inheritance witness, not claimed
   to be an independently configured migration policy.
 
+The path-corrected fixture in Actions 42125845864 started the private daemon and
+created/inspected its synthetic metadata, but task initialization failed reopening
+`/dev/null` (EPERM); both exact cleanup paths passed. The pinned
+[runc device merge](https://github.com/opencontainers/runc/blob/29dd3dc2b13b4123162e5fe132504bb4b15569f1/libcontainer/specconv/spec_linux.go#L1023-L1041)
+removes a default device and its default allow rule when its path is supplied
+explicitly. The source correction therefore supplies both the synthetic null
+node and a separate deny-all/allow-char-1:3 resource policy. Process capabilities
+remain empty, namespaces/mounts are unchanged, and no host device policy is
+modified. The runtime assertions are unchanged; this is another reached fixture
+failure, not a task/cgroup qualification pass.
+
 This source is unqualified until its exact-head Actions job passes. Even a pass
 will qualify only this one containerd/task diagnostic, not Docker restoration,
 complete activation/writer/old-epoch exclusion, all-job retirement, cold/quarantine

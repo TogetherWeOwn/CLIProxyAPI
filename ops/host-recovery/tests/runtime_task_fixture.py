@@ -164,6 +164,24 @@ def cleanup():
     emit(runtime_cleanup="removed", cgroup_removed=True, unit=unit)
 
 
+def oci_spec(rootfs, cgroup):
+    return {"ociVersion": "1.0.2", "root": {"path": str(rootfs), "readonly": False},
+            "process": {"terminal": False, "user": {"uid": 0, "gid": 0}, "args": ["/probe"],
+                        "env": [], "cwd": "/", "noNewPrivileges": True,
+                        "capabilities": {key: [] for key in ("bounding", "effective", "inheritable", "permitted", "ambient")}},
+            "mounts": [{"destination": "/proc", "type": "proc", "source": "proc", "options": ["nosuid", "noexec", "nodev"]},
+                       {"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "noexec", "mode=755"]}],
+            "linux": {"cgroupsPath": cgroup,
+                      "devices": [{"path": "/dev/null", "type": "c", "major": 1, "minor": 3,
+                                   "fileMode": 0o666, "uid": 0, "gid": 0}],
+                      # Pinned runc removes a default device's allow rule when
+                      # that path is explicitly supplied in linux.devices. Keep
+                      # the node and its cgroup permission as separate inputs.
+                      "resources": {"devices": [{"allow": False, "type": "a", "access": "rwm"},
+                                                {"allow": True, "type": "c", "major": 1, "minor": 3, "access": "rwm"}]},
+                      "namespaces": [{"type": kind} for kind in ("pid", "mount", "ipc", "uts", "network")]}}
+
+
 def main(probe):
     root, unit, slice_name = identity()
     tool_pins()
@@ -229,16 +247,7 @@ def main(probe):
         ctr("namespaces", "create", "cpa-fixture")
         require(ctr("containers", "list", "--quiet").stdout == b"", "fresh runtime contains an object")
         cgroup = domain.cgroup + "/task"
-        spec = {"ociVersion": "1.0.2", "root": {"path": str(rootfs), "readonly": False},
-                "process": {"terminal": False, "user": {"uid": 0, "gid": 0}, "args": ["/probe"],
-                            "env": [], "cwd": "/", "noNewPrivileges": True,
-                            "capabilities": {key: [] for key in ("bounding", "effective", "inheritable", "permitted", "ambient")}},
-                "mounts": [{"destination": "/proc", "type": "proc", "source": "proc", "options": ["nosuid", "noexec", "nodev"]},
-                           {"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "noexec", "mode=755"]}],
-                "linux": {"cgroupsPath": cgroup,
-                          "devices": [{"path": "/dev/null", "type": "c", "major": 1, "minor": 3,
-                                       "fileMode": 0o666, "uid": 0, "gid": 0}],
-                          "namespaces": [{"type": kind} for kind in ("pid", "mount", "ipc", "uts", "network")]}}
+        spec = oci_spec(rootfs, cgroup)
         (root / "spec.json").write_text(json.dumps(spec))
         ctr("containers", "create", "--config", str(root / "spec.json"),
             "--runtime", "io.containerd.runc.v2", "--runc-binary", "/usr/bin/runc",
