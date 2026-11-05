@@ -131,7 +131,12 @@ Two additional exact-source constraints were inspected for this fixture:
 - [`ShimConfig.SocketDir`](https://github.com/containerd/containerd/blob/b7a25261e029d68978bbf290df0a62fc819b3c51/core/runtime/v2/shim_manager.go#L48-L107)
   otherwise defaults to `/run/containerd/s`. The
   [Linux maximum](https://github.com/containerd/containerd/blob/b7a25261e029d68978bbf290df0a62fc819b3c51/core/runtime/v2/socket_linux.go#L19-L25)
-  is 42 bytes; an oversized private path refuses before service creation.
+  is 42 bytes; an oversized private path refuses before service creation. The
+  initial fixture reached this guard in Actions 42125447463 before any daemon
+  start, and its separate cleanup confirmed no resources. The corrected root
+  uses a short digest of the numeric run/attempt while the ownership marker and
+  unit/slice names retain their full identities. Exclusive creation and exact
+  marker checks reject collisions; the path bound itself remains unchanged.
 - [`ctr` runtime options](https://github.com/containerd/containerd/blob/b7a25261e029d68978bbf290df0a62fc819b3c51/cmd/ctr/commands/commands_unix.go#L62-L98)
   permit explicit runc binary/root only with `io.containerd.runc.v2`, not an
   absolute shim runtime name. The clean environment resolves the pinned shim

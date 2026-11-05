@@ -41,16 +41,22 @@ def emit(**fields):
     print(json.dumps(fields, sort_keys=True), flush=True)
 
 
+def fixture_names(run, attempt):
+    require(all(re.fullmatch(r"[1-9][0-9]{0,19}", x) for x in (run, attempt)), "bounded run identity required")
+    key = "r" + run + "a" + attempt
+    # Only shorten the filesystem path, never ownership identity. mkdir is
+    # exclusive and owner.json retains both full unit names; collisions refuse.
+    short = hashlib.sha256((run + ":" + attempt).encode("ascii")).hexdigest()[:12]
+    return (Path("/tmp/cpa-containerd-config." + short), "cpa-runtime-fixture-" + key + ".service",
+            "system-cparuntime" + key + ".slice")
+
+
 def identity():
     require(os.geteuid() == 0 and os.environ.get("GITHUB_ACTIONS") == "true"
             and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
             and os.environ.get("CPA_RECOVERY_RUNTIME_TASK_TEST") == "1",
             "requires explicit disposable hosted Actions root fixture")
-    run, attempt = os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"]
-    require(all(re.fullmatch(r"[1-9][0-9]{0,19}", x) for x in (run, attempt)), "bounded run identity required")
-    key = "r" + run + "a" + attempt
-    return (Path("/tmp/cpa-containerd-config." + key), "cpa-runtime-fixture-" + key + ".service",
-            "system-cparuntime" + key + ".slice")
+    return fixture_names(os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"])
 
 
 def command(*args, check=True):
