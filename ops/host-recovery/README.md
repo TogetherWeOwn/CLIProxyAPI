@@ -8,6 +8,16 @@ as a substitute for the accepted production binaries.
 
 ## Implemented so far
 
+- `host_recovery/service_units.py`, `service_anchor.py` and `service_entry.py`:
+  deterministic offline hardened manager definitions and fixed conservative runner
+  routing through protected root-owned anchors. Anchor indirection avoids embedding
+  the launch digest in the unit whose hashes the launch itself pins. No shell,
+  automatic restart, install target, root/capability grant or worker write roots.
+  Real offline systemd parser and owned-file/CLI-refusal checks are **not installed
+  manager, sandbox-enforcement or administrative-provisioning proof**. The supervisor
+  remains unresolved-only and the worker identity-only; recovery/start authority,
+  complete fence and operational provisioning remain due. See
+  [manager launch definitions and limits](SERVICE-UNITS-v1.md).
 - `supervise.py` and `host_recovery/unresolved_service.py`: executable signal-aware
   supervisor owner wires the existing persistent lock/hold lifecycle to protected
   notice persistence and the real local alert client. Fixed deny boundaries cannot
