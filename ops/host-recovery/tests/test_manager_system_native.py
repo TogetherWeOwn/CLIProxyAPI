@@ -513,10 +513,18 @@ class SystemManagerTests(unittest.TestCase):
                 library_sha256=self.library_sha256, units={"forward": binding}, deadline=self.deadline,
                 clock=time.monotonic, check=self.current)
             self.addCleanup(witness.close)
+            before_start = command(self.systemctl, "show", "--property=ExecMainStartTimestampMonotonic",
+                                   "--value", "--", binding.unit).strip()
+            self.assertRegex(before_start, rb"[1-9][0-9]*\Z")
             receipt = sequence.stop(operation=operation)
+            self.assertEqual(json.loads(sequence._execution_starts), {"forward":int(before_start)})
+            self.assertEqual(command(self.systemctl, "show", "--property=ExecMainStartTimestampMonotonic",
+                                     "--value", "--", binding.unit).strip(), before_start)
             self.assertTrue(receipt["whole_unit_kill_returned"])
             self.assertTrue(receipt["fixed_stop_completion_observed"])
             self.assertTrue(receipt["masked_inactive_observed"])
+            self.assertEqual(receipt["fixed_execution_timestamp_count"], 1)
+            self.assertIs(receipt["fixed_execution_timestamps_unchanged"], True)
             self.assertFalse(receipt["complete_fence_proven"])
             self.assertFalse(receipt["pending_drained"])
             self.assertFalse(receipt["start_allowed"])
@@ -789,9 +797,17 @@ class SystemManagerTests(unittest.TestCase):
         # authority barrier additionally asserts the independent live-task witness.
         session.check = current
         operation = journal.pending("cold_quiesce_runtime", target_sha256=sequence.target_sha256, deadline=self.deadline)
+        before_starts = {role:command(self.systemctl, "show", "--property=ExecMainStartTimestampMonotonic",
+                                     "--value", "--", unit.unit).strip() for role,unit in units.items()}
+        for stamp in before_starts.values(): self.assertRegex(stamp, rb"[1-9][0-9]*\Z")
         receipt = sequence.stop(operation=operation)
+        self.assertEqual(json.loads(sequence._execution_starts), {role:int(stamp) for role,stamp in before_starts.items()})
+        self.assertEqual({role:command(self.systemctl, "show", "--property=ExecMainStartTimestampMonotonic",
+                                      "--value", "--", unit.unit).strip() for role,unit in units.items()}, before_starts)
         self.assertTrue(receipt["recursive_domain_kill_returned"] and receipt["domain_empty_observed"])
         self.assertEqual(receipt["runtime_stop_completion_count"], 2)
+        self.assertEqual(receipt["fixed_execution_timestamp_count"], 2)
+        self.assertIs(receipt["fixed_execution_timestamps_unchanged"], True)
         self.assertEqual(receipt["observed_runtime_process_count"], 6)
         self.assertIs(receipt["observed_runtime_processes_dead"], True)
         self.assertTrue(sequence._witness.closed)

@@ -250,3 +250,41 @@ class ManagerSessionTests(unittest.TestCase):
         self.connection.mode = 'absent'
         with self.assertRaises(durable.Rejected): session.stop('containerd')
         self.assertEqual(sum(method=='StopUnit' for _,method,_ in self.connection.calls),2)
+
+
+class ExecutionTimestampABITests(unittest.TestCase):
+    def connection(self, number):
+        connection = object.__new__(bus._Connection)
+        connection.lib = Mock()
+        connection.lib.sd_bus_message_get_signature.return_value = b'v'
+        connection.lib.sd_bus_message_enter_container.return_value = 1
+        connection.lib.sd_bus_message_exit_container.return_value = 1
+        connection.lib.sd_bus_message_at_end.return_value = 1
+        def read(message, kind, pointer):
+            self.assertEqual(kind, b't')
+            C.cast(pointer, C.POINTER(C.c_uint64))[0] = number
+            return 1
+        connection.lib.sd_bus_message_read_basic.side_effect = read
+        return connection
+
+    def test_uint64_variant_preserves_values_larger_than_uint32(self):
+        for value in (0, 2**32+123, 2**63+321, 2**64-1):
+            with self.subTest(value=value):
+                connection = self.connection(value)
+                self.assertEqual(connection.fields(None, 'v:t'), [value])
+                connection.lib.sd_bus_message_enter_container.assert_called_once_with(None, b'v', b't')
+
+    def test_timestamp_variant_mismatch_or_missing_basic_refuses(self):
+        connection = self.connection(123)
+        connection.lib.sd_bus_message_enter_container.return_value = 0
+        with self.assertRaises(durable.Rejected): connection.fields(None, 'v:t')
+        connection.lib.sd_bus_message_read_basic.assert_not_called()
+        connection = self.connection(123)
+        connection.lib.sd_bus_message_read_basic.side_effect = None
+        connection.lib.sd_bus_message_read_basic.return_value = 0
+        with self.assertRaises(durable.Rejected): connection.fields(None, 'v:t')
+
+    def test_timestamp_variant_trailing_data_refuses(self):
+        connection = self.connection(123)
+        connection.lib.sd_bus_message_at_end.return_value = 0
+        with self.assertRaises(durable.Rejected): connection.fields(None, 'v:t')

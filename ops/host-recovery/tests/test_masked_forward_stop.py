@@ -38,6 +38,7 @@ class MaskedForwardStopTests(unittest.TestCase):
         self.operation = self.journal.pending('contain_forward', target_sha256=self.sequence.target_sha256,
                                                deadline=1090.)
         self.path_state = path
+        self.row['ExecMainStartTimestampMonotonic'] = 2**40
         self.connection.job_units = self.units
         self.waiting = [41, self.units['forward'].unit, 'start', 'waiting', bus.JOB_PREFIX+'41',
                         bus.MANAGER_PATH+'/unit/forward_service']
@@ -281,3 +282,76 @@ class MaskedForwardStopTests(unittest.TestCase):
         with self.assertRaises(durable.Rejected):
             self.session._kill_stopping_unit('forward', check=lambda:None)
         self.assertEqual(self.effects().count('KillUnit'), 1)
+
+    def test_execution_timestamp_is_captured_before_masks_and_preserved_after_stop(self):
+        result = self.apply()
+        self.assertEqual(result['fixed_execution_timestamp_count'], 1)
+        self.assertIs(result['fixed_execution_timestamps_unchanged'], True)
+        self.assertEqual(durable.decode(self.sequence._execution_starts), {'forward':2**40})
+        self.assertFalse(result['activation_exclusion_proven'] or result['manager_jobs_retired'])
+        self.assertNotIn('ExecMainStartTimestampMonotonic', str(result))
+
+    def test_missing_or_invalid_execution_timestamp_refuses_before_masks(self):
+        for value in (None, True, -1, 2**64-1, 2**64, '123', 1.5):
+            with self.subTest(value=value):
+                self.setUp()
+                self.row['ExecMainStartTimestampMonotonic'] = value
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertEqual(self.effects(), [])
+                self.assertFalse(self.masks.attempted)
+                self.assertTrue(self.sequence.failed)
+        self.setUp()
+        del self.row['ExecMainStartTimestampMonotonic']
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(self.effects(), [])
+
+    def test_execution_drift_during_initial_capture_refuses_before_masks(self):
+        reached = []
+        def read(method, args):
+            if method == 'Get' and args[1] == 'ExecMainStartTimestampMonotonic':
+                reached.append('timestamp')
+                self.row['ExecMainStartTimestampMonotonic'] += 1
+        self.effect_hook = read
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(reached, ['timestamp','timestamp'])
+        self.assertEqual(self.effects(), [])
+        self.assertFalse(self.masks.attempted)
+
+    def test_execution_drift_at_effect_boundaries_prevents_later_effects(self):
+        for method, expected in (('Cancel',['Cancel']), ('StopUnit',['Cancel','Reload','StopUnit']),
+                                  ('KillUnit',['Cancel','Reload','StopUnit','KillUnit'])):
+            with self.subTest(method=method):
+                self.setUp()
+                reached = []
+                def hook(actual):
+                    if actual == method:
+                        reached.append(actual)
+                        self.row['ExecMainStartTimestampMonotonic'] += 1
+                self.hook = hook
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertEqual(reached, [method])
+                self.assertEqual(self.effects(), expected)
+                self.assertFalse(self.sequence.completed)
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertEqual(self.effects(), expected)
+
+    def test_exited_between_samples_execution_cannot_hide_inactive_projection(self):
+        reached = []
+        def fault(point):
+            if point == 'directory-fsync' and (self.path_state/completion_name(1,'forward')).exists():
+                reached.append(point)
+                self.row['ExecMainStartTimestampMonotonic'] += 1
+                self.assertEqual((self.row['ActiveState'],self.row['MainPID']), ('inactive',0))
+        self.journal.fault = fault
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(reached, ['directory-fsync'])
+        self.assertTrue((self.path_state/completion_name(1,'forward')).exists())
+        self.assertFalse(self.sequence.completed)
+
+    def test_zero_timestamp_is_only_an_observed_value_not_execution_exclusion(self):
+        self.row.update(ExecMainStartTimestampMonotonic=0, ActiveState='inactive', SubState='dead', MainPID=0, ControlGroup='')
+        self.connection.inventory = []
+        self.early_stop = True
+        result = self.apply()
+        self.assertTrue(result['fixed_execution_timestamps_unchanged'])
+        self.assertFalse(result['activation_exclusion_proven'])

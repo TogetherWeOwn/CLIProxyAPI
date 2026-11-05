@@ -68,7 +68,8 @@ class MaskedRuntimeStopTests(unittest.TestCase):
         self.early, self.event_cookie = False, 100
         self.rows = {role:dict(Id=unit.unit, LoadState='masked', FragmentPath='/dev/null', DropInPaths=[],
             ActiveState='active', SubState='running', InvocationID=bytes.fromhex(unit.invocation_id),
-            ControlGroup=unit.cgroup, MainPID=123, Job=(0, '/')) for role,unit in self.units.items()}
+            ControlGroup=unit.cgroup, MainPID=123, Job=(0, '/'), ExecMainStartTimestampMonotonic=2**40)
+            for role,unit in self.units.items()}
         self.numbers = {'containerd':41, 'dockerd':42}
         self.connection.inventory = [[number, self.units[role].unit, 'start', 'waiting', bus.JOB_PREFIX+str(number),
             bus.MANAGER_PATH+'/unit/'+role] for role,number in self.numbers.items()]
@@ -460,6 +461,39 @@ class MaskedRuntimeStopTests(unittest.TestCase):
         self.journal.fault = lambda point:(_ for _ in ()).throw(OSError(errno.EIO, 'synthetic'))
         with self.assertRaises(durable.Rejected): self.apply()
         self.witness.close.assert_called_once_with()
+
+    def test_both_runtime_execution_timestamps_are_observed_without_authority(self):
+        result = self.apply()
+        self.assertEqual(result['fixed_execution_timestamp_count'], 2)
+        self.assertIs(result['fixed_execution_timestamps_unchanged'], True)
+        self.assertEqual(durable.decode(self.sequence._execution_starts), {role:2**40 for role in self.units})
+        self.assertFalse(result['activation_exclusion_proven'] or result['pending_drained'])
+
+    def test_execution_drift_after_first_stop_prevents_second_stop_and_recursive_kill(self):
+        reached = []
+        def hook(method,role):
+            if (method,role) == ('KillUnit','dockerd'):
+                reached.append(role)
+                self.rows['containerd']['ExecMainStartTimestampMonotonic'] += 1
+        self.hook = hook
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(reached, ['dockerd'])
+        self.assertNotIn(('StopUnit','containerd'), self.effects)
+        self.domain.kill.assert_not_called()
+        self.witness.close.assert_called_once_with()
+
+    def test_execution_drift_at_recursive_kill_refuses_even_with_empty_domain(self):
+        reached = []
+        def kill(*,check):
+            check()
+            reached.append('kill')
+            self.rows['dockerd']['ExecMainStartTimestampMonotonic'] += 1
+        self.domain.kill.side_effect = kill
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(reached, ['kill'])
+        self.assertFalse(self.sequence.completed)
+        self.witness.close.assert_called_once_with()
+        self.assertNotIn('cold_quiesce_runtime', self.journal._returned)
 
     def test_new_fixed_job_after_domain_kill_refuses_final_observation(self):
         def kill(*,check):

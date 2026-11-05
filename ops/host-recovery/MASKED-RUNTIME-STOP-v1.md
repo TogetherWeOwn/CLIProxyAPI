@@ -65,6 +65,15 @@ are unchanged and can never reconstruct these witnesses after a crash. No claim
 is made about processes escaped before capture, processes between the two sample
 boundaries, later launches, unobserved daemons/shims or external writers.
 
+The shared fixed-stop sequence additionally captures both units' typed unsigned
+64-bit main-execution start timestamps before any masks and requires unchanged
+values through stop/completion and recursive-kill/final observations. Changed
+values refuse before empty-domain publication, including when a newly executed
+main process has already exited. Only counts and an unchanged-observation flag
+are public. These volatile samples are not continuous actual-exec exclusion,
+control-process/writer coverage or a reconstructible crash witness; see the
+[shared observation limits](MASKED-FORWARD-STOP-v1.md#fixed-unit-execution-timestamp-observations).
+
 The adapter never publishes the **outer** cold-quiesce return or drains the
 operation. Lost replies, persistence faults and partial effects permanently close
 this instance, its manager session and journal. No replay, repair, new epoch,

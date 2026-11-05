@@ -46,6 +46,30 @@ argument counts. This is not an arbitrary signal or method API. An effect can
 race completion or process loss: an ambiguous/failed KILL reply refuses rather
 than being treated as successful merely because a later unit looks inactive.
 
+## Fixed-unit execution timestamp observations
+
+Before mask publication the sequence reads each fixed unit's exact `Id` and
+`ExecMainStartTimestampMonotonic` twice over its original authenticated connection.
+The native reader requires a typed unsigned 64-bit variant, preserving values
+above 32 bits. Missing, malformed, changed, out-of-range or infinity timestamps
+refuse before effects. Zero is an observed value, not proof of no past execution.
+
+The volatile initial values must still match after cancellation and reload,
+before each fixed stop, during completion observations and across final barriers.
+A newer execution that already exited cannot be hidden by an inactive projection
+when its recorded start timestamp changed. Runtime composition also checks these
+values before publishing the empty-domain observation. Uncertainty permanently
+closes the same sequence/session/journal, with no retry or outer return.
+
+Public receipts contain only a fixed-unit count and
+`fixed_execution_timestamps_unchanged`, not timestamps, names or paths. These are
+point samples of manager-maintained main-execution metadata, not a continuous
+execution audit. Timestamp granularity, manager reset/reexec, control processes,
+other units, aliases/templates, activation paths and external writers remain
+outside this witness. Equal values do not prove actual-exec or launch exclusion,
+all-job retirement, coverage or drain. Retained records do not reconstruct the
+volatile observations after process loss. No operational authority is enabled.
+
 ## What this does not establish
 
 The returned `masked_inactive_observed` and `fixed_stop_completion_observed` are

@@ -129,10 +129,11 @@ class _Connection:
         self.current()
 
     def basic(self, message, kind):
-        value = C.c_uint8() if kind == "y" else C.c_uint32() if kind == "u" else C.c_char_p()
+        value = (C.c_uint8() if kind == "y" else C.c_uint32() if kind == "u" else
+                 C.c_uint64() if kind == "t" else C.c_char_p())
         if self.lib.sd_bus_message_read_basic(message, kind.encode(), C.byref(value)) <= 0:
             raise Rejected("manager-bus-message-field-required")
-        return value.value if kind in ("u", "y") else _text(value.value)
+        return value.value if kind in ("u", "y", "t") else _text(value.value)
 
     def fields(self, message, signature):
         expected = "v" if signature.startswith("v:") else signature
@@ -140,7 +141,7 @@ class _Connection:
             raise Rejected("manager-bus-message-signature")
         if signature.startswith("v:"):
             kind = signature[2:]
-            if kind not in ("s", "u", "as", "ay", "(uo)"):
+            if kind not in ("s", "u", "t", "as", "ay", "(uo)"):
                 raise Rejected("manager-bus-fixed-variant-required")
             if self.lib.sd_bus_message_enter_container(message, b"v", kind.encode()) <= 0:
                 raise Rejected("manager-bus-property-type-required")

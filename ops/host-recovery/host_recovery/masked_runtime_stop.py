@@ -104,6 +104,7 @@ class MaskedRuntimeStop(_MaskedFixedStop):
                 "runtime_stop_completion_count": len(self.roles), "runtime_containment_coverage_proven": False}
 
     def _final_check(self):
+        self._execution_current()
         self._current()
         if not self._domain_killed or self.domain.populated() is not False:
             raise Rejected("masked-runtime-empty-domain-unconfirmed")
