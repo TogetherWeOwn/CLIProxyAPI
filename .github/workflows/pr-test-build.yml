@@ -197,12 +197,24 @@ jobs:
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             timeout 90s bash ops/host-recovery/tests/inventory_runtime.sh "$head_sha" "$go_reader" \
             2>&1 | tee "$RUNNER_TEMP/recovery-runtime-inventory.log"
+      - name: Expand only the pinned offline containerd config
+        shell: bash
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse HEAD)"
+          # Non-root config dump only; never invoke the daemon or a runtime client.
+          env -i PATH=/usr/bin:/bin LANG=C GITHUB_ACTIONS=true \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            timeout 30s python3 -I ops/host-recovery/tests/offline_containerd_config.py "$head_sha" \
+            2>&1 | tee "$RUNNER_TEMP/recovery-offline-containerd-config.log"
       - name: Retain raw runtime prerequisite inventory
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: recovery-runtime-inventory-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}/recovery-runtime-inventory.log
+          path: |
+            ${{ runner.temp }}/recovery-runtime-inventory.log
+            ${{ runner.temp }}/recovery-offline-containerd-config.log
           if-no-files-found: error
 
   recovery-race:

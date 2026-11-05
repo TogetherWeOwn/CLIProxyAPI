@@ -21,11 +21,14 @@ that the observed executable was built from that source**.
 | containerd | v2.4.2 / b7a25261e029d68978bbf290df0a62fc819b3c51 | containerd/containerd v2.4.2 | [`b7a25261e029d68978bbf290df0a62fc819b3c51`](https://github.com/containerd/containerd/commit/b7a25261e029d68978bbf290df0a62fc819b3c51) |
 | runc | 1.5.2 / v1.5.2-0-g29dd3dc2 | opencontainers/runc v1.5.2 | [`29dd3dc2b13b4123162e5fe132504bb4b15569f1`](https://github.com/opencontainers/runc/commit/29dd3dc2b13b4123162e5fe132504bb4b15569f1) |
 
-`ctr` reported v2.4.2 without a commit. The shim was not inventoried in that
-revision. Do not assign either the containerd commit merely because they usually
-ship together. The next inventory includes the shim and the embedded Go build
-metadata of each executable; missing or conflicting correspondence remains
-unresolved. The inventory records metadata, not a provenance approval.
+`ctr` reported v2.4.2 without a commit in that revision; the shim was not yet
+inventoried. The subsequent exact-head [Actions
+42116989500](https://github.com/TogetherWeOwn/CLIProxyAPI/actions/runs/42116989500)
+passed all six jobs and independently recorded actual containerd/shim/ctr embedded
+VCS metadata matching the containerd commit above, with modified=false. Actual
+runc metadata likewise matches its resolved commit. Dockerd/CLI embedded VCS and
+distro/import provenance remain unresolved. These observations do not attest
+build authenticity or approve a runtime installation.
 
 Systemd reported `255 (255.4-1ubuntu8.18)`. Prior v255 source references explain
 tested interface semantics, not the entire Ubuntu patched package. Exact distro
