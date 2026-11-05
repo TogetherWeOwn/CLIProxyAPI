@@ -1,9 +1,12 @@
 """Real CLI/lock/signals/local alerts; no installed manager/daemon/full fence."""
+from contextlib import contextmanager
 import copy
 import errno
 import os
 from pathlib import Path
+import selectors
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -120,6 +123,43 @@ class UnresolvedServiceTests(unittest.TestCase):
         self.assertFalse(owner.challenge_verified)
         self.assertFalse(self.listener.inbox)
 
+    def test_context_exit_after_deadline_cannot_record_persistence_or_admission(self):
+        original = unresolved_service.open_approved_directory
+        for operation in ("persist", "transport"):
+            now = [1000.]
+            owner = self.alerts(clock=lambda: now[0], deadline=1001.)
+            @contextmanager
+            def slow_exit(approval):
+                with original(approval) as directory:
+                    yield directory
+                now[0] = 1002.
+            with self.subTest(operation=operation):
+                with patch.object(unresolved_service, "open_approved_directory", side_effect=slow_exit), \
+                        self.assertRaises(durable.Rejected):
+                    getattr(owner, operation)(NOTICE)
+                self.assertEqual(owner.status()["receipt_count"], 0)
+                self.assertEqual(owner.status()["volatile_admission_count"], 0)
+
+    def test_killed_helper_is_reaped_during_hold_not_only_when_service_returns(self):
+        commands = unresolved_service.LocalCommands()
+        previous = signal.getsignal(signal.SIGCHLD)
+        def service(approval, **kw):
+            proc = subprocess.Popen([sys.executable, "-I", "-c", "pass"])
+            self.addCleanup(proc.wait)
+            commands.pending.append(proc)
+            # Observe exit without reaping. This owned child is now a zombie;
+            # the runner's SIGCHLD owner must reap it without ending the hold.
+            os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+            os.kill(os.getpid(), signal.SIGCHLD)
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(commands.pending, [])
+            return {"start_permission": False}
+        with patch.object(unresolved_service, "LocalCommands", return_value=commands), \
+                patch.object(unresolved_service, "run_supervisor", side_effect=service):
+            unresolved_service.run_unresolved(self.case.fixture.approval,
+                endpoint=self.case.endpoint_approval, alerts=self.alerts(), deadline=self.end)
+        self.assertEqual(signal.getsignal(signal.SIGCHLD), previous)
+
     def test_same_notice_is_never_retried_after_ack_or_uncertain_send(self):
         owner = self.alerts()
         self.assertTrue(owner.transport(NOTICE))
@@ -226,6 +266,31 @@ class UnresolvedServiceTests(unittest.TestCase):
         self.stop()
         self.assertEqual(self.listener.drain()["outcome"], "recovery_unresolved")
 
+    def test_actual_cli_sigterm_interrupts_stalled_alert_challenge(self):
+        stalled = self.case.installation.root / "stalled-alert"
+        stalled.mkdir(mode=0o700)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as listener:
+            listener.bind(str(stalled / "alert.sock"))
+            (stalled / "alert.sock").chmod(0o600)
+            listener.listen(1)
+            child = self.cli(**{"alert-endpoint": str(stalled),
+                "alert-endpoint-device": stalled.stat().st_dev,
+                "alert-endpoint-inode": stalled.stat().st_ino})
+            with selectors.DefaultSelector() as ready:
+                ready.register(listener, selectors.EVENT_READ)
+                self.assertTrue(ready.select(5), "CLI did not connect to stalled listener")
+            connection, _ = listener.accept()
+            with connection:
+                with selectors.DefaultSelector() as ready:
+                    ready.register(connection, selectors.EVENT_READ)
+                    self.assertTrue(ready.select(5), "challenge not sent")
+                self.assertEqual(durable.decode(connection.recv(4096))["kind"], "challenge")
+                self.case.locked()
+                child.send_signal(signal.SIGTERM)
+                output, error = child.communicate(timeout=2)
+                self.assertEqual((child.returncode, output, error), (3, b"", b""))
+        self.case.unlocked()
+
     def test_actual_cli_sigkill_keeps_durable_intent_and_no_terminal(self):
         before = self.case.original()
         child = self.cli()
@@ -253,6 +318,48 @@ class UnresolvedServiceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, b"")
         self.assertEqual(result.stderr, b"host-recovery-supervisor: invalid-arguments\n")
+
+
+class CommandCancellationTests(unittest.TestCase):
+    def test_shutdown_cancels_helper_output_wait_and_retains_pending_owner(self):
+        commands = unresolved_service.LocalCommands()
+        with unresolved_service.shutdown_pipe(reap=commands.reap) as cancel_fd:
+            commands.cancel_fd = cancel_fd
+            script = "import os,signal;os.kill(os.getppid(),signal.SIGTERM);r,w=os.pipe();os.read(r,1)"
+            with self.assertRaisesRegex(durable.Rejected, "command-cancelled"):
+                commands.run((sys.executable, "-I", "-c", script), deadline=time.monotonic() + 30.)
+            self.assertTrue(worker.cancellation_pending(cancel_fd))
+        for proc in commands.pending:
+            proc.wait(timeout=5)
+        commands.reap()
+        self.assertEqual(commands.pending, [])
+
+    def test_shutdown_after_stdout_eof_cancels_pidfd_wait(self):
+        commands = unresolved_service.LocalCommands()
+        original = os.pidfd_open
+        reached = []
+        def opening(pid, flags):
+            fd = original(pid, flags)
+            reached.append(pid)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return fd
+        with unresolved_service.shutdown_pipe(reap=commands.reap) as cancel_fd:
+            commands.cancel_fd = cancel_fd
+            script = "import os;os.close(1);r,w=os.pipe();os.read(r,1)"
+            with patch.object(os, "pidfd_open", side_effect=opening), \
+                    self.assertRaisesRegex(durable.Rejected, "command-cancelled"):
+                commands.run((sys.executable, "-I", "-c", script), deadline=time.monotonic() + 30.)
+            self.assertEqual(len(reached), 1)
+        for proc in commands.pending:
+            proc.wait(timeout=5)
+        commands.reap()
+        self.assertEqual(commands.pending, [])
+
+    def test_reap_keeps_pending_list_identity_for_interrupted_append(self):
+        commands = unresolved_service.LocalCommands()
+        pending = commands.pending
+        commands.reap()
+        self.assertIs(commands.pending, pending)
 
 
 class ShutdownPipeTests(unittest.TestCase):

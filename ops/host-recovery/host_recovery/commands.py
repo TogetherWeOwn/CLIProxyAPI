@@ -40,21 +40,36 @@ class Deadline:
         return self.deadline - now
 
 
+def check_cancellation(fd):
+    if fd is not None:
+        if type(fd) is not int or fd < 0:
+            raise Rejected("command-cancellation-descriptor-required")
+        with selectors.DefaultSelector() as ready:
+            ready.register(fd, selectors.EVENT_READ)
+            if ready.select(0):
+                raise CommandUncertain("command-cancelled")
+
+
 class LocalCommands:
-    def __init__(self, clock=time.monotonic):
-        self.clock = clock
+    def __init__(self, clock=time.monotonic, *, cancel_fd=None):
+        self.clock, self.cancel_fd = clock, cancel_fd
         # Keep references to killed helpers until they can be reaped without a
         # wait outside the inclusive deadline. A supervisor must call reap().
         self.pending = []
 
     def reap(self):
-        self.pending = [proc for proc in self.pending if proc.poll() is None]
+        # Preserve the list object across a main-thread SIGCHLD handler. An
+        # interrupted append must not target an obsolete list and lose ownership.
+        self.pending[:] = [proc for proc in self.pending if proc.poll() is None]
 
     def run(self, argv, *, deadline):
         if (type(argv) is not tuple or not argv or not os.path.isabs(argv[0])
                 or any(type(arg) is not str or not arg or "\0" in arg for arg in argv)):
             raise Rejected("fixed-command-argv-required")
-        remaining = Deadline(self.clock, deadline).remaining
+        timer = Deadline(self.clock, deadline)
+        def remaining():
+            check_cancellation(self.cancel_fd)
+            return timer.remaining()
         remaining()
         self.reap()
         proc = None
@@ -67,8 +82,12 @@ class LocalCommands:
             os.set_blocking(proc.stdout.fileno(), False)
             with selectors.DefaultSelector() as selector:
                 selector.register(proc.stdout, selectors.EVENT_READ)
-                while selector.get_map():
-                    for key, _ in selector.select(remaining()):
+                if self.cancel_fd is not None:
+                    selector.register(self.cancel_fd, selectors.EVENT_READ, "cancel")
+                while proc.stdout.fileno() in selector.get_map():
+                    events = selector.select(remaining())
+                    check_cancellation(self.cancel_fd)
+                    for key, _ in events:
                         block = os.read(key.fd, min(8192, MAX_OUTPUT + 1 - len(raw)))
                         if not block:
                             selector.unregister(key.fileobj)
@@ -76,10 +95,32 @@ class LocalCommands:
                             raw.extend(block)
                             if len(raw) > MAX_OUTPUT:
                                 raise CommandUncertain("command-output-overflow")
-                try:
-                    code = proc.wait(timeout=remaining())
-                except subprocess.TimeoutExpired:
-                    raise CommandUncertain("command-deadline-missed") from None
+                if self.cancel_fd is None:
+                    try:
+                        code = proc.wait(timeout=remaining())
+                    except subprocess.TimeoutExpired:
+                        raise CommandUncertain("command-deadline-missed") from None
+                else:
+                    # stdout EOF is not process exit. A pidfd keeps cancellation
+                    # live even for a helper that closes stdout then hangs.
+                    code = proc.poll()
+                    if code is None:
+                        pidfd = os.pidfd_open(proc.pid, 0)
+                        registered = False
+                        try:
+                            selector.register(pidfd, selectors.EVENT_READ)
+                            registered = True
+                            selector.select(remaining())
+                            check_cancellation(self.cancel_fd)
+                            code = proc.poll()
+                            if code is None:
+                                raise CommandUncertain("command-result-unconfirmed")
+                        finally:
+                            try:
+                                if registered:
+                                    selector.unregister(pidfd)
+                            finally:
+                                os.close(pidfd)
             remaining()
             if code != 0:
                 raise CommandUncertain("command-result-unconfirmed")
@@ -94,4 +135,7 @@ class LocalCommands:
                     except OSError:
                         pass
                     self.pending.append(proc)
+                    # Close the exit-before-registration SIGCHLD race without
+                    # waiting; later exits are reaped by the persistent owner.
+                    self.reap()
                 proc.stdout.close()

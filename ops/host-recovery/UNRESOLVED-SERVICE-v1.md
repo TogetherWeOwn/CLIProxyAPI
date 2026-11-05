@@ -42,9 +42,18 @@ SIGTERM/SIGINT, even after failed alert delivery. It does not poll/retry the man
 rechallenge a failed/replaced listener or renew a deadline in that hold.
 
 Signal handling writes to the nonblocking pipe; a full pipe already requests
-shutdown. Previous handlers are restored before the descriptors close. The
-command owner performs nonblocking reap and remains alive until CLI process exit;
-helper cleanup is not daemon/cgroup quiescence. There is no stdout/status-consumer
+shutdown. The same descriptor cancels manager-helper output waits, pidfd-based
+exit waits after stdout EOF, and local alert challenge/notice waits. A canceled
+alert attempt refuses immediately rather than adding blocking escalation during
+shutdown. Blocking filesystem operations remain subject to the documented kernel
+I/O limitation; pipe readiness cannot interrupt uninterruptible storage.
+Previous handlers are restored before the descriptors close, and borrowed
+cancellation descriptors are detached from transports before reuse. The command
+owner also performs nonblocking SIGCHLD reaping throughout passive hold, using
+only its retained Popen objects, never waitpid(-1). A stable pending-list identity
+and a post-registration reap close the exit-before-registration race. It remains
+alive until CLI process exit; helper cleanup is not daemon/cgroup quiescence.
+There is no stdout/status-consumer
 I/O in the service runner. Exit **3** means shutdown unresolved, never healthy or
 completed. Exit **1** means input/lifecycle unavailable; exit **2** means invalid
 arguments. Refusals do not print private arguments, paths or exception text.
@@ -71,7 +80,9 @@ one real challenge and compares the response to the externally pinned listener
 instance. Missing, wrong or replaced listeners refuse; no automatic rechallenge,
 replacement-instance adoption or ambiguous notice retry is allowed. Each distinct
 notice is attempted at most once by this owner. Final directory checks and the
-shared absolute alert limit must succeed before counting an acknowledgment.
+shared absolute alert limit must succeed before counting an acknowledgment,
+including the additional ancestry validation during directory-context exit. Late
+completion cannot increment either persistence or volatile-admission success.
 
 The returned API summary separates successful receipt writes, attempted transports
 and confirmed **volatile local inbox admissions**. Durable local notice files do
@@ -89,6 +100,11 @@ Actual flock, SIGTERM/SIGKILL, pipe cancellation, protected notice files and Uni
 challenge/notice IPC are exercised. Storage tests assert all twelve reached
 EIO/ENOSPC combinations at create/write/file-fsync/rename/directory-fsync/readback,
 then require actual local transport admission despite persistence failure.
+Reached earlier-source regressions cover a stalled alert challenge ignoring
+SIGTERM, both late directory-context completions returning success, and a retained
+exited helper not reaped during synthetic service hold. Final tests also reach
+manager-helper stdout and post-EOF pidfd cancellation with actual local signals.
+These are local lifecycle observations, not descendant/container quiescence.
 No host unit is installed or started; no Docker/production/management endpoint,
 auth/config/backup or producer library is contacted/read/executed.
 

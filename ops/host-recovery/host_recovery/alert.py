@@ -17,6 +17,7 @@ import struct
 import time
 import uuid
 
+from .commands import check_cancellation
 from .durable import Rejected, canonical, decode, digest, directory
 from .journal import identity
 
@@ -93,18 +94,19 @@ class AlertClient:
     not fresh allowances or upstream network timeouts. A preflight receipt pins
     the listener instance; a replacement cannot silently inherit that receipt.
     """
-    def __init__(self, path, route_id, *, listener_uid, clock=time.monotonic):
+    def __init__(self, path, route_id, *, listener_uid, clock=time.monotonic, cancel_fd=None):
         if not os.path.isabs(path) or not identity(route_id) or type(listener_uid) is not int or listener_uid < 0:
             raise Rejected("alert-route-required")
         self.path = path
         self.route_id = route_id
         self.uid = listener_uid
-        self.clock = clock
+        self.clock, self.cancel_fd = clock, cancel_fd
         self.instance_id = None
         self.delivery_receipt = None
         self.last_clock = None
 
     def _remaining(self, deadline):
+        check_cancellation(self.cancel_fd)
         now = self.clock()
         if (type(deadline) not in (int, float) or not math.isfinite(deadline)
                 or type(now) not in (int, float) or not math.isfinite(now) or now >= deadline
@@ -130,12 +132,16 @@ class AlertClient:
                 peer(sock, self.uid)
                 with selectors.DefaultSelector() as wait:
                     wait.register(sock, selectors.EVENT_WRITE)
+                    if self.cancel_fd is not None:
+                        wait.register(self.cancel_fd, selectors.EVENT_READ)
                     if not wait.select(self._remaining(deadline)):
                         raise Rejected("alert-deadline-expired")
+                    self._remaining(deadline)
                     send(sock, request)
                     wait.modify(sock, selectors.EVENT_READ)
                     if not wait.select(self._remaining(deadline)):
                         raise Rejected("alert-deadline-expired")
+                    self._remaining(deadline)
                     response = packet(sock)
                     self._remaining(deadline)
         return response

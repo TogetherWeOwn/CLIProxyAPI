@@ -21,7 +21,7 @@ from .worker_runtime import _separate
 
 
 @contextmanager
-def shutdown_pipe():
+def shutdown_pipe(*, reap=None):
     """Own a nonblocking cancellation pipe; restore handlers before closing it.
 
     A full pipe already signifies shutdown. Repeated signals never block and do
@@ -38,6 +38,10 @@ def shutdown_pipe():
                     raise
         for signum in (signal.SIGTERM, signal.SIGINT):
             previous[signum] = signal.signal(signum, stop)
+        if reap is not None:
+            # Popen.poll is nonblocking (including its waitpid lock). Reap only
+            # retained owned helpers, never waitpid(-1) or another owner's child.
+            previous[signal.SIGCHLD] = signal.signal(signal.SIGCHLD, lambda *args: reap())
         yield read
     finally:
         for signum, handler in previous.items():
@@ -86,6 +90,7 @@ class ServiceAlerts:
             atomic_write(directory.fd, name, raw, stage_name=".stage-" + name, fault=self.fault)
             directory.validate()
             self.timer.remaining()
+        self.timer.remaining()
         self.persisted.add(pin)
 
     def transport(self, notice):
@@ -110,6 +115,7 @@ class ServiceAlerts:
                 raise Rejected("service-alert-admission-unconfirmed")
             directory.validate()
             self.timer.remaining()
+        self.timer.remaining()
         self.admitted.add(pin)
         return True
 
@@ -133,14 +139,21 @@ def run_unresolved(approval, *, endpoint, alerts, deadline, clock=time.monotonic
     _separate([approval.installation.content, approval.installation.journal, endpoint,
                alerts.endpoint, alerts.receipts])
     commands = LocalCommands(clock)
+    original_cancel = alerts.client.cancel_fd
     try:
-        with shutdown_pipe() as cancel_fd:
-            result = run_supervisor(approval, endpoint=endpoint, deadline=deadline,
-                fence=lambda intent, **kwargs: False, result_oracle=lambda *args, **kwargs: False,
-                persist_alert=alerts.persist, transport_alert=alerts.transport, commands=commands,
-                cancel_fd=cancel_fd, clock=clock)
+        with shutdown_pipe(reap=commands.reap) as cancel_fd:
+            commands.cancel_fd = alerts.client.cancel_fd = cancel_fd
+            try:
+                result = run_supervisor(approval, endpoint=endpoint, deadline=deadline,
+                    fence=lambda intent, **kwargs: False, result_oracle=lambda *args, **kwargs: False,
+                    persist_alert=alerts.persist, transport_alert=alerts.transport, commands=commands,
+                    cancel_fd=cancel_fd, clock=clock)
+            finally:
+                # Never leave a borrowed descriptor number attached after close.
+                commands.cancel_fd = None
+                alerts.client.cancel_fd = original_cancel
         return {**result, "operation": "hold_without_execution_authority", "alerts": alerts.status()}
     finally:
-        # Pending helpers stay owned through CLI process exit. Never add a wait
-        # outside the original reserve or infer cgroup/daemon quiescence from reap.
+        # SIGCHLD also reaps during passive hold. Never add a wait outside the
+        # reserve or infer cgroup/daemon quiescence from helper cleanup.
         commands.reap()
