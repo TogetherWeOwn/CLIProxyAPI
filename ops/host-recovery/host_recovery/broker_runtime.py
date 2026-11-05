@@ -12,7 +12,7 @@ import stat
 
 from .broker_authority import SupervisorPeerAuthority
 from .broker_operations import OperationJournal
-from .durable import Rejected, canonical, decode, digest, directory, read_file
+from .durable import Rejected, canonical, decode, digest, directory
 from .manager import PROPERTIES, UnitBinding, properties, static_properties
 from .manager_jobs import RuntimeStopJobs
 from .topology import RUNTIME_ROLES, Topology, within
@@ -84,11 +84,39 @@ class RuntimeDomain:
             if (current.st_dev, current.st_ino) != (self.device, self.inode):
                 raise Rejected("runtime-domain-path-changed")
 
-    def populated(self):
+    def _events(self):
         self.current()
-        raw, st = read_file(self.fd, "cgroup.events", limit=1024)
-        if st.st_dev != self.device:
-            raise Rejected("runtime-domain-cross-mount")
+        fd = os.open("cgroup.events", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=self.fd)
+        try:
+            before = os.fstat(fd)
+            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_dev != self.device
+                    or os.listxattr(fd)):
+                raise Rejected("runtime-domain-events-file-unconfirmed")
+            blocks, size = [], 0
+            while True:
+                block = os.read(fd, 1025-size)
+                if not block:
+                    break
+                size += len(block)
+                if size > 1024:
+                    raise Rejected("runtime-domain-events-overflow")
+                blocks.append(block)
+            after = os.fstat(fd)
+            path = os.stat("cgroup.events", dir_fd=self.fd, follow_symlinks=False)
+            # kernfs event values are dynamic and do not have persistent-file
+            # size/timestamp semantics. Keep mount/path/inode and metadata pins,
+            # not durable.read_file's immutable-content signature contract.
+            def identity(info):
+                return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink)
+            if identity(before) != identity(after) or identity(before) != identity(path) or os.listxattr(fd):
+                raise Rejected("runtime-domain-events-identity-changed")
+            self.current()
+            return b"".join(blocks)
+        finally:
+            os.close(fd)
+
+    def populated(self):
+        raw = self._events()
         values = {}
         for line in raw.decode("ascii").splitlines():
             fields = line.split()

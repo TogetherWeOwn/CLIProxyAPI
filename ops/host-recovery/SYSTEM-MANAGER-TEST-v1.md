@@ -76,8 +76,10 @@ allowance. All service lifetimes are capped at 60 seconds; the otherwise empty
 slice is a kernel grouping, not an always-on billed runtime. Cleanup is registered
 before any fragment write and repeated by the existing `always()` step. It
 terminates only the three exact owned services, stops the exact slice, verifies
-owned fragments/masks before removal, fsyncs/reloads and requires `not-found`.
-The ephemeral runner remains the cancellation backstop. No shared-host operation,
+owned fragments/masks before removal, fsyncs/reloads and requires service
+`not-found`. A named slice can be synthesized without a fragment: its exact
+inactive/dead/no-job/no-fragment/no-cgroup projection and absent kernel group are
+required instead. The ephemeral runner remains the cancellation backstop. No shared-host operation,
 operational installer, credential, release pin or production action is authorized.
 
 ## Idle job display compatibility

@@ -128,6 +128,60 @@ class RuntimeContainmentTests(unittest.TestCase):
         self.assertTrue(self.adapter.failed)
         self.assertEqual(self.operations.status()['state'], 'reconciliation_required')
 
+    def test_dynamic_cgroup_event_timestamps_are_not_persistent_file_pins(self):
+        original = os.fstat
+        inode = self.events.stat().st_ino
+        reached = []
+        def changing(fd):
+            info = original(fd)
+            if info.st_ino != inode: return info
+            reached.append(fd)
+            fields = {key:getattr(info,key) for key in dir(info) if key.startswith('st_')}
+            fields.update(st_mtime_ns=100+len(reached), st_ctime_ns=200+len(reached), st_size=0)
+            return SimpleNamespace(**fields)
+        with patch.object(os,'fstat',side_effect=changing):
+            self.assertIs(self.domain.populated(), False)
+        self.assertGreaterEqual(len(reached), 2)
+        # Persistent regular-file reads deliberately retain the stricter contract.
+        fd = os.open(self.group_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        self.addCleanup(os.close, fd)
+        with patch.object(os,'fstat',side_effect=changing):
+            with self.assertRaises(durable.Rejected): durable.read_file(fd,'cgroup.events')
+
+    def test_cgroup_event_inode_mode_owner_and_link_changes_still_refuse(self):
+        original = os.fstat
+        inode = self.events.stat().st_ino
+        for field in ('st_ino','st_mode','st_uid','st_gid','st_nlink','st_dev'):
+            with self.subTest(field=field):
+                reached = []
+                def changing(fd):
+                    info = original(fd)
+                    if info.st_ino != inode: return info
+                    reached.append(fd)
+                    fields = {key:getattr(info,key) for key in dir(info) if key.startswith('st_')}
+                    if len(reached) == 2: fields[field] += 1
+                    return SimpleNamespace(**fields)
+                with patch.object(os,'fstat',side_effect=changing):
+                    with self.assertRaises(durable.Rejected): self.domain.populated()
+                self.assertEqual(len(reached), 2)
+
+    def test_cgroup_event_read_is_bounded_and_trailing_path_replacement_refuses(self):
+        self.events.write_bytes(b'populated 0\n'+b'x'*1024)
+        with self.assertRaises(durable.Rejected): self.domain.populated()
+        self.events.write_bytes(b'populated 0\nfrozen 0\n')
+        original = os.read
+        inode, reached = self.events.stat().st_ino, []
+        def replace_after_read(fd,size):
+            raw = original(fd,size)
+            if os.fstat(fd).st_ino == inode and raw:
+                reached.append(fd)
+                self.events.unlink()
+                self.events.write_bytes(b'populated 0\nfrozen 0\n')
+            return raw
+        with patch.object(os,'read',side_effect=replace_after_read):
+            with self.assertRaises(durable.Rejected): self.domain.populated()
+        self.assertEqual(len(reached), 1)
+
     def test_durable_pending_before_fixed_stops_and_descriptor_recursive_kill(self):
         original = {p.name:p.read_bytes() for p in self.journal.iterdir()}
         receipt = self.contain()

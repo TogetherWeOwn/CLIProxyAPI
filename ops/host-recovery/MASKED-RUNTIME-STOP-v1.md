@@ -63,6 +63,19 @@ pidfds and cgroup2 domain checks are not mocked. Each fixed service must also
 refuse a fresh direct start. See [native fixture boundaries](SYSTEM-MANAGER-TEST-v1.md).
 New assertions must pass at the exact Actions head before qualification is claimed.
 
+The first native run failed **before the sequence**: the generic persistent-file
+reader rejected changing `cgroup.events` stat metadata. The corrected runtime
+reader is specific to the already-verified cgroup2 domain: bounded no-follow read,
+stable file device/inode/type/mode/owner/link count and path correspondence, but
+no immutable-content size/mtime/ctime assertion for this dynamic kernel value.
+The persistent `durable.read_file` contract is unchanged. New synthetic regression
+methods retain timestamp-change acceptance and identity/replacement/overflow
+refusal; these are not substitutes for exact-head native qualification. Initial
+cleanup also refused the fragment-less synthesized slice; the corrected fixture
+requires its strict stopped/empty builtin projection and absent kernel group,
+while removed service fragments must still report `not-found`. Initial failures
+and exact earlier sources are retained.
+
 The original request, authority, forward return and epoch in that fixture remain
 **synthetic**. The services are not Docker, containerd or real shims. Empty
 observations and dead fixture pidfds do not prove complete runtime containment

@@ -200,9 +200,27 @@ def cleanup_runtime():
     for path in paths.values():
         if command(systemctl, "list-units", "--all", "--no-legend", "--plain", "--", path.name).strip():
             command(systemctl, "reset-failed", "--", path.name)
-        if command(systemctl, "show", "--property=LoadState", "--value", "--", path.name).strip() != b"not-found":
+        state = command(systemctl, "show", "--property=LoadState", "--value", "--", path.name).strip()
+        if path == paths["slice"]:
+            # systemd can synthesize a named slice without any fragment. Require
+            # the exact stopped/empty builtin projection, not service not-found.
+            fields = {"Id", "LoadState", "ActiveState", "SubState", "ControlGroup", "FragmentPath", "Job"}
+            raw = command(systemctl, "show", "--property=" + ",".join(sorted(fields)), "--", path.name)
+            print(json.dumps({"cleanup_slice_raw":raw.decode()}), flush=True)
+            row = {}
+            for line in raw.decode().splitlines():
+                key,sep,value = line.partition("=")
+                if not sep or key not in fields or key in row:
+                    raise AssertionError("cleanup slice projection ambiguous")
+                row[key] = value
+            if (set(row) != fields or row["Id"] != path.name or row["LoadState"] not in ("loaded", "not-found")
+                    or row["ActiveState"] != "inactive" or row["SubState"] != "dead"
+                    or row["ControlGroup"] or row["FragmentPath"] or row["Job"] not in ("", "0")
+                    or Path("/sys/fs/cgroup/system.slice", path.name).exists()):
+                raise AssertionError("cleanup slice not stopped and empty")
+        elif state != b"not-found":
             raise AssertionError("owned runtime fixture still loadable")
-        print(json.dumps({"cleanup_unit": path.name, "load_state": "not-found",
+        print(json.dumps({"cleanup_unit": path.name, "load_state": state.decode(),
                           "fragment_removed": True, "mask_removed": True}), flush=True)
 
 
