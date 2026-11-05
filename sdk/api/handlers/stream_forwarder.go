@@ -155,13 +155,27 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 	keepAliveC, stopKeepAlive := NewStreamingKeepAliveTicker(keepAliveInterval)
 	defer stopKeepAlive()
 
+	requestCtx := c.Request.Context()
+	// A ready upstream channel can win select after client cancellation. Recheck
+	// before processing it, without replacing a chunk's delivery result after flush.
+	cancelIfRequested := func() bool {
+		if err := requestCtx.Err(); err != nil {
+			cancel(err)
+			return true
+		}
+		return false
+	}
+
 	var terminalErr *interfaces.ErrorMessage
 	for {
 		select {
-		case <-c.Request.Context().Done():
-			cancel(c.Request.Context().Err())
+		case <-requestCtx.Done():
+			cancel(requestCtx.Err())
 			return
 		case chunk, ok := <-data:
+			if cancelIfRequested() {
+				return
+			}
 			if !ok {
 				// Prefer surfacing a terminal error if one is pending.
 				if terminalErr == nil {
@@ -217,6 +231,9 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 				return
 			}
 		case errMsg, ok := <-errs:
+			if cancelIfRequested() {
+				return
+			}
 			if !ok {
 				errs = nil
 				continue
@@ -240,6 +257,9 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			cancel(execErr)
 			return
 		case <-keepAliveC:
+			if cancelIfRequested() {
+				return
+			}
 			writeKeepAlive()
 			if !flush() {
 				return

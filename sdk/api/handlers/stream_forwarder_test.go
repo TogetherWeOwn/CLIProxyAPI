@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -63,6 +64,149 @@ func TestForwardStreamNormalizesErrorBeforeWriteAndCancel(t *testing.T) {
 
 	if written != "safe error" || canceled != "safe error" {
 		t.Fatalf("written=%q canceled=%q, want sanitized error", written, canceled)
+	}
+}
+
+func TestForwardStreamCancellationPrecedesReadyUpstream(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		for _, source := range []string{"closed_data", "buffered_data", "buffered_error"} {
+			name := source
+			if deadline {
+				name += "_deadline"
+			}
+			t.Run(name, func(t *testing.T) {
+				// Exercise simultaneous readiness without depending on select ordering.
+				for range 64 {
+					ctx, stop := context.WithCancel(context.Background())
+					stop()
+					if deadline {
+						ctx, stop = context.WithDeadline(context.Background(), time.Unix(1, 0))
+						stop()
+					}
+					recorder := httptest.NewRecorder()
+					c, _ := gin.CreateTestContext(recorder)
+					c.Request = httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+					data := make(chan []byte, 1)
+					errs := make(chan *interfaces.ErrorMessage, 1)
+					switch source {
+					case "closed_data":
+						close(data)
+					case "buffered_data":
+						data <- []byte("late payload")
+					case "buffered_error":
+						errs <- &interfaces.ErrorMessage{Error: errors.New("late upstream failure")}
+					}
+					callbacks, cancellations := 0, 0
+					var outcome error
+					disabledKeepAlive := time.Duration(0)
+					h := &BaseAPIHandler{}
+					h.ForwardStream(c, recorder, func(err error) {
+						cancellations++
+						outcome = err
+					}, data, errs, StreamForwardOptions{
+						KeepAliveInterval: &disabledKeepAlive,
+						WriteChunk:        func([]byte) { callbacks++ },
+						Flush:             func() error { callbacks++; return nil },
+						NormalizeTerminalError: func(errMsg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
+							callbacks++
+							return errMsg
+						},
+						WriteTerminalError: func(*interfaces.ErrorMessage) { callbacks++ },
+						CloseError: func() *interfaces.ErrorMessage {
+							callbacks++
+							return &interfaces.ErrorMessage{Error: errors.New("premature EOF")}
+						},
+						WriteDone: func() { callbacks++ },
+					})
+					if !errors.Is(outcome, ctx.Err()) || callbacks != 0 || cancellations != 1 {
+						t.Fatalf("cancellation lost to ready upstream: outcome=%v want=%v callbacks=%d cancellations=%d", outcome, ctx.Err(), callbacks, cancellations)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestForwardStreamCancellationAfterPartialFlush(t *testing.T) {
+	for range 64 {
+		ctx, stop := context.WithCancel(context.Background())
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+		data := make(chan []byte, 1)
+		data <- []byte("partial payload")
+		writes, flushes, terminalCallbacks := 0, 0, 0
+		var outcome error
+		disabledKeepAlive := time.Duration(0)
+		h := &BaseAPIHandler{}
+		h.ForwardStream(c, recorder, func(err error) { outcome = err }, data, nil, StreamForwardOptions{
+			KeepAliveInterval: &disabledKeepAlive,
+			WriteChunk:        func([]byte) { writes++ },
+			Flush: func() error {
+				flushes++
+				if flushes == 1 {
+					stop()
+					close(data)
+				}
+				return nil
+			},
+			CloseError: func() *interfaces.ErrorMessage {
+				terminalCallbacks++
+				return &interfaces.ErrorMessage{Error: errors.New("premature EOF")}
+			},
+			WriteTerminalError: func(*interfaces.ErrorMessage) { terminalCallbacks++ },
+			WriteDone:          func() { terminalCallbacks++ },
+		})
+		stop()
+		if !errors.Is(outcome, context.Canceled) || writes != 1 || flushes != 1 || terminalCallbacks != 0 {
+			t.Fatalf("cancellation lost after partial flush: outcome=%v writes=%d flushes=%d terminal=%d", outcome, writes, flushes, terminalCallbacks)
+		}
+	}
+}
+
+func TestForwardStreamDeliveredOutcomeSurvivesFlushCancellation(t *testing.T) {
+	writeErr := errors.New("flush failed")
+	chunkErr := errors.New("terminal chunk failed")
+	for _, tc := range []struct {
+		name     string
+		flushErr error
+		chunkErr error
+	}{
+		{name: "completed"},
+		{name: "flush_failure", flushErr: writeErr},
+		{name: "terminal_failure", chunkErr: chunkErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, stop := context.WithCancel(context.Background())
+			defer stop()
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+			data := make(chan []byte, 1)
+			data <- []byte("terminal payload")
+			var outcome error
+			cancellations := 0
+			disabledKeepAlive := time.Duration(0)
+			h := &BaseAPIHandler{}
+			h.ForwardStream(c, recorder, func(err error) { outcome = err; cancellations++ }, data, nil, StreamForwardOptions{
+				KeepAliveInterval: &disabledKeepAlive,
+				Flush:             func() error { stop(); return tc.flushErr },
+				ChunkDone:         func() bool { return true },
+				ChunkError: func() *interfaces.ErrorMessage {
+					if tc.chunkErr != nil {
+						return &interfaces.ErrorMessage{Error: tc.chunkErr}
+					}
+					return nil
+				},
+			})
+			want := tc.flushErr
+			if want == nil {
+				want = tc.chunkErr
+			}
+			if !errors.Is(outcome, want) || cancellations != 1 {
+				t.Fatalf("delivered outcome=%v cancellations=%d, want %v once", outcome, cancellations, want)
+			}
+		})
 	}
 }
 
