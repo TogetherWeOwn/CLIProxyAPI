@@ -16,10 +16,10 @@ from .dispatch import validate_request
 from .durable import Rejected, canonical, decode, digest, read_file, signature
 from .journal import validate_intent
 from .loading import RecoveryInputs, owner, pin
-from .manager_jobs import classify_records, record_names
+from .manager_jobs import classify_completion, classify_records, completion_name, record_names
 from .topology import RUNTIME_ROLES
 
-MAX_FILES = 1 + 2 * MAX_OPERATIONS + 2 * len(RUNTIME_ROLES)
+MAX_FILES = 1 + 2 * MAX_OPERATIONS + 3 * len(RUNTIME_ROLES)
 PENDING_FIELDS = ("schema", "state", "binding_sha256", "epoch_sha256", "sequence", "method",
                   "target_sha256", "deadline", "operation_id")
 RETURN_FIELDS = ("schema", "operation_id", "result", "pending_drained")
@@ -92,6 +92,7 @@ def _capture(fd, *, uid, gid):
         allowed.update("operation-%02d-%s.json" % (sequence, kind) for kind in ("pending", "return"))
         for role in RUNTIME_ROLES:
             allowed.update(record_names(sequence, role))
+            allowed.add(completion_name(sequence, role))
     # Unknown/staged bytes are retained, not guessed away as unsubmitted calls.
     if "epoch.json" not in names or not set(names) <= allowed:
         raise Rejected("broker-history-incomplete-or-ambiguous")
@@ -190,8 +191,15 @@ def _classify(records, *, binding):
                 consumed.add(job_return)
             elif return_name in records:
                 raise Rejected("broker-history-return-before-job-identity")
-            jobs.append({"role": role, "classification": "submission_unreturned" if job_uncertain else "submitted_unproven",
-                         "job_id": None if job_uncertain else observed["job_id"], "retirement_proven": False})
+            job = {"role": role, "classification": "submission_unreturned" if job_uncertain else "submitted_unproven",
+                   "job_id": None if job_uncertain else observed["job_id"], "retirement_proven": False}
+            completion = completion_name(sequence, role)
+            if completion in records:
+                event = classify_completion(records[completion], pending=submitted, returned=observed)
+                consumed.add(completion)
+                job["classification"] = "completion_" + event["result"] + "_observed"
+                job["sender_cookie"] = event["sender_cookie"]
+            jobs.append(job)
         if jobs:
             item["manager_jobs"] = jobs
         operations.append(item)

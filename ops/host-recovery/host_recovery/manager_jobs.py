@@ -1,10 +1,10 @@
 """Fixed runtime StopUnit submissions with durable manager job identities.
 
-This is an embedding boundary, not an installed broker or job-completion witness.
-Within an observed bus generation, unique destinations do not retarget a lost
-manager name. Separate busctl connections are NOT a connection-atomic manager or
-bus-generation fence. ListJobs absence does not establish JobRemoved delivery,
-job retirement, activation exclusion or pending drain.
+This is an embedding boundary, not an installed broker or complete fence.
+Legacy busctl calls are NOT connection-atomic. An optional ManagerJobSession
+supplies same-connection completion observations and separate durable records;
+ListJobs absence never substitutes for a signal. Neither mode proves exclusive
+activation ownership, job retirement or pending drain.
 """
 from dataclasses import asdict
 import os
@@ -24,6 +24,28 @@ MAX_JOBS = 256
 JOB_PENDING_FIELDS = ("schema", "operation_id", "role", "target_sha256", "manager_owner",
                       "bus_id", "unit", "invocation_id")
 JOB_RETURN_FIELDS = ("schema", "pending_sha256", "job_id", "job_path", "retirement_proven")
+COMPLETION_FIELDS = ("schema", "return_sha256", "bus_id", "manager_owner", "job_id", "job_path",
+                     "unit", "result", "sender_cookie", "retirement_proven")
+
+
+def completion_name(sequence, role):
+    return record_names(sequence, role)[0].replace("pending.json", "completion.json")
+
+
+def classify_completion(raw, *, pending, returned):
+    from .manager_bus import RESULTS
+    value = decode(raw)
+    shape(value, COMPLETION_FIELDS)
+    if (raw != canonical(value) or value["schema"] != "host-recovery-manager-completion-v1"
+            or returned is None or value["return_sha256"] != digest(canonical(returned))
+            or value["bus_id"] != pending["bus_id"] or value["manager_owner"] != pending["manager_owner"]
+            or value["job_id"] != returned["job_id"] or type(value["job_id"]) is not int
+            or value["job_path"] != returned["job_path"] or value["unit"] != pending["unit"]
+            or type(value["result"]) is not str or value["result"] not in RESULTS
+            or type(value["sender_cookie"]) is not int or not 0 < value["sender_cookie"] < 2**64
+            or value["retirement_proven"] is not False):
+        raise Rejected("manager-job-completion-unbound")
+    return value
 
 
 def reply(raw, signature):
@@ -102,7 +124,12 @@ class RuntimeStopJobs:
     an IPC-supplied callback. Commands and their retained helper lifetime belong
     to that broker. No cancel, restart, StartUnit or arbitrary method exists.
     """
-    def __init__(self, *, journal, units, busctl, busctl_sha256, commands, read_helper_hash):
+    def __init__(self, *, journal, units, busctl, busctl_sha256, commands, read_helper_hash, session=None):
+        from .manager_bus import ManagerJobSession
+        if session is not None and (not isinstance(session, ManagerJobSession) or session.units != units):
+            raise Rejected("manager-job-original-session-required")
+        self.session = self._original_session = session
+        self._completions = {}
         if (not isinstance(journal, OperationJournal) or type(units) is not dict
                 or set(units) != set(RUNTIME_ROLES) or any(not isinstance(x, UnitBinding) for x in units.values())
                 or len({x.unit for x in units.values()}) != len(RUNTIME_ROLES)
@@ -118,10 +145,14 @@ class RuntimeStopJobs:
     def configuration(self):
         return canonical({"schema": "host-recovery-runtime-stop-target-v1", "busctl": self.busctl,
             "busctl_sha256": self.busctl_sha256, "binding_sha256": digest(self.journal._binding), "epoch_sha256": digest(self.journal._epoch),
-            "units": {role: asdict(self.units[role]) for role in RUNTIME_ROLES}})
+            "units": {role: asdict(self.units[role]) for role in RUNTIME_ROLES},
+            "session": None if self.session is None else {"bus_id": self.session.bus_id,
+                "manager_owner": self.session.owner, "library_sha256": self.session.library_sha256,
+                "deadline": self.session.deadline}})
 
     def _current(self, deadline, check):
-        if self.failed or self.configuration() != self._configuration:
+        if (self.failed or self.session is not self._original_session or self.configuration() != self._configuration
+                or self.session is not None and (self.session.failed or self.session.deadline > deadline)):
             raise Rejected("manager-job-configuration-changed")
         self.journal._current()
         self.journal._time(deadline)
@@ -130,7 +161,7 @@ class RuntimeStopJobs:
         check()
         self.journal._current()
         self.journal._time(deadline)
-        if self.configuration() != self._configuration:
+        if self.session is not self._original_session or self.configuration() != self._configuration:
             raise Rejected("manager-job-configuration-changed")
 
     def _call(self, destination, path, interface, method, args, *, deadline):
@@ -139,6 +170,13 @@ class RuntimeStopJobs:
 
     def _manager(self, deadline, check):
         self._current(deadline, check)
+        if self.session is not None:
+            bus_id, owner = self.session.identity()
+            if self._bus_id not in (None, bus_id) or self._owner not in (None, owner):
+                raise Rejected("manager-job-original-session-changed")
+            self._bus_id, self._owner = bus_id, owner
+            self._current(deadline, check)
+            return owner
         bus_id = reply(self._call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
             "GetId", (), deadline=deadline), "s")
         if type(bus_id) is not str or INVOCATION.fullmatch(bus_id) is None or self._bus_id not in (None, bus_id):
@@ -155,7 +193,8 @@ class RuntimeStopJobs:
 
     def _snapshot(self, deadline, check):
         owner = self._manager(deadline, check)
-        rows = jobs_reply(self._call(owner, MANAGER_PATH, MANAGER + ".Manager", "ListJobs", (), deadline=deadline))
+        rows = (self.session.jobs() if self.session is not None else
+                jobs_reply(self._call(owner, MANAGER_PATH, MANAGER + ".Manager", "ListJobs", (), deadline=deadline)))
         self._manager(deadline, check)
         for role, unit in self.units.items():
             expected = self._submitted.get(role)
@@ -187,9 +226,12 @@ class RuntimeStopJobs:
                 self.journal._write(pending_name, pending)
                 self._snapshot(deadline, check)
                 self._current(deadline, check)
-                raw = self._call(self._owner, MANAGER_PATH, MANAGER + ".Manager", "StopUnit",
-                                 ("ss", unit.unit, "fail"), deadline=deadline)
-                path = reply(raw, "o")
+                if self.session is not None:
+                    path = self.session.stop(role)
+                else:
+                    raw = self._call(self._owner, MANAGER_PATH, MANAGER + ".Manager", "StopUnit",
+                                     ("ss", unit.unit, "fail"), deadline=deadline)
+                    path = reply(raw, "o")
                 returned = {"schema": "host-recovery-manager-stop-return-v1", "pending_sha256": digest(canonical(pending)),
                     "job_id": job_path(path), "job_path": path, "retirement_proven": False}
                 if any(x["job_id"] == returned["job_id"] for x in self._submitted.values()):
@@ -206,7 +248,28 @@ class RuntimeStopJobs:
         with self.journal._mutex:
             try:
                 rows = self._snapshot(deadline, check)
-                return {role: "pending_observed" if item["job_id"] in rows else "absent_not_retired"
+                if self.session is not None:
+                    for role, event in self.session.completions().items():
+                        operation = decode(self.journal._pending["cold_quiesce_runtime"])
+                        self._current(deadline, check)
+                        returned = self._submitted[role]
+                        if returned["job_id"] in rows:
+                            raise Rejected("manager-job-completion-inventory-conflict")
+                        value = {"schema": "host-recovery-manager-completion-v1",
+                            "return_sha256": digest(canonical(returned)), "bus_id": self._bus_id,
+                            "manager_owner": self._owner, **event, "retirement_proven": False}
+                        if role in self._completions:
+                            if self._completions[role] != canonical(value):
+                                raise Rejected("manager-job-completion-changed")
+                        else:
+                            self.journal._write(completion_name(operation["sequence"], role), value)
+                            self._completions[role] = canonical(value)
+                        self._current(deadline, check)
+                    self.session.identity()
+                    self._current(deadline, check)
+                return {role: ("completion_" + decode(self._completions[role])["result"] + "_observed"
+                               if role in self._completions else
+                               "pending_observed" if item["job_id"] in rows else "absent_not_retired")
                         for role, item in self._submitted.items()}
             except Exception:
                 self.failed = self.journal._failed = True

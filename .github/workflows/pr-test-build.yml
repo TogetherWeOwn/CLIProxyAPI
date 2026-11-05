@@ -110,6 +110,12 @@ jobs:
       - name: Python recovery components at PR head
         shell: bash
         run: python3 -I ops/host-recovery/tests/run.py 2>&1 | tee "$RUNNER_TEMP/recovery-components.log"
+      - name: Native recovery manager transport on disposable private bus
+        shell: bash
+        run: |
+          # No host/system bus or real systemd service is used by this matrix.
+          command -v dbus-run-session
+          timeout 120s dbus-run-session -- env CPA_RECOVERY_PRIVATE_BUS_TEST=1 python3 -I ops/host-recovery/tests/test_manager_bus_native.py 2>&1 | tee "$RUNNER_TEMP/recovery-private-bus.log"
       - name: Remove empty fixture root
         if: always() && env.CPA_RECOVERY_TEST_ROOT != ''
         shell: bash
@@ -124,6 +130,7 @@ jobs:
           path: |
             ${{ runner.temp }}/recovery-environment.log
             ${{ runner.temp }}/recovery-components.log
+            ${{ runner.temp }}/recovery-private-bus.log
           if-no-files-found: error
 
   recovery-race:

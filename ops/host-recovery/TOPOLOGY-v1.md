@@ -181,14 +181,13 @@ It does not change the forward-unit adapter or enable any operational IPC/runner
   Only exact returned stop identities may remain pending during recursive kill.
   Live original peer/flock/input/deadline and helper/configuration checks revoke
   at bus and persistence boundaries. No numeric-job cancellation is implemented.
-- `pending_observed` and `absent_not_retired` are observations only. There is no
-  subscribed `JobRemoved`/completion witness. Separate busctl connections cannot
-  atomically bind a submission to one bus generation or unit invocation; observed
-  bus/name drift refuses, but unobserved replacement races remain a qualification
-  prerequisite. Empty job/unit/cgroup snapshots do not establish retirement or
-  exclude activation. All retirement/drain/fence/restore/start/settlement claims
-  remain false. Complete cold recovery still requires an authenticated continuous
-  manager witness and independently qualified launch/activation exclusion.
+- `pending_observed` and `absent_not_retired` are observations only. The legacy
+  busctl mode has no subscribed completion witness. Separate busctl connections
+  cannot atomically bind a submission to one bus generation or unit invocation;
+  observed drift refuses but unobserved replacement races remain. The optional
+  single-connection mode below observes completion, not activation exclusion or
+  a cold barrier. Empty job/unit/cgroup snapshots do not establish retirement.
+  All retirement/drain/fence/restore/start/settlement claims remain false.
 - Read-only crash history recognizes the bounded pending/returned job records,
   rejects orphan/conflicting/uncertain ordering, and never reconstructs a permit.
 
@@ -197,6 +196,50 @@ The method signatures and JSON nesting were checked against public systemd v255
 `src/busctl/busctl.c` (`json_transform_message`/array/struct serialization).
 This is source inspection, not installed-version or real-manager qualification.
 New tests script all bus responses and helper hashes; no host bus is contacted.
+
+## Optional single-connection completion witness
+
+`host_recovery/manager_bus.py:ManagerJobSession` supplies an optional embedding
+transport to `RuntimeStopJobs(session=...)`. It is not installed or constructed
+by an operational runner. It opens one explicit system-bus socket, ignores bus
+address environment variables and never reconnects or falls back to busctl.
+
+- The caller retains an independently pinned, root-owned `ProtectedFile` handle
+  for libsystemd, supplies the original authority barrier and owns session cleanup.
+  Loading uses the retained descriptor after checksum validation and repeats the
+  checksum afterward. Version/ABI, dependencies, loader environment, immutability
+  and actual root provisioning still require package qualification. Merely passing
+  a matching checksum is not approval. No package installation is performed here.
+- Before any stop, query bus ID and manager unique name on this same connection,
+  authenticate the bus-reported UID 0/PID 1, wait for both match-install replies,
+  subscribe to manager signals, and recheck identity. Calls use the unique owner.
+  Native asynchronous calls are pumped under the original deadline and revoking
+  authority check; no extra network/wait allowance or replay is added.
+- Validate exact `JobRemoved(uoss)` sender/path/interface/member, bounded serials,
+  ID/path/unit and closed result set. Hold an early signal until its actual stop
+  reply binds the identity. Duplicate, conflicting, malformed or overflowed events,
+  owner loss (even reacquisition), disconnect and authority loss revoke the session.
+  No callback retains a borrowed native message; only bounded copied fields survive.
+- Durable original pending still precedes the stop; the actual return precedes a
+  separately durable completion record, which binds its digest, bus/name and sender
+  serial. Missing signals remain `absent_not_retired`. `completion_done_observed`,
+  `completion_failed_observed`, `completion_canceled_observed` and other explicit
+  results are distinct. Failed/canceled completion is never successful quiescence.
+  Read-only history checks correspondence and does not revive a live session.
+- Completion is **not retirement/exclusive ownership**: StopUnit may merge a
+  compatible queued stop, and a unit-name call is not an invocation-atomic effect.
+  Concurrent activations, activation graph/actual launch exclusion, service/task
+  containment, old-epoch death, pending drain and quarantine remain separate required
+  proofs. No numeric-job cancel, restoration/start or settlement is enabled. The
+  forward-unit adapter still lacks this tracked completion transport.
+
+Actions runs a separate `dbus-run-session` native matrix using libsystemd and a
+synthetic manager on its disposable private bus. Only those tests replace the
+production address and root/PID1 expectations, and they still authenticate the
+actual test peer's bus-reported UID/PID. This is real ABI/protocol/ordering evidence,
+not actual systemd, system-bus, root-provisioning, kernel-cgroup, daemon or cold-fence
+qualification. The ordinary suite skips that matrix explicitly; its separate step
+must pass. No local suite/build or live-host contact is needed.
 
 ## Required next boundaries
 
