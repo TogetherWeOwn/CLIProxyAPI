@@ -8,6 +8,18 @@ as a substitute for the accepted production binaries.
 
 ## Implemented so far
 
+- `supervise.py` and `host_recovery/unresolved_service.py`: executable signal-aware
+  supervisor owner wires the existing persistent lock/hold lifecycle to protected
+  notice persistence and the real local alert client. Fixed deny boundaries cannot
+  be enabled by a flag or configuration import: **no claim, dispatch, recovery,
+  restoration/start authority or settlement**. Missing manager/fence authority
+  retains unresolved ownership until shutdown. A separately pinned listener
+  instance, once-only challenge/send, nonrenewing absolute escalation limit and
+  distinct receipt/volatile-admission counts never imply external/human delivery.
+  Actual CLI/flock/SIGTERM/SIGKILL/local IPC and reached storage faults are component
+  evidence; the CLI manager-failure path is not successful systemd/daemon recovery.
+  No unit is installed/started. Operational worker/fence/oracle/provisioning remain
+  due. See [executable owner and limits](UNRESOLVED-SERVICE-v1.md).
 - `host_recovery/service.py`: persistent embedding lifecycle acquires the existing
   installation lock before manager bootstrap, borrows it through the original
   broker claim/result exchange, then retains it in an unresolved passive hold.

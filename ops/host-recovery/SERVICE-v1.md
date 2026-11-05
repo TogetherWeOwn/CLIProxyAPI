@@ -5,6 +5,10 @@ installed or started, no daemon is contacted by these tests, and no credential,
 privilege, policy approval or release pin is provisioned. The existing
 `claim_worker.py` CLI remains identity-only. There is no CLI flag or configuration
 module import that turns arbitrary callbacks into approved host authority.
+`supervise.py` now supplies an executable **unresolved-only** owner with fixed deny
+boundaries, signal cancellation and actual local alert wiring; see
+[its launch contract and limits](UNRESOLVED-SERVICE-v1.md). It is not an operational
+recovery/start grant, installer or complete host fence.
 
 ## Composed entrypoint
 
