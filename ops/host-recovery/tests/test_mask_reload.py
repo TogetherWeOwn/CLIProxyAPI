@@ -43,7 +43,7 @@ class MaskReloadTests(unittest.TestCase):
         self.effect_hook = lambda method, args:None
         original_call = ScriptedConnection.call
         def call(connection, destination, interface, method, signature, args, response, **kwargs):
-            if method not in ('Reload', 'GetUnit', 'Get'):
+            if method not in ('Reload', 'GetUnit', 'Get') or method == 'Get' and args[1] == 'Refs':
                 return original_call(connection, destination, interface, method, signature, args, response, **kwargs)
             connection.calls.append((destination, method, args))
             self.effect_hook(method, args)

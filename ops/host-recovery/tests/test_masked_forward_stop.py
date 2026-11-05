@@ -83,6 +83,60 @@ class MaskedForwardStopTests(unittest.TestCase):
     def effects(self):
         return [method for _, method, _ in self.connection.calls if method in ('Cancel','Reload','StopUnit','KillUnit')]
 
+    def test_own_unit_reference_precedes_mask_publication_and_final_timestamp_checks(self):
+        reached = []
+        def hook(method):
+            if method == 'RefUnit':
+                reached.append(method)
+                self.assertEqual(durable.decode((self.path_state/'operation-01-pending.json').read_bytes()), self.operation)
+                self.assertFalse((self.path / self.units['forward'].unit).is_symlink())
+        self.connection.call_hook = hook
+        result = self.apply()
+        self.assertEqual(reached, ['RefUnit'])
+        self.assertEqual(result['fixed_unit_reference_count'], 1)
+        self.assertEqual(self.connection.references[self.units['forward'].unit], [self.connection.client_name])
+        self.assertFalse(result['activation_exclusion_proven'] or result['complete_fence_proven'])
+
+    def test_denied_reference_leaves_original_pending_and_no_mask_or_stop(self):
+        reached = []
+        def hook(method):
+            if method == 'RefUnit':
+                reached.append(method)
+                raise durable.Rejected('synthetic-ref-permission-denied')
+        self.connection.call_hook = hook
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(reached, ['RefUnit'])
+        self.assertFalse((self.path / self.units['forward'].unit).is_symlink())
+        self.assertEqual(self.effects(), [])
+        self.assertNotIn('contain_forward', self.journal._returned)
+        self.assertTrue(self.sequence.failed and self.session.failed)
+
+    def test_reference_lost_during_reload_refuses_before_stop(self):
+        reached = []
+        def hook(method, args):
+            if method == 'Reload':
+                reached.append(method)
+                self.connection.references[self.units['forward'].unit].clear()
+        self.effect_hook = hook
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(reached, ['Reload'])
+        self.assertNotIn('StopUnit', self.effects())
+        self.assertNotIn('contain_forward', self.journal._returned)
+
+    def test_unit_path_replacement_after_reload_refuses_with_equal_timestamp(self):
+        reached = []
+        original = ScriptedConnection.call
+        def call(connection, destination, interface, method, signature, args, response, **kwargs):
+            if method == 'GetUnit' and 'Reload' in self.effects():
+                reached.append(method)
+                return [[bus.MANAGER_PATH + '/unit/replacement_service']], None, None
+            return original(connection, destination, interface, method, signature, args, response, **kwargs)
+        with patch.object(ScriptedConnection, 'call', call):
+            with self.assertRaises(durable.Rejected): self.apply()
+        self.assertTrue(reached)
+        self.assertNotIn('StopUnit', self.effects())
+        self.assertFalse(self.sequence.completed)
+
     def test_full_order_has_durable_pending_before_each_fixed_effect(self):
         reached = []
         def effect(method):

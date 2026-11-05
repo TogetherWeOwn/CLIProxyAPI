@@ -9,6 +9,7 @@ not prove runtime drain.
 """
 import ctypes as C
 import math
+import re
 import threading
 
 from .durable import Rejected, canonical, decode
@@ -35,6 +36,7 @@ class _Library:
         self._declare("sd_bus_set_bus_client", integer, pointer, integer)
         self._declare("sd_bus_start", integer, pointer)
         self._declare("sd_bus_is_open", integer, pointer)
+        self._declare("sd_bus_get_unique_name", integer, pointer, C.POINTER(text))
         self._declare("sd_bus_process", integer, pointer, C.POINTER(pointer))
         self._declare("sd_bus_wait", integer, pointer, C.c_uint64)
         self._declare("sd_bus_close", None, pointer)
@@ -116,6 +118,16 @@ class _Connection:
     def current(self):
         if self.error is not None or not self.bus or self.lib.sd_bus_is_open(self.bus) <= 0:
             raise Rejected("manager-bus-connection-lost")
+
+    def unique_name(self):
+        self.current()
+        name = C.c_char_p()
+        _ok(self.lib.sd_bus_get_unique_name(self.bus, C.byref(name)))
+        value = _text(name.value)
+        if UNIQUE.fullmatch(value) is None:
+            raise Rejected("manager-bus-client-name-unconfirmed")
+        self.current()
+        return value
 
     def process(self):
         self.current()
@@ -274,6 +286,7 @@ class ManagerJobSession:
         self._cancel_watched = False
         self._kill_attempted = set()
         self._fixed_jobs_watched, self._created = False, {}
+        self._reference_attempted, self._fixed_unit_paths = False, {}
         try:
             self._current()
             if library.checksum() != library_sha256:
@@ -445,6 +458,80 @@ class ManagerJobSession:
         except BaseException:
             self.failed = True
             raise Rejected("manager-bus-inventory-unconfirmed") from None
+
+    def _retain_fixed_units(self):
+        """Retain loaded objects on this connection, never activation authority.
+
+        RefUnit prevents ordinary unit garbage collection from resetting sampled
+        execution state. The manager owns these sender references until connection
+        closure. No retry/UnrefUnit is attempted after an ambiguous reply.
+        """
+        try:
+            self.identity()
+            if self._reference_attempted or self._fixed_jobs_watched or self._attempted or self._cancel_watched:
+                raise Rejected("manager-bus-fixed-unit-reference-exhausted")
+            self._reference_attempted = True
+            self._reference_owner = self._connection.unique_name()
+            rule = "type='signal',sender='%s',path='%s',interface='%s.Manager',member='UnitRemoved'" % (
+                self.owner, MANAGER_PATH, MANAGER)
+            self._until(self._connection.match(rule, self._unit_removed))
+            self.identity()
+            for role, unit in self.units.items():
+                self._call(self.owner, MANAGER + ".Manager", "RefUnit", "s", (unit.unit,), "")
+                self.identity()
+                path = self._call(self.owner, MANAGER + ".Manager", "GetUnit", "s", (unit.unit,), "o")[0]
+                if (type(path) is not str
+                        or re.fullmatch(MANAGER_PATH + r"/unit/[A-Za-z0-9_]{1,1024}", path) is None
+                        or path in self._fixed_unit_paths.values()):
+                    raise Rejected("manager-bus-fixed-unit-reference-path-unconfirmed")
+                self._fixed_unit_paths[role] = path
+                self._fixed_unit_reference(role, path)
+            self.identity()
+            return dict(self._fixed_unit_paths)
+        except BaseException:
+            self.failed = True
+            raise Rejected("manager-bus-fixed-unit-reference-unconfirmed") from None
+
+    def _fixed_unit_reference(self, role, path):
+        try:
+            self.identity()
+            if (not self._reference_attempted or role not in self.units
+                    or self._fixed_unit_paths.get(role) != path
+                    or self._connection.unique_name() != self._reference_owner):
+                raise Rejected("manager-bus-original-unit-reference-required")
+            refs = self._call(self.owner, "org.freedesktop.DBus.Properties", "Get", "ss",
+                (MANAGER + ".Unit", "Refs"), "v:as", path=path)[0]
+            if (type(refs) is not list or len(refs) > MAX_EVENTS
+                    or any(type(name) is not str or UNIQUE.fullmatch(name) is None for name in refs)
+                    or refs.count(self._reference_owner) != 1):
+                raise Rejected("manager-bus-own-unit-reference-unconfirmed")
+            self.identity()
+            if self._connection.unique_name() != self._reference_owner:
+                raise Rejected("manager-bus-unit-reference-connection-changed")
+        except BaseException:
+            self.failed = True
+            raise Rejected("manager-bus-unit-reference-lost") from None
+
+    def _unit_removed(self, message):
+        connection = self._connection
+        if (not self._reference_attempted
+                or _text(connection.lib.sd_bus_message_get_sender(message)) != self.owner
+                or _text(connection.lib.sd_bus_message_get_path(message)) != MANAGER_PATH
+                or _text(connection.lib.sd_bus_message_get_interface(message)) != MANAGER + ".Manager"
+                or _text(connection.lib.sd_bus_message_get_member(message)) != "UnitRemoved"):
+            raise Rejected("manager-bus-unit-removal-sender-unconfirmed")
+        unit, path = connection.fields(message, "so")
+        cookie = C.c_uint64()
+        _ok(connection.lib.sd_bus_message_get_cookie(message, C.byref(cookie)))
+        self._event_count += 1
+        if (self._event_count > MAX_EVENTS or cookie.value <= self._last_cookie
+                or type(unit) is not str or type(path) is not str
+                or re.fullmatch(MANAGER_PATH + r"/unit/[A-Za-z0-9_]{1,1024}", path) is None):
+            raise Rejected("manager-bus-unit-removal-unconfirmed")
+        self._last_cookie = cookie.value
+        if (unit in {binding.unit for binding in self.units.values()}
+                or path in self._fixed_unit_paths.values()):
+            raise Rejected("manager-bus-referenced-unit-removed")
 
     def _watch_fixed_jobs(self):
         """Observe fixed-unit admissions before the masked shutdown sequence.

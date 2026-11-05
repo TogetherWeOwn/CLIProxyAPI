@@ -21,10 +21,14 @@ class ScriptedConnection:
         self.owner, self.uid, self.pid = ':1.7', 0, 1
         self.cookie, self.number, self.reply_number, self.result = 10, 41, 41, 'done'
         self.job_units, self.inventory = units(), []
+        self.client_name, self.references = ':1.99', {}
         self.call_hook = lambda method: None
         self.wait_hook = lambda: None
 
     def close(self): self.closed = True
+    def unique_name(self):
+        self.current()
+        return self.client_name
     def current(self):
         if self.closed or self.error: raise durable.Rejected('scripted-connection-lost')
     def process(self):
@@ -43,9 +47,20 @@ class ScriptedConnection:
         self.calls.append((destination,method,args))
         self.call_hook(method)
         value = {'GetId':['a'*32], 'GetNameOwner':[self.owner], 'GetConnectionUnixUser':[self.uid],
-                 'GetConnectionUnixProcessID':[self.pid], 'Subscribe':[], 'ListJobs':[self.inventory]}
+                 'GetConnectionUnixProcessID':[self.pid], 'Subscribe':[], 'ListJobs':[self.inventory], 'RefUnit':[]}
+        if method == 'GetUnit':
+            role = next(role for role,unit in self.job_units.items() if unit.unit == args[0])
+            value[method] = [bus.MANAGER_PATH + '/unit/' + role + '_service']
+        if method == 'Get' and args == (bus.MANAGER + '.Unit', 'Refs'):
+            role = kwargs['path'].rsplit('/', 1)[1].removesuffix('_service')
+            value[method] = [self.references.get(self.job_units[role].unit, [])]
         result = []
-        if method == 'StopUnit':
+        if method == 'RefUnit':
+            def referenced():
+                self.references.setdefault(args[0], []).append(self.client_name)
+                result.append([])
+            self.queue.append(referenced)
+        elif method == 'StopUnit':
             role = next(role for role,unit in self.job_units.items() if unit.unit == args[0])
             if self.mode != 'absent': self.queue.append(lambda: self.event(role=role))
             self.queue.append(lambda: result.append([bus.JOB_PREFIX+str(self.reply_number)]))
@@ -255,6 +270,129 @@ class ManagerSessionTests(unittest.TestCase):
         self.connection.mode = 'absent'
         with self.assertRaises(durable.Rejected): session.stop('containerd')
         self.assertEqual(sum(method=='StopUnit' for _,method,_ in self.connection.calls),2)
+
+
+class FixedUnitReferenceTests(unittest.TestCase):
+    setUp = ManagerSessionTests.setUp
+    session = ManagerSessionTests.session
+
+    def removal(self, session, **overrides):
+        message = dict(signature='so', member='UnitRemoved', cookie=20,
+            fields=[session.units['dockerd'].unit, bus.MANAGER_PATH + '/unit/dockerd_service'])
+        message.update(overrides)
+        callback = next(function for rule,function in self.connection.matches if "member='UnitRemoved'" in rule)
+        self.connection.queue.append(lambda:callback(message))
+
+    def test_exact_fixed_references_and_acknowledged_own_sender_readback(self):
+        session = self.session()
+        paths = session._retain_fixed_units()
+        self.assertEqual(set(paths), set(session.units))
+        self.assertEqual([args for _,method,args in self.connection.calls if method == 'RefUnit'],
+                         [(unit.unit,) for unit in session.units.values()])
+        self.assertEqual(self.connection.references, {unit.unit:[':1.99'] for unit in session.units.values()})
+        for role,path in paths.items(): session._fixed_unit_reference(role, path)
+        self.assertFalse(any(method in ('StopUnit','Reload','UnrefUnit') for _,method,_ in self.connection.calls))
+        paths.clear()
+        self.assertEqual(len(session._fixed_unit_paths), 2)
+
+    def test_duplicate_reference_attempt_never_redispatches(self):
+        session = self.session(); session._retain_fixed_units()
+        with self.assertRaises(durable.Rejected): session._retain_fixed_units()
+        self.assertEqual(sum(method == 'RefUnit' for _,method,_ in self.connection.calls), 2)
+        self.assertTrue(session.failed)
+
+    def test_lost_reference_reply_retains_failure_without_retry_or_unref(self):
+        session = self.session()
+        original = ScriptedConnection.call
+        def call(connection, destination, interface, method, signature, args, response, **kwargs):
+            result = original(connection, destination, interface, method, signature, args, response, **kwargs)
+            if method == 'RefUnit':
+                def lost():
+                    self.now = 1090.
+                connection.queue.append(lost)
+                connection.queue[0] = lambda:connection.references.setdefault(args[0], []).append(connection.client_name)
+            return result
+        with patch.object(ScriptedConnection, 'call', call):
+            with self.assertRaises(durable.Rejected): session._retain_fixed_units()
+        self.assertEqual(sum(method == 'RefUnit' for _,method,_ in self.connection.calls), 1)
+        self.assertTrue(self.connection.references)
+        self.assertTrue(session.failed)
+        session.close()
+        self.assertTrue(self.connection.closed)
+        self.assertFalse(any(method == 'UnrefUnit' for _,method,_ in self.connection.calls))
+
+    def test_unit_removal_revokes_even_if_same_name_and_path_reappear(self):
+        session = self.session(); session._retain_fixed_units()
+        self.removal(session)
+        with self.assertRaises(durable.Rejected): session.identity()
+        self.assertTrue(session.failed)
+
+    def test_removal_before_reference_acknowledgment_refuses(self):
+        session = self.session()
+        def hook(method):
+            if method == 'RefUnit': self.removal(session)
+        self.connection.call_hook = hook
+        with self.assertRaises(durable.Rejected): session._retain_fixed_units()
+        self.assertEqual(sum(method == 'RefUnit' for _,method,_ in self.connection.calls), 1)
+        self.assertTrue(session.failed)
+
+    def test_other_unit_removal_is_not_adopted_or_a_fixed_removal(self):
+        session = self.session(); session._retain_fixed_units()
+        self.removal(session, fields=['other.service', bus.MANAGER_PATH + '/unit/other_service'])
+        self.assertEqual(session.identity(), ('a'*32, ':1.7'))
+        self.assertEqual(session._events, {})
+
+    def test_reference_from_another_sender_or_duplicate_own_reference_refuses(self):
+        for refs in ([], [':1.100'], [':1.99', ':1.99'], ['not-a-unique-name'], (':1.99',)):
+            with self.subTest(refs=refs):
+                self.setUp(); session = self.session(); paths = session._retain_fixed_units()
+                self.connection.references[session.units['dockerd'].unit] = refs
+                with self.assertRaises(durable.Rejected): session._fixed_unit_reference('dockerd', paths['dockerd'])
+                self.assertTrue(session.failed)
+
+    def test_client_identity_or_bound_unit_path_drift_refuses(self):
+        for drift in ('sender', 'path'):
+            with self.subTest(drift=drift):
+                self.setUp(); session = self.session(); paths = session._retain_fixed_units()
+                if drift == 'sender': self.connection.client_name = ':1.100'
+                path = paths['dockerd'] if drift == 'sender' else bus.MANAGER_PATH + '/unit/other_service'
+                with self.assertRaises(durable.Rejected): session._fixed_unit_reference('dockerd', path)
+                self.assertTrue(session.failed)
+
+    def test_malformed_or_unauthenticated_removal_refuses(self):
+        for overrides in ({'sender':':1.8'}, {'member':'UnitNew'}, {'signature':'ss'}, {'cookie':0},
+                          {'fields':['other.service','/unexpected/path']}):
+            with self.subTest(overrides=overrides):
+                self.setUp(); session = self.session(); session._retain_fixed_units()
+                self.removal(session, **overrides)
+                with self.assertRaises(durable.Rejected): session.identity()
+                self.assertTrue(session.failed)
+
+    def test_reference_requires_unused_original_session(self):
+        session = self.session(); session._watch_fixed_jobs()
+        with self.assertRaises(durable.Rejected): session._retain_fixed_units()
+        self.assertFalse(any(method == 'RefUnit' for _,method,_ in self.connection.calls))
+
+
+class ClientNameABITests(unittest.TestCase):
+    def connection(self, name, result=0):
+        connection = object.__new__(bus._Connection)
+        connection.bus, connection.error, connection.lib = C.c_void_p(1), None, Mock()
+        connection.lib.sd_bus_is_open.return_value = 1
+        def get_name(handle, pointer):
+            C.cast(pointer, C.POINTER(C.c_char_p))[0] = name
+            return result
+        connection.lib.sd_bus_get_unique_name.side_effect = get_name
+        return connection
+
+    def test_native_client_name_uses_typed_output_pointer(self):
+        self.assertEqual(self.connection(b':1.99').unique_name(), ':1.99')
+
+    def test_failed_missing_or_nonunique_client_name_refuses(self):
+        for name, result in ((b':1.99', -5), (None, 0), (b'org.freedesktop.systemd1', 0), (b':1.99\xff', 0)):
+            with self.subTest(name=name, result=result):
+                with self.assertRaises((durable.Rejected, UnicodeError)):
+                    self.connection(name, result).unique_name()
 
 
 class ExecutionTimestampABITests(unittest.TestCase):

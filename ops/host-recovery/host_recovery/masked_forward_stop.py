@@ -48,7 +48,8 @@ class _MaskedFixedStop:
             "binding_sha256": digest(self.journal._binding), "epoch_sha256": digest(self.journal._epoch),
             "masks": decode(self.masks.configuration()), "jobs": decode(self.jobs.configuration()),
             "cancellation": decode(self.cancellation.configuration()), "reload": decode(self.reload.configuration()),
-            "kill_whom": "all", "kill_signal": 9, "fixed_job_admission_witness": "job-new-v1"})
+            "kill_whom": "all", "kill_signal": 9, "fixed_job_admission_witness": "job-new-v1",
+            "fixed_unit_reference": "sender-ref-unit-v1"})
 
     @property
     def target_sha256(self):
@@ -83,8 +84,11 @@ class _MaskedFixedStop:
             unit = self.jobs.units[role].unit
             path = self.session._call(self.session.owner, MANAGER + ".Manager", "GetUnit", "s", (unit,), "o")[0]
             if (type(path) is not str
+                    or set(self.session._fixed_unit_paths) != set(self.roles)
+                    or path != self.session._fixed_unit_paths[role]
                     or re.fullmatch(MANAGER_PATH + r"/unit/[A-Za-z0-9_]{1,1024}", path) is None):
                 raise Rejected("masked-fixed-execution-unit-path-unconfirmed")
+            self.session._fixed_unit_reference(role, path)
             self._current()
             identity = self.session._call(self.session.owner, "org.freedesktop.DBus.Properties", "Get", "ss",
                 (MANAGER + ".Unit", "Id"), "v:s", path=path)[0]
@@ -139,6 +143,8 @@ class _MaskedFixedStop:
                 self._operation = canonical(operation)
                 operation = decode(self._operation)
                 self._current()
+                self.session._retain_fixed_units()
+                self._current()
                 self.session._watch_fixed_jobs()
                 self._current()
                 self._execution_starts = self._execution_snapshot()
@@ -192,6 +198,7 @@ class _MaskedFixedStop:
                     "whole_unit_kill_returned": bool(killed), "fixed_stop_completion_observed": True,
                     "masked_inactive_observed": True, "manager_jobs_retired": False,
                     "fixed_execution_timestamp_count": len(self.roles), "fixed_execution_timestamps_unchanged": True,
+                    "fixed_unit_reference_count": len(self.session._fixed_unit_paths),
                     "activation_exclusion_proven": False, "cgroup_quiescence_proven": False,
                     "pending_drained": False, "complete_fence_proven": False,
                     "recovery_execution_allowed": False, "start_allowed": False,

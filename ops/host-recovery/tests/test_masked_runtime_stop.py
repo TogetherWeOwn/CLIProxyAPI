@@ -75,7 +75,8 @@ class MaskedRuntimeStopTests(unittest.TestCase):
             bus.MANAGER_PATH+'/unit/'+role] for role,number in self.numbers.items()]
         original_call = ScriptedConnection.call
         def call(connection, destination, interface, method, signature, args, response, **kwargs):
-            if method not in ('Cancel','Reload','StopUnit','KillUnit','GetUnit','Get'):
+            if (method not in ('Cancel','Reload','StopUnit','KillUnit','GetUnit','Get')
+                    or method == 'Get' and args[1] == 'Refs'):
                 return original_call(connection, destination, interface, method, signature, args, response, **kwargs)
             connection.calls.append((destination, method, args))
             role = None
