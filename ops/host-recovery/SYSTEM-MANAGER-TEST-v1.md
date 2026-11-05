@@ -146,12 +146,15 @@ job ID/path to be `start/waiting` behind the held gate, then releases the gate.
 Its matching authenticated `JobRemoved=done` and positive actual execution
 timestamp must establish that this fixture can execute the payload. A separate
 fresh pair is held in the same way, then receives an exclusive persistent mask
-and manager reload. The test requires the original waiting job to remain visible:
-masking fresh submissions must not be confused with canceling an accepted job.
+and directory fsync. Before reloading the manager, the test requires the original
+waiting job to remain visible and calls `Job.Cancel` on that exact returned job
+object. It requires the matching authenticated `canceled` completion, then reloads
+and verifies the mask, submits a separate stop and requires that stop's distinct
+`done` completion. A stored mask is not claimed effective before reload, and
+neither mask presence nor disappearance from inventory supplies cancellation
+proof. The held gate is not released until all these barriers complete.
 
-Only then does the fixture call `Job.Cancel` on that exact returned job object,
-require its matching authenticated `canceled` completion, submit a separate stop
-and require that stop's distinct `done` completion. After releasing the dependency,
+After releasing the dependency,
 require the actual gate process's pidfd death, successful gate completion, zero
 payload execution timestamp and inactive/no-PID/no-job state. An empty job list
 alone cannot supply any of those results.
@@ -174,6 +177,15 @@ cgroup and live pidfd checks remain. This matches systemd v255
 entering `SERVICE_START`. The raw failure and exact first fixture are retained;
 it is not a production defect or a reached cancellation result. Both cleanup
 paths passed despite this initial failure.
+
+The next exact-head run reached both queued starts but failed before explicit
+cancellation: after mask installation and reload, the original job ID was absent
+from the job inventory. It therefore cannot qualify a canceled completion, and
+its raw failure remains retained. The corrected ordering explicitly cancels and
+witnesses the accepted job **before** reload can change its configuration/lifetime.
+No missing job is converted into an acknowledgment; all original completion,
+pidfd, positive-control and actual-execution assertions remain required. This
+fixture correction does not implement operational reload/job reconciliation.
 
 This is a controlled queued-before-exec case, not already-executing launch
 revocation, manager re-exec/reboot, arbitrary activation-graph exclusion, old-epoch

@@ -493,12 +493,14 @@ class SystemManagerTests(unittest.TestCase):
                         os.fsync(fd)
                     finally:
                         os.close(fd)
-                    command(self.systemctl, "daemon-reload")
-                    self.assertEqual(self.masked_observation(target)["LoadState"], "masked")
-                    # Masking new submissions is not cancellation of this queued job.
+                    # Cancel while the accepted job still belongs to the loaded
+                    # configuration. Reload may remove it; absence is not proof
+                    # of this explicit cancellation or a matching completion.
                     self.assertEqual(witness.jobs()[number], waiting)
                     witness._call(witness.owner, MANAGER + ".Job", "Cancel", "", (), "", path=start)
                     witness.completed(start, "canceled")
+                    command(self.systemctl, "daemon-reload")
+                    self.assertEqual(self.masked_observation(target)["LoadState"], "masked")
                     stop = witness._call(witness.owner, MANAGER + ".Manager", "StopUnit", "ss", (target, "fail"), "o")[0]
                     self.assertNotEqual(stop, start)
                     witness.completed(stop, "done")
