@@ -104,6 +104,12 @@ def cleanup_activation():
     for suffix in ("dependent", "masked"):
         unit = unit_name(suffix)
         loaded = command(systemctl, "list-units", "--all", "--no-legend", "--plain", "--", unit).strip()
+        active = command(systemctl, "list-units", "--all", "--no-legend", "--plain",
+                         "--state=active,activating,deactivating", "--", unit).strip()
+        if active:
+            # Do not depend on pre-mask stop configuration surviving reload.
+            # Explicitly terminate the exact TERM-ignoring owned fixture group.
+            command(systemctl, "kill", "--kill-whom=all", "--signal=SIGKILL", "--", unit)
         if loaded:
             command(systemctl, "stop", "--", unit)
         if command(systemctl, "list-units", "--all", "--no-legend", "--plain",
@@ -232,12 +238,32 @@ class SystemManagerTests(unittest.TestCase):
         self.addCleanup(session.close)
         return session
 
-    def stopped(self, binding, pids):
+    def masked_observation(self, unit):
+        fields = {"Id", "LoadState", "ActiveState", "SubState", "MainPID", "Job", "InvocationID"}
+        raw = command(self.systemctl, "--no-pager", "show", "--property=" + ",".join(sorted(fields)), "--", unit)
+        print(json.dumps({"masked_observation_raw": raw.decode()}), flush=True)
+        row = {}
+        for line in raw.decode().splitlines():
+            key, sep, value = line.partition("=")
+            self.assertTrue(sep)
+            self.assertIn(key, fields)
+            self.assertNotIn(key, row)
+            row[key] = value
+        self.assertEqual(set(row), fields)
+        self.assertEqual(row["Id"], unit)
+        # Only explicit systemctl idle Job display is normalized in this test
+        # projection. Do not synthesize missing service properties or change the
+        # production loaded-unit configuration reader to accept masked units.
+        if row["Job"] == "":
+            row["Job"] = "0"
+        return row
+
+    def stopped(self, binding, pids, *, observe=None):
         for key in ("parent_fd", "child_fd"):
             poller = select.poll()
             poller.register(pids[key], select.POLLIN)
             self.assertTrue(poller.poll(max(1, int((self.deadline - time.monotonic()) * 1000))))
-        row = self.observe(binding.unit)
+        row = (observe or self.observe)(binding.unit)
         self.assertIn(row["ActiveState"], ("inactive", "failed"))
         self.assertEqual(row["MainPID"], "0")
         self.assertEqual(row["Job"], "0")
@@ -256,9 +282,11 @@ class SystemManagerTests(unittest.TestCase):
                           "monotonic": time.monotonic()}), flush=True)
         return row
 
-    def stop_and_witness(self, binding):
+    def stop_and_witness(self, binding, *, kill=False):
         session = self.session(binding)
         job = session.stop("forward")
+        if kill:
+            command(self.systemctl, "kill", "--kill-whom=all", "--signal=SIGKILL", "--", binding.unit)
         while True:
             completions = session.completions()
             if "forward" in completions:
@@ -312,7 +340,7 @@ class SystemManagerTests(unittest.TestCase):
         finally:
             os.close(fd)
         command(self.systemctl, "daemon-reload")
-        masked = self.observe(binding.unit)
+        masked = self.masked_observation(binding.unit)
         self.assertEqual(masked["LoadState"], "masked")
         self.assertEqual(masked["ActiveState"], "active")
         self.assertEqual(masked["InvocationID"], binding.invocation_id)
@@ -325,9 +353,10 @@ class SystemManagerTests(unittest.TestCase):
                           "load_state": masked["LoadState"], "active_state": masked["ActiveState"],
                           "same_invocation": True, "both_pidfds_live": True,
                           "mask_is_quiescence": False}), flush=True)
-        # A separate authenticated stop/completion plus pidfd deaths is required.
-        self.stop_and_witness(binding)
-        self.stopped(binding, pids)
+        # A separate authenticated stop/completion, explicit whole-unit kill and
+        # pidfd deaths are required. Mask presence cannot supply any of them.
+        self.stop_and_witness(binding, kill=True)
+        self.stopped(binding, pids, observe=self.masked_observation)
         for suffix in ("masked", "dependent"):
             result = subprocess.run((self.systemctl, "start", "--", unit_name(suffix)),
                 env={"PATH": os.defpath, "LANG": "C"}, stdout=subprocess.PIPE,
@@ -335,7 +364,7 @@ class SystemManagerTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, "masked fixture was startable")
             print(json.dumps({"refused_start_unit": unit_name(suffix), "returncode": result.returncode,
                               "stdout": result.stdout.decode(), "stderr": result.stderr.decode()}), flush=True)
-        final = self.observe(binding.unit)
+        final = self.masked_observation(binding.unit)
         self.assertEqual(final["LoadState"], "masked")
         self.assertEqual(final["MainPID"], "0")
         self.assertEqual(final["Job"], "0")

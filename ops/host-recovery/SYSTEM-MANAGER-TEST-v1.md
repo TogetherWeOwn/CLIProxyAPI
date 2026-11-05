@@ -91,7 +91,9 @@ invocation, cgroup and live pidfds using the same helper as the transient method
 then creates/fsyncs the higher-precedence persistent mask and reloads the manager.
 It asserts that the mask **does not stop existing processes**: the original
 invocation/MainPID remains active and both pidfds remain live. A separate actual
-`ManagerJobSession` stop and matching completion must terminate them. Only then
+`ManagerJobSession` stop, explicit whole-unit SIGKILL and matching completion must
+terminate them. The test must not depend on pre-mask stop settings surviving a
+manager reload. Only then
 are a fresh direct start and a new `Requires`/`After` dependency start attempted;
 both must refuse. The dependency payload's actual execution timestamp must remain
 zero and no new process may reach the fixture readiness socket. Raw command
@@ -104,7 +106,14 @@ adapters require their original loaded fragment/effective-property pins; they do
 **not** consume these fixture masks or gain permission to ignore changed pins.
 Operational integration needs a separately bound mask/configuration transition
 and its durable intent, rather than relaxing those readers or declaring mask
-presence to be authority.
+presence to be authority. The first reached Actions run failed with
+`manager-properties-incomplete` after reloading the mask, before the new exclusion
+assertions; both cleanup attempts also timed out stopping the TERM-ignoring
+fixture. Those failures are retained. The corrected fixture uses an exact,
+separate seven-property masked-state projection with raw observations, never
+fills a missing property, and retains all process/identity/exclusion assertions.
+Production `manager.properties` is unchanged. Cleanup now explicitly kills an
+active owned group before its bounded stop; no success is claimed from a timeout.
 
 Cleanup is registered before writing either fragment or starting the payload. It
 stops only the two exact names, validates and removes only their owned fragments
