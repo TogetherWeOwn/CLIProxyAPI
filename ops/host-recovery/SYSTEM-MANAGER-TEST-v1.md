@@ -88,7 +88,10 @@ There is no `[Install]` section, enablement, schedule or recurring resource.
 
 The method starts an inert TERM-ignoring parent/child service, captures its actual
 invocation, cgroup and live pidfds using the same helper as the transient methods,
-then creates/fsyncs the higher-precedence persistent mask and reloads the manager.
+then calls the package's descriptor-bound `PersistentUnitMasks` primitive to
+exclusively create/fsync/readback the higher-precedence persistent mask. Its
+receipt explicitly denies effective activation exclusion. The fixture separately
+reloads the manager; no reload or root provisioning is inferred by the primitive.
 It asserts that the mask **does not stop existing processes**: the original
 invocation/MainPID remains active and both pidfds remain live. A separate actual
 `ManagerJobSession` stop, explicit whole-unit SIGKILL and matching completion must

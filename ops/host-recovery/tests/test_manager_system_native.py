@@ -351,6 +351,20 @@ class SystemManagerTests(unittest.TestCase):
         print(json.dumps({"manager_bus": session.bus_id, "manager_owner": session.owner,
                           "completion": event}), flush=True)
 
+    def publish_mask(self, binding):
+        from host_recovery.unit_masks import PersistentUnitMasks
+        path = Path("/etc/systemd/system")
+        st = path.stat()
+        self.assertEqual((st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode)), (0, 0, 0o755))
+        approval = DirectoryApproval(str(path), st.st_dev, st.st_ino, 0, 0, 0o755)
+        with open_approved_directory(approval) as directory:
+            masks = PersistentUnitMasks(directory=directory, units={"forward": binding})
+            receipt = masks.publish(current=self.current)
+            self.assertTrue(receipt["persistent_masks_published"])
+            self.assertFalse(receipt["activation_exclusion_proven"])
+            self.assertFalse(receipt["manager_reload_performed"])
+            print(json.dumps({"source_mask_publication": receipt}), flush=True)
+
     def test_persistent_mask_blocks_fresh_launches_but_does_not_quiesce(self):
         paths = activation_paths()
         mask = Path("/etc/systemd/system") / unit_name("masked")
@@ -377,14 +391,9 @@ class SystemManagerTests(unittest.TestCase):
         command(self.systemctl, "start", "--", unit_name("masked"))
         binding, pids = self.running_binding(unit_name("masked"))
         self.assertEqual(binding.fragment_path, str(paths["masked"]))
-        # The /etc mask has higher load-path precedence than this /run fragment.
-        # O_EXCL symlink creation (without force/overwrite) preserves collisions.
-        os.symlink("/dev/null", mask)
-        fd = os.open(mask.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        # Use the package's exclusive descriptor-bound publication primitive.
+        # Reload is a separate test-only action, not part of that primitive.
+        self.publish_mask(binding)
         command(self.systemctl, "daemon-reload")
         masked = self.masked_observation(binding.unit)
         self.assertEqual(masked["LoadState"], "masked")

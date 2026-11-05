@@ -5,6 +5,12 @@ broker, complete host fence, recovery execution/outcome oracle or production
 acceptance.** No service is installed or started by its tests. No credential,
 permission, live configuration or release pin changes are provided.
 
+Optional [persistent unit-mask publication](UNIT-MASKS-v1.md) composes with the
+original forward-containment pending barrier. It creates/fsyncs only absent fixed
+names and never reloads the manager, replaces content or acknowledges activation
+exclusion, job retirement or drain. Existing strict loaded-unit pins and all
+operational runner/IPC denies remain unchanged.
+
 The separate [whole-runtime inventory observation](QUARANTINE-INVENTORY-v1.md)
 compares unfiltered full daemon IDs and fixed containerd namespace/task metadata
 with the protected original journal. It remains read-only/non-authorizing and
