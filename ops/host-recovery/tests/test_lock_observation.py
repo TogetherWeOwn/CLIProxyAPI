@@ -3,7 +3,6 @@ from dataclasses import replace
 import fcntl
 import os
 from pathlib import Path
-import pwd
 import selectors
 import signal
 import socket
@@ -13,6 +12,8 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+
+from fixture_home import fixture_home
 
 from host_recovery import durable, installation, lock_observation, worker
 
@@ -65,7 +66,7 @@ class FlockParserTests(unittest.TestCase):
 
 class OriginalLockObservationTests(unittest.TestCase):
     def setUp(self):
-        temp = tempfile.TemporaryDirectory(prefix='.recovery-lock-test-', dir=pwd.getpwuid(os.geteuid()).pw_dir)
+        temp = tempfile.TemporaryDirectory(prefix='.recovery-lock-test-', dir=fixture_home())
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         self.journal = self.root / 'journal'

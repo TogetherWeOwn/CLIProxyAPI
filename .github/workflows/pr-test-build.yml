@@ -63,6 +63,12 @@ jobs:
       - name: Prepare protected component fixture home
         shell: bash
         run: |
+          # This job runs only on a disposable GitHub-hosted runner. Create a
+          # fresh short path outside /home (which can carry inherited metadata).
+          fixture_root="$(sudo mktemp -d /cpa-recovery-fixtures.XXXXXX)"
+          sudo chown "$(id -u):$(id -g)" "$fixture_root"
+          export CPA_RECOVERY_TEST_ROOT="$fixture_root"
+          printf 'CPA_RECOVERY_TEST_ROOT=%s\n' "$fixture_root" >> "$GITHUB_ENV"
           {
             git rev-parse HEAD
             python3 --version
@@ -72,38 +78,30 @@ jobs:
             python3 -I - <<'PY'
           import os
           from pathlib import Path
-          import pwd
           import stat
           import sys
 
           sys.path.insert(0, str(Path.cwd() / "ops/host-recovery"))
           from host_recovery.installation import FLAGS, protected
 
-          # Synthetic protected-path fixtures live below the runner account's
-          # home. Tighten only that owned directory, never relax the guard or
-          # change ancestors, owners, ACLs or other extended metadata.
+          # Validate the fresh fixture root using the unchanged production guard.
+          # Do not alter /home, ancestor permissions, ACLs or extended metadata.
           uid = os.geteuid()
-          home = Path(pwd.getpwuid(uid).pw_dir)
-          fd = os.open(home, FLAGS)
-          try:
-              before = os.fstat(fd)
-              if before.st_uid != uid:
-                  raise RuntimeError("component fixture home is not runner-owned")
-              mode = stat.S_IMODE(before.st_mode)
-              os.fchmod(fd, mode & ~0o022)
-              print(f"fixture home uid={uid} mode={mode:04o}->{mode & ~0o022:04o}", flush=True)
-          finally:
-              os.close(fd)
+          home = Path(os.environ["CPA_RECOVERY_TEST_ROOT"])
+          if home.stat().st_uid != uid:
+              raise RuntimeError("component fixture root is not runner-owned")
 
           fd = os.open("/", FLAGS)
           try:
+              info = os.fstat(fd)
+              print(f"fixture ancestor uid={info.st_uid} mode={stat.S_IMODE(info.st_mode):04o} xattrs={os.listxattr(fd)!r}", flush=True)
               protected(fd, uid)
               for part in home.parts[1:]:
                   child = os.open(part, FLAGS, dir_fd=fd)
                   os.close(fd)
                   fd = child
                   info = os.fstat(fd)
-                  print(f"fixture ancestor uid={info.st_uid} mode={stat.S_IMODE(info.st_mode):04o}", flush=True)
+                  print(f"fixture ancestor uid={info.st_uid} mode={stat.S_IMODE(info.st_mode):04o} xattrs={os.listxattr(fd)!r}", flush=True)
                   protected(fd, uid)
           finally:
               os.close(fd)
@@ -112,6 +110,10 @@ jobs:
       - name: Python recovery components at PR head
         shell: bash
         run: python3 -I ops/host-recovery/tests/run.py 2>&1 | tee "$RUNNER_TEMP/recovery-components.log"
+      - name: Remove empty fixture root
+        if: always() && env.CPA_RECOVERY_TEST_ROOT != ''
+        shell: bash
+        run: rmdir -- "$CPA_RECOVERY_TEST_ROOT"
       - name: Retain raw component result
         if: always()
         uses: actions/upload-artifact@v4

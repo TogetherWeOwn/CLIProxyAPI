@@ -5,7 +5,6 @@ import errno
 import json
 import os
 from pathlib import Path
-import pwd
 import selectors
 import signal
 import subprocess
@@ -13,6 +12,8 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+
+from fixture_home import fixture_home
 
 from host_recovery import coordinator, durable, installation, inventory, journal, restore, write_set
 from test_installation import approve
@@ -23,7 +24,7 @@ PACKAGE = Path(__file__).resolve().parent.parent
 
 class WriteSetTests(unittest.TestCase):
     def setUp(self):
-        temp = tempfile.TemporaryDirectory(prefix=".recovery-write-set-", dir=pwd.getpwuid(os.geteuid()).pw_dir)
+        temp = tempfile.TemporaryDirectory(prefix=".recovery-write-set-", dir=fixture_home())
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         self.backup = self.root / "backup"

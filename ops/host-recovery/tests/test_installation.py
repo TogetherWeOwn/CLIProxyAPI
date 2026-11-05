@@ -5,13 +5,14 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import pwd
 import signal
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+
+from fixture_home import fixture_home
 
 from host_recovery import durable, installation, jobs, loading
 from test_recovery_state import intent
@@ -27,9 +28,9 @@ def approve(path):
 class InstallationTests(unittest.TestCase):
     def setUp(self):
         # /tmp and CI/workspace parents can be group/world writable. Create only
-        # fresh owned fixtures below the test user's protected home; never chmod
+        # fresh owned fixtures below the selected protected test root; never chmod
         # an existing ancestor or weaken the acquisition rule for test setup.
-        temp = tempfile.TemporaryDirectory(prefix=".recovery-installation-test-", dir=pwd.getpwuid(os.geteuid()).pw_dir)
+        temp = tempfile.TemporaryDirectory(prefix=".recovery-installation-test-", dir=fixture_home())
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         self.content, self.journal = self.root / "content", self.root / "journal"

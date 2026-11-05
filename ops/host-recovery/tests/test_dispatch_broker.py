@@ -7,7 +7,6 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import pwd
 import selectors
 import subprocess
 import sys
@@ -15,6 +14,8 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+
+from fixture_home import fixture_home
 
 from host_recovery import broker, dispatch, durable, jobs, manager, outcomes, supervisor
 from test_installation import approve
@@ -44,7 +45,7 @@ class DispatchBrokerTests(unittest.TestCase):
         self.case = test_supervisor.SupervisorTests()
         self.case.setUp()
         self.addCleanup(self.case.doCleanups)
-        temp = tempfile.TemporaryDirectory(prefix=".dispatch-broker-", dir=pwd.getpwuid(os.geteuid()).pw_dir)
+        temp = tempfile.TemporaryDirectory(prefix=".dispatch-broker-", dir=fixture_home())
         self.addCleanup(temp.cleanup)
         self.endpoint = Path(temp.name)
         self.approval = approve(self.endpoint)

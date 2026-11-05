@@ -5,12 +5,13 @@ from dataclasses import replace
 import errno
 import os
 from pathlib import Path
-import pwd
 import stat
 import subprocess
 import tempfile
 import unittest
 from unittest import mock
+
+from fixture_home import fixture_home
 
 from host_recovery import durable, input_gate, input_snapshot, protected_file
 import test_input_gate
@@ -20,7 +21,7 @@ from test_recovery_state import intent
 
 class SnapshotTests(unittest.TestCase):
     def setUp(self):
-        temp = tempfile.TemporaryDirectory(prefix=".recovery-input-snapshot-", dir=pwd.getpwuid(os.geteuid()).pw_dir)
+        temp = tempfile.TemporaryDirectory(prefix=".recovery-input-snapshot-", dir=fixture_home())
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         self.sources, self.policies = self.root / "sources", self.root / "policies"

@@ -4,9 +4,10 @@ from dataclasses import replace
 import errno
 import os
 from pathlib import Path
-import pwd
 import tempfile
 import unittest
+
+from fixture_home import fixture_home
 
 from host_recovery import alert, durable, inventory, jobs, loading, worker, worker_recovery
 from test_installation import approve
@@ -65,7 +66,7 @@ class WorkerRecoveryTests(unittest.TestCase):
         keys = ("package_sha256", "manifest_sha256", "baseline_sha256", "policy_sha256", "installation_id", "attempt_id")
         self.approval = loading.RecoveryApproval(self.request["intent_sha256"],
             **{k: self.intent[k] for k in keys}, uid=os.geteuid(), gid=os.getegid())
-        temp = tempfile.TemporaryDirectory(prefix=".worker-recovery-", dir=pwd.getpwuid(os.geteuid()).pw_dir)
+        temp = tempfile.TemporaryDirectory(prefix=".worker-recovery-", dir=fixture_home())
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         self.evidence = worker_recovery.WorkerEvidence(approve(self.root), self.binding.request_id,

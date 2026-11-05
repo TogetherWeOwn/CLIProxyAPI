@@ -4,7 +4,6 @@ import errno
 import io
 import os
 from pathlib import Path
-import pwd
 import stat
 import struct
 import subprocess
@@ -13,6 +12,8 @@ import unittest
 from unittest import mock
 import warnings
 import zipfile
+
+from fixture_home import fixture_home
 
 from host_recovery import artifacts, durable, input_gate
 import test_input_gate
@@ -33,7 +34,7 @@ def package(entries, compression=zipfile.ZIP_DEFLATED, comment=b""):
 
 class ArtifactTests(unittest.TestCase):
     def setUp(self):
-        temp = tempfile.TemporaryDirectory(prefix=".recovery-artifact-test-", dir=pwd.getpwuid(os.geteuid()).pw_dir)
+        temp = tempfile.TemporaryDirectory(prefix=".recovery-artifact-test-", dir=fixture_home())
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         self.archive_root, self.library_root = self.root / "archives", self.root / "installed"
