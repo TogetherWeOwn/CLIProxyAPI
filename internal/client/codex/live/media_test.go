@@ -150,7 +150,7 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 		logger.ReplaceHooks(previousHooks)
 		logger.SetLevel(previousLevel)
 	}()
-	clientAPI := newTestWebRTCAPI(t)
+	clientAPI := newTestLoopbackWebRTCAPI(t)
 	client, errClient := clientAPI.NewPeerConnection(webrtc.Configuration{})
 	if errClient != nil {
 		t.Fatalf("create client PeerConnection: %v", errClient)
@@ -186,6 +186,7 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	})
 
 	clientOffer := completeOffer(t, client)
+	assertLoopbackUDP4Candidates(t, clientOffer)
 	relayConfig := config.CodexLiveMediaRelayConfig{
 		Enabled:                 true,
 		MaxSessions:             1,
@@ -195,6 +196,9 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	if errRelay != nil {
 		t.Fatalf("create media relay: %v", errRelay)
 	}
+	// Keep all four peers on loopback so host interfaces and NAT cannot affect this bridge test.
+	relay.downstreamAPI = newTestLoopbackWebRTCAPI(t)
+	relay.upstreamAPI = newTestLoopbackWebRTCAPI(t)
 	session, relayOffer, errSession := relay.NewSession(context.Background(), clientOffer, mediaSessionRoute{
 		credential: "Voice credential",
 		authIndex:  "auth-index",
@@ -208,15 +212,18 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 			t.Errorf("close media relay session: %v", errClose)
 		}
 	}()
+	assertLoopbackUDP4Candidates(t, relayOffer)
 	reloadedRelay, errRelay := newPionMediaRelayWithLimiter(relayConfig, relay.limiter)
 	if errRelay != nil {
 		t.Fatalf("reload media relay: %v", errRelay)
 	}
+	reloadedRelay.downstreamAPI = newTestLoopbackWebRTCAPI(t)
+	reloadedRelay.upstreamAPI = newTestLoopbackWebRTCAPI(t)
 	if _, _, errCapacity := reloadedRelay.NewSession(context.Background(), clientOffer, mediaSessionRoute{}); errCapacity == nil {
 		t.Fatal("reloaded media relay bypassed the shared session capacity")
 	}
 
-	upstreamAPI := newTestWebRTCAPI(t)
+	upstreamAPI := newTestLoopbackWebRTCAPI(t)
 	upstream, errUpstream := upstreamAPI.NewPeerConnection(webrtc.Configuration{})
 	if errUpstream != nil {
 		t.Fatalf("create upstream PeerConnection: %v", errUpstream)
@@ -257,10 +264,12 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	}
 	go drainRTCP("test-upstream", upstreamSender, upstreamDone)
 	upstreamAnswer := completeAnswer(t, upstream)
+	assertLoopbackUDP4Candidates(t, upstreamAnswer)
 	downstreamAnswer, errAnswer := session.AcceptUpstreamAnswer(context.Background(), upstreamAnswer)
 	if errAnswer != nil {
 		t.Fatalf("accept upstream answer: %v", errAnswer)
 	}
+	assertLoopbackUDP4Candidates(t, downstreamAnswer)
 	if errRemote := client.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: downstreamAnswer}); errRemote != nil {
 		t.Fatalf("set client answer: %v", errRemote)
 	}
@@ -294,13 +303,14 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	if errClose := session.Close(); errClose != nil {
 		t.Fatalf("close media relay session for logging: %v", errClose)
 	}
-	replacementSession, _, errReplacement := reloadedRelay.NewSession(context.Background(), clientOffer, mediaSessionRoute{})
+	replacementSession, replacementOffer, errReplacement := reloadedRelay.NewSession(context.Background(), clientOffer, mediaSessionRoute{})
 	if errReplacement != nil {
 		t.Fatalf("shared capacity was not released: %v", errReplacement)
 	}
 	if errClose := replacementSession.CloseWithReason("test_complete"); errClose != nil {
 		t.Fatalf("close replacement media session: %v", errClose)
 	}
+	assertLoopbackUDP4Candidates(t, replacementOffer)
 	for _, peer := range []string{"local", "remote"} {
 		assertPeerLog(t, hook, "codex live WebRTC peer connected", peer, "call-log-test")
 		assertPeerLog(t, hook, "codex live WebRTC peer closed", peer, "call-log-test")
@@ -354,7 +364,32 @@ func offerCandidatesAreLoopback(t *testing.T, offer string) bool {
 	return candidateCount > 0
 }
 
-func newTestWebRTCAPI(t *testing.T) *webrtc.API {
+func assertLoopbackUDP4Candidates(t *testing.T, description string) {
+	t.Helper()
+	if !offerCandidatesAreLoopback(t, description) {
+		t.Fatal("bridge test requires nonempty loopback-only ICE candidates")
+	}
+	for _, line := range strings.Split(description, "\n") {
+		if !strings.HasPrefix(line, "a=candidate:") {
+			continue
+		}
+		fields := strings.Fields(strings.TrimPrefix(line, "a=candidate:"))
+		if !strings.EqualFold(fields[2], "udp") || net.ParseIP(fields[4]).To4() == nil {
+			t.Fatal("bridge test requires UDP4-only ICE candidates")
+		}
+	}
+}
+
+func newTestLoopbackWebRTCAPI(t *testing.T) *webrtc.API {
+	t.Helper()
+	settingEngine := webrtc.SettingEngine{}
+	settingEngine.SetIncludeLoopbackCandidate(true)
+	settingEngine.SetIPFilter(func(ip net.IP) bool { return ip != nil && ip.IsLoopback() })
+	settingEngine.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	return newTestWebRTCAPI(t, webrtc.WithSettingEngine(settingEngine))
+}
+
+func newTestWebRTCAPI(t *testing.T, options ...func(*webrtc.API)) *webrtc.API {
 	t.Helper()
 	mediaEngine := &webrtc.MediaEngine{}
 	if errRegister := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
@@ -367,10 +402,10 @@ func newTestWebRTCAPI(t *testing.T) *webrtc.API {
 	if errRegister := webrtc.RegisterDefaultInterceptors(mediaEngine, interceptorRegistry); errRegister != nil {
 		t.Fatalf("register test interceptors: %v", errRegister)
 	}
-	return webrtc.NewAPI(
+	return webrtc.NewAPI(append([]func(*webrtc.API){
 		webrtc.WithMediaEngine(mediaEngine),
 		webrtc.WithInterceptorRegistry(interceptorRegistry),
-	)
+	}, options...)...)
 }
 
 func completeOffer(t *testing.T, connection *webrtc.PeerConnection) string {
