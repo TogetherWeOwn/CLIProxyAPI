@@ -141,10 +141,16 @@ jobs:
         shell: bash
         run: |
           go test -race -count=1 ./internal/recoverycorrelation ./internal/api/middleware ./internal/config ./internal/pluginhost ./internal/client/codex/live ./sdk/api/handlers ./sdk/api/handlers/openai ./ops/host-recovery/inputguard 2>&1 | tee "$RUNNER_TEMP/recovery-race.log"
+      - name: Heartbeat failover regression at PR head
+        shell: bash
+        run: |
+          go test -race -count=25 -timeout=180s -run '^TestServiceHeartbeatFailoverDoesNotDrainBlockingScope$' ./sdk/cliproxy 2>&1 | tee "$RUNNER_TEMP/heartbeat-failover.log"
       - name: Retain raw race result
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: recovery-race-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}/recovery-race.log
+          path: |
+            ${{ runner.temp }}/recovery-race.log
+            ${{ runner.temp }}/heartbeat-failover.log
           if-no-files-found: error
