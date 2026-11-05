@@ -74,6 +74,11 @@ def properties(raw):
         value[key] = item
     if set(value) != PROPERTIES:
         raise Rejected("manager-properties-incomplete")
+    # systemctl renders Job's (uo) tuple as empty when its numeric ID is zero.
+    # Normalize only an explicitly present idle Job; missing/duplicate fields
+    # still refuse above, and no other empty property becomes a zero/default.
+    if value["Job"] == "":
+        value["Job"] = "0"
     return value
 
 

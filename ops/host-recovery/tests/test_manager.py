@@ -228,6 +228,21 @@ class ManagerTests(unittest.TestCase):
             with self.subTest(update=update), self.assertRaises(durable.Rejected):
                 replace(self.forward, **update)
 
+    def test_systemctl_empty_job_normalizes_only_the_explicit_idle_property(self):
+        row = {**self.before, "Job": "", "ControlGroup": "", "InvocationID": "", "MainPID": ""}
+        parsed = manager.properties(encoded(row))
+        self.assertEqual(parsed, {**row, "Job": "0"})
+        self.assertEqual(manager.properties(encoded({**self.before, "Job": "17"}))["Job"], "17")
+        for raw in (encoded(row).replace(b"Job=\n", b""), encoded(row) + b"Job=\n"):
+            with self.subTest(raw=raw), self.assertRaises(durable.Rejected):
+                manager.properties(raw)
+
+    def test_actual_systemctl_idle_display_reaches_existing_quiescence_checks(self):
+        row = {**self.stopped, "Job": ""}
+        self.assertTrue(self.quiesce(before=row, after=row, final=row))
+        self.assertEqual(len(self.commands.calls), 3)
+        self.assertFalse(any("stop" in argv or "kill" in argv for argv in self.commands.calls))
+
     def test_property_parser_rejects_missing_duplicate_unknown_and_non_utf8(self):
         raw = encoded(self.before)
         for bad in (raw.replace(b"MainPID=123\n", b""), raw + b"Job=0\n", raw + b"Unknown=1\n",

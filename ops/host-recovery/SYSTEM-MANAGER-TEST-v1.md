@@ -56,6 +56,26 @@ backstops. Cleanup never enumerates a prefix to choose kill targets. Raw test an
 cleanup logs are retained even on failure. Do not call an unsuccessful or skipped
 cleanup a pass.
 
+## Idle job display compatibility
+
+The first real-manager run reached both inert services and an authenticated
+completion, then failed the stopped-state assertion: systemd 255 prints an idle
+job as `Job=`, not `Job=0`. The existing reader's numeric-only expectation could
+never acknowledge that real idle display. Complete failure output and cleanup
+receipts are retained; no failed job is called qualification.
+
+`manager.properties` now maps **only an explicitly present empty Job property**
+to its numeric zero representation, after the complete exact property-schema
+check. Missing/duplicate Job still refuses; pending numeric jobs and every other
+empty field retain their value. The real tests keep their original zero
+assertions, and two parser/observer regressions cover this compatibility boundary.
+The matching versioned source is systemd v255
+[`systemctl-show.c`](https://github.com/systemd/systemd/blob/v255/src/systemctl/systemctl-show.c),
+`print_property`'s Job `(uo)` branch: a positive numeric ID is printed, otherwise
+`bus_print_property_value(..., NULL)` emits the explicit empty property. This is
+source correspondence, not permission to treat a missing field or absent job
+inventory as completion, retirement, activation exclusion or drain.
+
 ## What a green job does not prove
 
 This fixture supplies manager ABI, actual completion, tested whole-unit descendant
