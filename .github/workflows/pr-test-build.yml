@@ -199,6 +199,11 @@ jobs:
         shell: bash
         run: |
           go test -race -count=25 -timeout=180s -run '^TestServiceHeartbeatFailoverDoesNotDrainBlockingScope$' ./sdk/cliproxy 2>&1 | tee "$RUNNER_TEMP/heartbeat-failover.log"
+      - name: Auth registration synchronization regressions at PR head
+        shell: bash
+        run: |
+          go test -race -count=100 -timeout=180s -run '^TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch$' ./sdk/cliproxy 2>&1 | tee "$RUNNER_TEMP/auth-registration-wait.log"
+          go test -race -count=25 -timeout=180s -run '^TestEndToEndAuthFile(Replacement|Patch)_RestoresModelsInV1ModelsWithoutRestart$' ./sdk/cliproxy 2>&1 | tee "$RUNNER_TEMP/auth-file-restoration.log"
       - name: Websocket keepalive upload regression at PR head
         shell: bash
         run: |
@@ -213,5 +218,7 @@ jobs:
             ${{ runner.temp }}/stream-cancellation-ordering.log
             ${{ runner.temp }}/responses-delivery.log
             ${{ runner.temp }}/heartbeat-failover.log
+            ${{ runner.temp }}/auth-registration-wait.log
+            ${{ runner.temp }}/auth-file-restoration.log
             ${{ runner.temp }}/websocket-keepalive-upload.log
           if-no-files-found: error
