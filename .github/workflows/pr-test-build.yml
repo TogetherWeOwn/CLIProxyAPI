@@ -60,13 +60,55 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Record component environment
+      - name: Prepare protected component fixture home
+        shell: bash
         run: |
-          git rev-parse HEAD
-          python3 --version
-          uname -sr
-          systemd-analyze --version
-          go version
+          {
+            git rev-parse HEAD
+            python3 --version
+            uname -sr
+            systemd-analyze --version
+            go version
+            python3 -I - <<'PY'
+          import os
+          from pathlib import Path
+          import pwd
+          import stat
+          import sys
+
+          sys.path.insert(0, str(Path.cwd() / "ops/host-recovery"))
+          from host_recovery.installation import FLAGS, protected
+
+          # Synthetic protected-path fixtures live below the runner account's
+          # home. Tighten only that owned directory, never relax the guard or
+          # change ancestors, owners, ACLs or other extended metadata.
+          uid = os.geteuid()
+          home = Path(pwd.getpwuid(uid).pw_dir)
+          fd = os.open(home, FLAGS)
+          try:
+              before = os.fstat(fd)
+              if before.st_uid != uid:
+                  raise RuntimeError("component fixture home is not runner-owned")
+              mode = stat.S_IMODE(before.st_mode)
+              os.fchmod(fd, mode & ~0o022)
+              print(f"fixture home uid={uid} mode={mode:04o}->{mode & ~0o022:04o}", flush=True)
+          finally:
+              os.close(fd)
+
+          fd = os.open("/", FLAGS)
+          try:
+              protected(fd, uid)
+              for part in home.parts[1:]:
+                  child = os.open(part, FLAGS, dir_fd=fd)
+                  os.close(fd)
+                  fd = child
+                  info = os.fstat(fd)
+                  print(f"fixture ancestor uid={info.st_uid} mode={stat.S_IMODE(info.st_mode):04o}", flush=True)
+                  protected(fd, uid)
+          finally:
+              os.close(fd)
+          PY
+          } 2>&1 | tee "$RUNNER_TEMP/recovery-environment.log"
       - name: Python recovery components at PR head
         shell: bash
         run: python3 -I ops/host-recovery/tests/run.py 2>&1 | tee "$RUNNER_TEMP/recovery-components.log"
@@ -75,7 +117,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: recovery-components-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}/recovery-components.log
+          path: |
+            ${{ runner.temp }}/recovery-environment.log
+            ${{ runner.temp }}/recovery-components.log
           if-no-files-found: error
 
   recovery-race:
