@@ -102,7 +102,7 @@ verification, authenticated provisioning, operational runners, reboot/replay
 source completeness, fault/timing matrix and positive measured phase caps remain
 separate gates. No runtime startup, source lookup or metadata read clears them.
 
-## Actual runtime fixture source (qualification pending)
+## Actual runtime fixture source and bounded qualification
 
 `tests/runtime_task_fixture.py` adds a separate hosted-Actions-only diagnostic.
 It refuses tool drift against the retained containerd/ctr/shim/runc byte hashes
@@ -155,11 +155,47 @@ remain empty, namespaces/mounts are unchanged, and no host device policy is
 modified. The runtime assertions are unchanged; this is another reached fixture
 failure, not a task/cgroup qualification pass.
 
-This source is unqualified until its exact-head Actions job passes. Even a pass
-will qualify only this one containerd/task diagnostic, not Docker restoration,
-complete activation/writer/old-epoch exclusion, all-job retirement, cold/quarantine
+The corrected `63e82ac6014d1cf71e85a9929901305ac0361e4e` fixture passed in
+[Actions 42126299019](https://github.com/TogetherWeOwn/CLIProxyAPI/actions/runs/42126299019/job/127591255370),
+including all four process deaths, explicit empty-domain observation and both
+cleanup paths. All seven jobs in that exact-head workflow passed. This qualifies
+only the described containerd/task mechanics, not Docker restoration, complete
+activation/writer/old-epoch exclusion, all-job retirement, cold/quarantine
 registration/drain, reboot, operational authority or full recovery acceptance.
 Current supervisor/worker/IPC execution, restore/start and settlement denies stay.
+
+### Daemon-only stop counterexample (new assertions pending Actions)
+
+The next fixture revision adds a distinct authenticated daemon stop before the
+recursive-domain kill. It copies the installed root-owned libsystemd bytes into
+an exclusively created protected root directory and records their observed hash;
+this is test-local correspondence, not administrative approval. An actual
+non-reconnecting `ManagerJobSession` authenticates root/PID1 and the system-bus
+owner. The active transient unit's actual invocation, fragment and static property
+pins are captured. Private, exclusive, fsynced/read-back **synthetic fixture**
+pending/return/completion records bracket one fixed StopUnit submission. They are
+not an installation epoch, original supervisor authority or the host operation
+journal. No second recovery owner or new installation lock is introduced.
+
+The exact returned job path/ID must match an authenticated `done` JobRemoved
+completion and be absent from the final job inventory. Independent systemctl
+state must also show no active main process/job. The daemon and inherited shim
+pidfds must then be dead **while both separately placed task processes remain
+live in their original task cgroup** and the recursive domain is populated.
+The source process-death verifier must reject this intermediate state with its
+specific live-process code; a different exception or merely absent task metadata
+cannot pass. Only the subsequent descriptor-bound recursive cgroup kill may
+eliminate those surviving task/child witnesses. All four original pidfds must
+finally report death, the source inventory must agree and the domain must be
+explicitly empty; existing exact cleanup assertions remain.
+
+This is a reached lifetime counterexample to treating a daemon's successful stop
+as whole-service quiescence, not complete activation exclusion or a recovery
+acceptance result. No masked two-runtime-role composition, Docker restart/restore
+closure, durable object registration, reboot, pending drain, baseline/readiness
+oracle, producer/replay completeness, operational runner or measured recovery cap
+is qualified by it. New assertions require exact-head Actions evidence before a
+pass is claimed; no local native-library/manager/runtime execution is permitted.
 
 REA angle: use the shipped tools' own build identifiers and the exact public
 upstream source to identify discovery, socket placement, cgroup migration and
