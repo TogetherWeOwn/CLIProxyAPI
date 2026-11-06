@@ -308,7 +308,12 @@ as a substitute for the accepted production binaries.
   enforced quiescence callback and original phase deadline bracket operations;
   this is not that fence's implementation. Fresh contexts can reconcile partial
   restores; failures poison the current context. Filesystem-only receipts grant
-  no service start or semantic oracle. Real multi-root/process/SIGKILL and storage
+  no service start or semantic oracle. A separate `open_write_set_verifier` view
+  opens fresh approved handles, verifies complete current files and supplies
+  semantic-helper input without restoring or trusting a restorer's success flag.
+  It is not an OS sandbox or an authenticated independent observer service; all
+  fence/runtime/readiness and actual reader-permission prerequisites remain.
+  Real multi-root/process/SIGKILL and storage
   fault tests still use **scripted host/daemon/semantic boundaries**. Authenticated
   aggregate provisioning, complete semantic guards and actual manager integration
   remain due. See [multi-root scope and limits](WRITE-SET-v1.md).

@@ -81,6 +81,37 @@ record, latch retirement, admission or external alert transport is implemented
 here. In particular, the filesystem receipt deliberately **cannot** satisfy the
 coordinator's strict `verify_baseline_stopped` receipt shape.
 
+## Fresh observation without restoration
+
+`open_write_set_verifier` opens a new approved-handle context and exposes only
+`verify_files` and `capture_files`. It reuses the same strict aggregate/baseline,
+complete inventory, metadata and exact-nine checks, without calling restoration,
+writing a receipt, or setting/trusting the restorer's `restored` flag. A verifier
+can run after a separate restorer context has exited, or against an unchanged
+baseline. It refuses partial/candidate state rather than repairing it. It does
+not acquire another installation lock.
+
+`verify_files` repeats the complete live inventory and emits
+`host-recovery-write-set-observed-v1`, distinct from the restorer's receipt.
+`capture_files` reads independently approved role files from complete current
+inventories, not cached backup blobs. It can feed `RestoredInputSnapshot` and the
+existing pinned semantic input helper without requiring that observer to perform
+writes first. Byte equality still cannot substitute for semantic validation;
+a byte-exact but semantically invalid baseline must fail the helper. Caller
+intent changes during external callbacks, lost fence/deadline/handles, read
+faults and mismatches poison the observation context. After exit its handles
+cannot be reused.
+
+This is a read-only **API view**, not an OS permission boundary. It is not yet a
+separately provisioned/authenticated observer service. Existing ownership and
+protected-directory constraints remain unchanged; no cross-UID access grant or
+permission relaxation is supplied. Runtime identity, actual independent reader
+permissions, manager/kernel/daemon observations, complete fence, deployment,
+plugin/readiness verification and result IPC remain integration prerequisites.
+Repeated scans cannot exclude concurrent writers. Both receipt types keep
+`semantic_start_oracle_proven`, `start_permission` and `production_acceptance`
+false and cannot satisfy the complete stopped-baseline or result oracle.
+
 ## Evidence boundary
 
 Repository tests use only fresh owned synthetic protected roots. They include

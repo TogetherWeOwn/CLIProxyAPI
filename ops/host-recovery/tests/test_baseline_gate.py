@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from host_recovery import baseline_gate, coordinator, durable, input_gate, inventory, journal
+from host_recovery import baseline_gate, coordinator, durable, input_gate, inventory, journal, write_set
 import test_input_gate
 import test_write_set
 
@@ -111,6 +111,53 @@ class BaselineGateTests(unittest.TestCase):
         self.assertNotIn(b'"start_authorized":true', self.gate.receipt)
         self.assertFalse(recovery.verify_files(self.fx.value, deadline=1100)["semantic_start_oracle_proven"])
         self.fx.assert_baseline()
+
+    def open_verifier(self):
+        return write_set.open_write_set_verifier(baseline=test_write_set.approve(self.fx.backup),
+                    roots={name: test_write_set.approve(path) for name, path in self.fx.paths.items()},
+                    baseline_sha256=self.fx.pin, check=self.fx.check, clock=lambda: self.fx.time)
+
+    def test_fresh_read_only_verifier_supplies_actual_semantic_helper_inputs(self):
+        with self.open_verifier() as observer:
+            self.setup_gate(observer)
+            self.assertTrue(self.gate.verify(self.fx.value, deadline=1100))
+            self.assertEqual(self.reached, ["baseline-helper-dispatched"])
+            self.assertFalse(observer._reader.restored)
+            self.assertFalse(hasattr(observer, "restore_complete"))
+            self.assertFalse(observer.verify_files(self.fx.value, deadline=1100)["start_permission"])
+        self.refused(lambda: self.gate.verify(self.fx.value, deadline=1100))
+
+    def test_byte_exact_invalid_baseline_from_read_only_verifier_still_fails_semantics(self):
+        self.fx.put(self.fx.paths["config"] / "config.yaml", CONFIG + b"plugins: {enabled: true}\n")
+        self.save_baseline()
+        with self.open_verifier() as observer:
+            self.assertTrue(observer.verify_files(self.fx.value, deadline=1100)["filesystem_verified"])
+            self.setup_gate(observer)
+            self.refused(lambda: self.gate.verify(self.fx.value, deadline=1100))
+            self.assertEqual(self.reached, ["baseline-helper-dispatched"])
+            self.assertFalse(observer._reader.restored)
+
+    def test_snapshot_rechecks_approval_after_external_callback(self):
+        for field in ("intent", "roles", "policy", "approval"):
+            with self.subTest(field=field):
+                self.setUp()
+                with self.open_verifier() as observer:
+                    self.setup_gate(observer)
+                    reached = []
+                    def changed(*, deadline):
+                        reached.append(field)
+                        if field == "intent":
+                            self.fx.value["package_sha256"] = "0" * 64
+                        elif field == "roles":
+                            self.snapshot.roles["config"] = ("config", "missing")
+                        elif field == "policy":
+                            self.snapshot.policy["image"] = "mutable:tag"
+                        else:
+                            self.snapshot.approval = replace(self.snapshot.approval, intent_sha256="0" * 64)
+                        return True
+                    self.snapshot.check = changed
+                    self.refused(lambda: self.snapshot._current(self.fx.value, 1100, lambda: None))
+                    self.assertEqual(reached, [field])
 
     def test_capture_requires_restoration_and_valid_role_files(self):
         with self.fx.open() as recovery:

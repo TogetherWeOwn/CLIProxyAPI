@@ -81,6 +81,59 @@ def open_write_set(*, baseline, roots, baseline_sha256, check, clock):
             recovery.closed = True
 
 
+@contextmanager
+def open_write_set_verifier(**kwargs):
+    """Open fresh approved handles without restoring or trusting a restorer flag.
+
+    This view exposes observation only. Separate observer provisioning/identity and
+    filesystem permissions are still required; a Python facade is not a sandbox.
+    The existing installation lock and complete external fence remain mandatory.
+    """
+    with open_write_set(**kwargs) as reader:
+        yield WriteSetVerifier(reader)
+
+
+class WriteSetVerifier:
+    """Fresh complete-file observations, not semantic, fence or start authority."""
+    def __init__(self, reader):
+        if not isinstance(reader, WriteSetRecovery) or reader.restored:
+            raise Rejected("write-set-fresh-verifier-required")
+        self._reader = reader
+        self._failed = False
+
+    def _observe(self, intent, deadline, capture):
+        try:
+            if self._failed:
+                raise Rejected("write-set-verifier-unavailable")
+            original = canonical(intent)
+            value = decode(original)
+            reader = self._reader
+            reader._bound(value, deadline)
+            result = capture(reader, value)
+            # Fence/clock/descriptor callbacks are external boundaries. Do not
+            # accept a caller's changed intent after reading the original files.
+            reader._current(deadline)
+            if canonical(intent) != original or reader.intent_sha256 != digest(original):
+                raise Rejected("write-set-verifier-original-intent-changed")
+            return result
+        except BaseException:
+            self._failed = self._reader.failed = True
+            raise
+
+    def verify_files(self, intent, *, deadline):
+        def capture(reader, value):
+            reader._verify_all(deadline)
+            reader._verify_all(deadline)
+            return {"schema": "host-recovery-write-set-observed-v1", "baseline_sha256": reader.pin,
+                    "roots": len(reader.roots), "entries": sum(len(tree["entries"]) for tree, _ in reader.baselines.values()),
+                    "selected": 9, "disabled": 7, "enabled": 2, "filesystem_verified": True,
+                    "semantic_start_oracle_proven": False, "start_permission": False, "production_acceptance": False}
+        return self._observe(intent, deadline, capture)
+
+    def capture_files(self, intent, roles, *, deadline):
+        return self._observe(intent, deadline, lambda reader, value: reader._capture_files(value, roles, deadline=deadline))
+
+
 class WriteSetRecovery:
     """Restore files only; receipts deliberately cannot satisfy the start oracle.
 
@@ -220,8 +273,14 @@ class WriteSetRecovery:
         roles is an independently approved mapping to (root, relative file).
         Returned bytes remain restricted; no paths/content belong in receipts.
         """
+        if not self.restored:
+            self.failed = True
+            raise Rejected("write-set-restored-role-mapping-required")
+        return self._capture_files(intent, roles, deadline=deadline)
+
+    def _capture_files(self, intent, roles, *, deadline):
         try:
-            if (not self.restored or type(roles) is not dict or not 1 <= len(roles) <= 16
+            if (type(roles) is not dict or not 1 <= len(roles) <= 16
                     or any(not identity(role) for role in roles)):
                 raise Rejected("write-set-restored-role-mapping-required")
             roles = copy.deepcopy(roles)

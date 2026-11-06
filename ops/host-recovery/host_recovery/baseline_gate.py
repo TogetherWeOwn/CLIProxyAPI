@@ -13,7 +13,7 @@ from .coordinator import validate_baseline_receipt
 from .durable import Rejected, canonical, decode, digest
 from .input_gate import ExactInputGate
 from .loading import pin
-from .write_set import WriteSetRecovery
+from .write_set import WriteSetRecovery, WriteSetVerifier
 
 ROLES = frozenset(("config", "compose_source", "frozen_rendered_compose", "environment"))
 
@@ -32,12 +32,13 @@ class BaselineApproval:
 class RestoredInputSnapshot:
     """Capture original role files from a freshly verified complete write set.
 
+    A fresh read-only verifier need not have performed the restoration itself.
     Environment is an explicit restored JSON map, not the process environment.
     Policy and role hashes are comparison pins, not signatures or provisioning.
     No candidate validator is required to run safe baseline restoration.
     """
     def __init__(self, *, recovery, roles, policy, approval, check, clock):
-        if (not isinstance(recovery, WriteSetRecovery) or not isinstance(approval, BaselineApproval)
+        if (not isinstance(recovery, (WriteSetRecovery, WriteSetVerifier)) or not isinstance(approval, BaselineApproval)
                 or type(roles) is not dict or set(roles) != ROLES or type(policy) is not dict
                 or not callable(check) or not callable(clock)):
             raise Rejected("baseline-input-explicit-boundary-required")
@@ -47,10 +48,12 @@ class RestoredInputSnapshot:
 
     def _current(self, intent, deadline, remaining):
         remaining()
-        if (digest(canonical(intent)) != self.approval.intent_sha256
-                or digest(canonical(self.roles)) != self.approval.roles_sha256
-                or digest(canonical(self.policy)) != self.approval.policy_sha256
-                or self.check(deadline=deadline) is not True):
+        approval = self.approval
+        def approved():
+            return (self.approval == approval and digest(canonical(intent)) == approval.intent_sha256
+                    and digest(canonical(self.roles)) == approval.roles_sha256
+                    and digest(canonical(self.policy)) == approval.policy_sha256)
+        if not approved() or self.check(deadline=deadline) is not True or not approved():
             raise Rejected("baseline-input-approval-or-boundary-changed")
         remaining()
 
