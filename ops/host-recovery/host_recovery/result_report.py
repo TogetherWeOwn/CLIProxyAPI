@@ -6,7 +6,7 @@ reported filesystem, runtime, readiness, timings or durability. Those facts must
 still be independently observed. No runner, start or settlement is enabled here.
 """
 import copy
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import math
 import os
 import stat
@@ -17,6 +17,7 @@ from .durable import Rejected, canonical, decode, digest, signature
 from .installation import DirectoryApproval, open_approved_directory
 from .journal import validate_intent
 from .loading import pin
+from .mounted_baseline import MountedBaseline
 from .outcomes import expected_oracle
 from .protected_file import ProtectedFile
 
@@ -35,11 +36,13 @@ class WorkerEvidenceOracle:
     checks is not verified and cannot be reused on restart. Direct calls provide
     only a point observation. Either mode is once-only, including on uncertainty.
     """
-    def __init__(self, *, directory, oracle, check, clock):
+    def __init__(self, *, directory, oracle, check, clock, mounted_baseline=None):
         if (not isinstance(directory, DirectoryApproval) or directory.mode != 0o700
-                or not all(callable(value) for value in (oracle, check, clock))):
+                or not all(callable(value) for value in (oracle, check, clock))
+                or mounted_baseline is not None and not isinstance(mounted_baseline, MountedBaseline)):
             raise Rejected("result-report-explicit-boundaries-required")
         self.directory, self.oracle, self.check, self.clock = directory, oracle, check, clock
+        self.mounted_baseline = self._mounted_baseline = mounted_baseline
         self.attempted, self.failed = False, False
 
     @staticmethod
@@ -96,6 +99,7 @@ class WorkerEvidenceOracle:
             def bound():
                 if (self.failed or self.directory != directory or self.oracle is not oracle
                         or self.check is not check or self.clock is not clock
+                        or self.mounted_baseline is not self._mounted_baseline
                         or canonical(intent) != original_intent or canonical(result) != original_result):
                     raise Rejected("result-report-boundary-changed")
 
@@ -150,13 +154,18 @@ class WorkerEvidenceOracle:
                     root.validate()
 
                 revalidate()
-                observed_intent, observed_result = copy.deepcopy(value), copy.deepcopy(saved)
-                receipt = copy.deepcopy(oracle(observed_intent, observed_result, deadline=deadline))
-                if (canonical(observed_intent) != original_intent or canonical(observed_result) != original_result
-                        or canonical(receipt) != canonical(expected_oracle(value, saved))):
-                    raise Rejected("result-report-independent-oracle-unconfirmed")
-                revalidate()
-                yield copy.deepcopy(receipt)
+                with ExitStack() as observations:
+                    if self._mounted_baseline is not None:
+                        observations.enter_context(self._mounted_baseline.observe(value, deadline=deadline))
+                    observed_intent, observed_result = copy.deepcopy(value), copy.deepcopy(saved)
+                    receipt = copy.deepcopy(oracle(observed_intent, observed_result, deadline=deadline))
+                    if (canonical(observed_intent) != original_intent or canonical(observed_result) != original_result
+                            or canonical(receipt) != canonical(expected_oracle(value, saved))):
+                        raise Rejected("result-report-independent-oracle-unconfirmed")
+                    revalidate()
+                    yield copy.deepcopy(receipt)
+                    revalidate()
+                # Mounted-file callbacks cannot silently alter the retained report.
                 revalidate()
         except BaseException:
             self.failed = True

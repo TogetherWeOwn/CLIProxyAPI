@@ -100,6 +100,48 @@ complete fence and fresh baseline/readiness oracles remain scripted. The runnabl
 supervisor remains fixed-deny and the worker identity-only. Operational recovery,
 reboot/resume, complete fencing, settlement and replay/source-drain are unfinished.
 
+## Process-root baseline observation
+
+`mounted_baseline.open_mounted_baseline` adds an optional read-only observation
+for an **externally authenticated live pidfd** bound to the old full container ID.
+The approval binds the original intent, object and complete mount-list digest.
+Acquiring that authority from a real daemon/manager is not implemented by passing
+a guessed PID or a true callback. The existing installation lock and complete
+external mount/file/process-writer exclusion must remain held.
+
+Unlike caller-namespace bind-source comparison, this reader opens the target's
+kernel procfs root and mount namespace. It traverses each destination with
+no-follow directory opens, requires every approved baseline root exactly once,
+checks source device/inode correspondence, and rereads full file bytes, metadata
+and inventories through those target-root descriptors. A copied empty directory
+is not equivalent to the approved source inode. A detached descriptor is not
+proof of the process's current path: destinations, namespace and root identities
+are freshly reopened and compared at each barrier. Namespace/root descriptors
+and the duplicated live pidfd remain retained through the observation window.
+No setns, mount, process launch, file repair or second lock occurs.
+
+`WorkerEvidenceOracle(..., mounted_baseline=view)` enters this context before the
+mandatory independent current-state oracle and retains it through supervisor
+observation-record publication. A failing trailing mounted-file observation
+leaves even a visible observation record unverified. Removing a configured view
+refuses. The report is rechecked after mounted-observer callbacks as well.
+
+This is bounded **point correspondence**, not continuous or atomic mount/writer
+exclusion. Read-only/private flags are approved mapping requirements, not kernel
+mount-option enforcement proved by these reads. User-namespace ownership
+translation, symlink destinations, file binds, volumes, unapproved/subset/overlap
+mappings and inaccessible procfs are unsupported and refuse; there is no caller-
+namespace fallback. It does not prove loaded-plugin absence, image provenance,
+readiness, start fencing, asynchronous replay drain or installation settlement.
+All those independent facts remain mandatory; the operational runner denies are
+unchanged. An embedding must not treat the new non-authorizing receipt as the
+complete result oracle.
+
+The new tests are authored but **unexecuted**. Self-pidfd/procfs tests use actual
+synthetic directories and a synthetic approved mapping, not a running container
+or authentication of one. Result-protocol ordering tests script the mounted
+observer and the independent oracle; they are not native recovery qualification.
+
 ## IPC and broker composition
 
 `WorkerListener.accept_once(..., result_oracle=...)` keeps the same connection and

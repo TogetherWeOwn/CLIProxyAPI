@@ -161,6 +161,41 @@ class WriteSetVerifier:
     def capture_files(self, intent, roles, *, deadline):
         return self._observe(intent, deadline, lambda reader, value: reader._capture_files(value, roles, deadline=deadline))
 
+    def verify_mounted_files(self, intent, roots, *, deadline):
+        """Compare every baseline root through independently acquired process fds.
+
+        The caller authenticates the process/container, pins its namespace/root and
+        reopens each approved destination. Matching source inodes alone are not
+        enough: complete bytes, metadata and entry inventories are read again.
+        These fds are borrowed for this observation only, never closed or restored.
+        """
+        if (type(roots) is not dict or not roots
+                or any(type(fd) is not int or fd < 0 for fd in roots.values())):
+            raise Rejected("write-set-mounted-root-handles-required")
+        saved = dict(roots)
+
+        def matches(reader):
+            if roots != saved or set(saved) != set(reader.roots):
+                raise Rejected("write-set-complete-mounted-roots-required")
+            for name, fd in sorted(saved.items()):
+                approval = reader.roots[name].approval
+                info = os.fstat(fd)
+                if (info.st_dev, info.st_ino) != (approval.device, approval.inode):
+                    raise Rejected("write-set-mounted-root-identity-mismatch")
+                tree, _ = snapshot(fd, uid=approval.uid, gid=approval.gid)
+                if tree != reader.baselines[name][0]:
+                    raise Rejected("write-set-mounted-baseline-mismatch")
+
+        def capture(reader, value):
+            reader._verify_all(deadline)
+            matches(reader)
+            return {"schema": "host-recovery-mounted-files-v1", "baseline_sha256": reader.pin,
+                    "roots": len(saved), "mounted_files_verified": True, "start_authorized": False}
+
+        # _observe's trailing authority/clock callbacks precede the final complete
+        # file read, so a callback cannot leave an earlier sibling silently stale.
+        return self._observe(intent, deadline, capture, matches)
+
     def verify_bind_sources(self, intent, mounts, *, deadline):
         """Match restricted bind sources to approved roots in the caller namespace.
 

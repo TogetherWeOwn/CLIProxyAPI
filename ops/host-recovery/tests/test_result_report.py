@@ -1,4 +1,5 @@
 """Real report files/publication; SCRIPTED manager, fence and current-state oracle."""
+from contextlib import contextmanager
 import errno
 import os
 from pathlib import Path
@@ -244,3 +245,55 @@ class WorkerReportTests(unittest.TestCase):
                     except durable.Rejected:
                         self.assertTrue(failure)
                     self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors)
+
+    def test_scripted_mounted_observation_spans_original_oracle_and_supervisor_fsync(self):
+        # The real process-root reader has separate tests. Here only the result
+        # protocol ordering is under test, with a scripted observation context.
+        with self.case.case.open() as process:
+            self.prepare(process)
+            mounted = object.__new__(result_report.MountedBaseline)
+            events = []
+            @contextmanager
+            def observe(intent, *, deadline):
+                events.append("mounted-before")
+                yield {"start_authorized": False}
+                events.append("mounted-after")
+            def oracle(intent, result, **kw):
+                events.append("independent-oracle")
+                return outcomes.expected_oracle(intent, result)
+            def fault(point):
+                if point == "readback":
+                    events.append("supervisor-readback")
+            process.log.fault = fault
+            mounted.observe = observe
+            gate = self.gate(oracle=oracle, mounted_baseline=mounted)
+            self.assertTrue(self.observe(process, gate)["worker_result_observed"])
+            self.assertEqual(events, ["mounted-before", "independent-oracle", "supervisor-readback", "mounted-after"])
+            self.case.assert_no_grant(process)
+
+    def test_scripted_late_mounted_failure_does_not_accept_saved_observation(self):
+        with self.case.case.open() as process:
+            self.prepare(process)
+            mounted = object.__new__(result_report.MountedBaseline)
+            @contextmanager
+            def observe(intent, *, deadline):
+                self.reached.append("mounted-before")
+                yield {}
+                self.reached.append("mounted-after")
+                raise durable.Rejected("synthetic-mount-drift")
+            mounted.observe = observe
+            state = self.observe(process, self.gate(mounted_baseline=mounted))
+            self.assertEqual(self.reached, ["mounted-before", "mounted-after"])
+            self.assertFalse(state["worker_result_observed"])
+            self.assertTrue((self.case.case.root / "reconcile-result-observed.json").exists())
+            self.case.assert_no_grant(process)
+
+    def test_configured_mounted_verifier_cannot_be_removed_before_report_observation(self):
+        with self.case.case.open() as process:
+            self.prepare(process)
+            mounted = object.__new__(result_report.MountedBaseline)
+            gate = self.gate(mounted_baseline=mounted)
+            gate.mounted_baseline = None
+            self.assertFalse(self.observe(process, gate)["worker_result_observed"])
+            self.assertEqual(self.case.oracle_calls, [])
+            self.case.assert_no_grant(process)
