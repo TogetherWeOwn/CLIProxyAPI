@@ -107,9 +107,26 @@ the private read-only HTTP endpoint with kernel peer checks. Only a missing or
 not-yet-listening socket retries within the original fixture deadline; wrong
 peers, malformed/effective inputs, timeout and server errors refuse. Task,
 policy, cold-start, executable/death and cleanup assertions are unchanged.
-Seven pure fixture methods are now authored, not locally run; corrected native
-qualification remains pending exact-head Actions. No production bug red/green
-or approved provenance is inferred from this fixture correction.
+The first correction, exact `a6800d6362b75739bbf25b78d1978810e1ae4f4d`,
+[Actions 42134404762 Docker job](https://github.com/TogetherWeOwn/CLIProxyAPI/actions/runs/42134404762/job/127618762939),
+reached the actual peer but failed on connection reset: daemon logs independently
+show plugin-manager startup trying to create `/run/docker/plugins` beneath the
+inaccessible host path. Both cleanup paths again passed, before image/object/task
+creation. The failure was not retried or hidden as transient readiness.
+
+Pinned [`daemon/daemon_linux.go:24-29`](https://github.com/moby/moby/blob/6430e49a55babd9b8f4d08e70ecb2b68900770fe/daemon/daemon_linux.go#L24-L29)
+explicitly makes Linux plugin execution use a static path instead of ExecRoot;
+[`plugin/manager.go:96-103`](https://github.com/moby/moby/blob/6430e49a55babd9b8f4d08e70ecb2b68900770fe/plugin/manager.go#L96-L103)
+creates that directory even without configured plugins. The next correction
+therefore masks `/run/docker` with a fresh **service-private** 1 MiB tmpfs
+(`nosuid,nodev,noexec`, mode 0700), never exposing or modifying the host directory.
+The default Docker socket/storage remain inaccessible; containerd still cannot
+access the host plugin path. Before creating anything, the fixture independently
+checks dockerd's actual mountinfo for the single private noexec tmpfs. The mount
+vanishes with its service namespace; no host unmount/permission relaxation is
+introduced. Eight pure fixture methods are authored, not locally run; corrected
+native qualification remains pending exact-head Actions. No production bug
+red/green or approved provenance follows from these fixture corrections.
 
 ## Limits and retained gates
 

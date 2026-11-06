@@ -160,14 +160,37 @@ def pins():
         emit(runtime_tool=path, sha256=expected)
 
 
+def validate_plugin_mount(raw):
+    mounts = []
+    for line in raw.splitlines():
+        left, separator, right = line.partition(" - ")
+        fields, filesystem = left.split(), right.split()
+        if len(fields) >= 6 and fields[4] == "/run/docker":
+            mounts.append((fields, separator, filesystem))
+    require(len(mounts) == 1, "one private Docker plugin mount required")
+    fields, separator, filesystem = mounts[0]
+    require(separator and fields[3] == "/" and filesystem and filesystem[0] == "tmpfs"
+            and {"rw", "nosuid", "nodev", "noexec"} <= set(fields[5].split(","))
+            and not any(value.startswith("shared:") for value in fields[6:]),
+            "Docker plugin root is not an isolated private tmpfs")
+
+
 def start_unit(root, unit, slice_name, executable, config):
     require(show(unit, "LoadState") == "not-found", "refuse existing Docker fixture unit")
+    inaccessible = "-/run/containerd -/run/docker.sock -/var/lib/docker -/var/lib/containerd"
+    extra = []
+    if executable == "/usr/bin/dockerd":
+        # Moby's Linux plugin root ignores ExecRoot. Mask the shared path with
+        # a fresh service-private tmpfs, never grant access to the host directory.
+        extra = ["--property=TemporaryFileSystem=/run/docker:rw,nosuid,nodev,noexec,size=1M,mode=0700"]
+    else:
+        inaccessible += " -/run/docker"
     command("/usr/bin/systemd-run", "--unit=" + unit, "--slice=" + slice_name,
             "--description=cpa-owned-docker=" + root.name, "--service-type=exec",
             "--property=Restart=no", "--property=KillMode=control-group", "--property=Delegate=yes",
             "--property=TimeoutStopSec=5s", "--property=RuntimeMaxSec=120s", "--property=LimitCORE=0",
             "--property=ProtectHome=yes", "--property=PrivateNetwork=yes", "--property=PrivateMounts=yes",
-            "--property=InaccessiblePaths=-/run/containerd -/run/docker -/run/docker.sock -/var/lib/docker -/var/lib/containerd",
+            "--property=InaccessiblePaths=" + inaccessible, *extra,
             "--", "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "LANG=C", executable, "--config" if executable.endswith("containerd")
             else "--config-file", str(config))
 
@@ -279,7 +302,9 @@ def main(probe):
                 pid = int(show(units[epoch]["dockerd"], "MainPID"))
                 require(pid > 1, "private dockerd MainPID required")
                 if private_info(root, pid, current, deadline) is not None:
+                    validate_plugin_mount(Path("/proc/%d/mountinfo" % pid).read_text())
                     require(show(units[epoch]["dockerd"], "MainPID") == str(pid), "dockerd changed during readiness")
+                    emit(private_docker_plugin_tmpfs_observed=True)
                     break
                 select.select([], [], [], 0.02)
             # The root is 0700 even if the local daemon uses a broader socket

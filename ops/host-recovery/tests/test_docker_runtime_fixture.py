@@ -6,7 +6,7 @@ import tarfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from docker_runtime_fixture import docker_config, fixture_names, inspect_object, rootfs_archive, validate_info
+from docker_runtime_fixture import docker_config, fixture_names, inspect_object, rootfs_archive, validate_info, validate_plugin_mount
 
 
 class DockerRuntimeFixtureTests(unittest.TestCase):
@@ -47,6 +47,14 @@ class DockerRuntimeFixtureTests(unittest.TestCase):
         for root, group in ((Path("/var/lib/docker"), self.slice), (self.root, "system.slice")):
             with self.subTest(root=root, group=group), self.assertRaises(AssertionError):
                 docker_config(root, group)
+
+    def test_plugin_root_requires_one_private_noexec_tmpfs(self):
+        line = "99 20 0:42 / /run/docker rw,nosuid,nodev,noexec - tmpfs tmpfs rw,size=1024k\n"
+        validate_plugin_mount(line)
+        for changed in ("", line + line, line.replace("tmpfs", "ext4"), line.replace(",noexec", ""),
+                        line.replace(" - tmpfs", " shared:42 - tmpfs"), line.replace(" / /run/docker", " /host /run/docker")):
+            with self.subTest(changed=changed), self.assertRaises(AssertionError):
+                validate_plugin_mount(changed)
 
     def test_effective_info_requires_actual_server_fields(self):
         info = {"DockerRootDir": str(self.root / "docker"), "Driver": "vfs", "CgroupDriver": "systemd",
