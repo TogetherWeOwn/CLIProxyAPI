@@ -71,6 +71,48 @@ independently enforced complete fence must cover all those paths and keep them
 closed through observation and the actual start operation. Repeated identical
 snapshots do not prove there was no inter-query change or close a start race.
 
+## Optional baseline bind-source correspondence
+
+An explicitly supplied `bind_sources=WriteSetVerifier` connects the pinned Docker
+projection to fresh baseline observations. The same observer is retained for the
+lifetime of the gate; removing/replacing it between verification and the one-shot
+start handoff refuses. Without this option the result explicitly reports
+`bind_source_baseline_verified: false`; a projection hash alone never implies file
+verification. No operational runner is enabled by this option.
+
+`WriteSetVerifier.verify_bind_sources` supports only a nonempty bounded list of
+complete-directory binds. Every source path must exactly equal a separately
+approved open write-set root. All roots are verified, including roots not mounted
+in the container. Files, metadata, unrelated provider entries, selected auth state
+and absence of candidate additions must match the original aggregate baseline.
+No restoration or repair is attempted. Root handles/approvals, original intent,
+mount inventory and reader identity are retained through the final fence/clock
+callbacks; changed inputs or read uncertainty poison the observer.
+
+Supported mount rows have exactly `Type`, `Source`, `Destination`, `Mode`, `RW`
+and `Propagation`, with `Type=bind`, `Mode=ro`, literal `RW=false` and
+`Propagation=rprivate`. Each source occurs once. Destinations must be canonical
+absolute non-root paths with no duplicates or parent/child shadowing. Volumes,
+file/subdirectory binds, extra fields, writable/propagating mounts and unsupported
+shapes refuse. An approved deployment using those features remains unsupported:
+never alter the deployment or reseal its approval just to make this check pass.
+The full deployment projection is still independently approved before this check.
+
+The gate repeats source verification alongside its daemon observations and again
+before one-shot delegation. A final stopped-object/projection read follows the
+last source observer callback. The redacted source receipt carries only the
+baseline hash, mount count and explicit non-authorizing facts. Paths and bytes are
+restricted transient inputs, not public evidence.
+
+**This verifies caller-namespace source-directory correspondence, not mounted
+container bytes.** Docker can run in a different mount namespace; a source path in
+its inspect output need not resolve to the caller's same inode. Read-only/private
+mount observations also do not exclude writes from the host, privileged writers,
+submount changes, image-layer mutation or daemon restart. Actual daemon/container
+namespace inode/content correspondence, executable/plugin discovery and readiness
+remain missing independent oracle facts. No missing receipt fact may be filled
+from this optional flag, and no start grant follows from it.
+
 ## What this does not prove
 
 A matching projection cannot establish mounted file contents/metadata, effective

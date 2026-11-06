@@ -14,6 +14,7 @@ from .daemon import DockerObjects
 from .durable import Rejected, canonical, decode, digest
 from .journal import validate_intent
 from .loading import pin
+from .write_set import WriteSetVerifier
 
 FORMAT = ('{"object_id":{{json .Id}},"image_id":{{json .Image}},'
           '"path":{{json .Path}},"args":{{json .Args}},'
@@ -41,11 +42,13 @@ class OldDeploymentGate:
     without that enforcement cannot close an inter-query/start race. DockerObjects
     supplies only fixed inspection argv here, never create/start/exec/copy/mutation.
     """
-    def __init__(self, *, objects, approval, check, clock):
+    def __init__(self, *, objects, approval, check, clock, bind_sources=None):
         if (not isinstance(objects, DockerObjects) or not isinstance(approval, DeploymentApproval)
-                or not callable(check) or not callable(clock)):
+                or not callable(check) or not callable(clock)
+                or bind_sources is not None and not isinstance(bind_sources, WriteSetVerifier)):
             raise Rejected("deployment-explicit-boundaries-required")
         self.objects, self.approval, self.check, self.clock = objects, approval, check, clock
+        self.bind_sources = self._bind_sources = bind_sources
         self.failed = False
 
     def _projection(self, object_id, approval, deadline):
@@ -65,17 +68,20 @@ class OldDeploymentGate:
             raise Rejected("deployment-projection-schema")
         if digest(canonical(value)) != approval.projection_sha256:
             raise Rejected("deployment-projection-mismatch")
+        return value
 
     def verify(self, intent, *, deadline):
         try:
             if self.failed:
                 raise Rejected("deployment-gate-unavailable")
             value, approval, objects = copy.deepcopy(intent), self.approval, self.objects
+            verifier = self._bind_sources
             validate_intent(value)
             remaining = Deadline(self.clock, deadline).remaining
 
             def bound():
-                if (self.approval != approval or self.objects is not objects
+                if (self.failed or self.bind_sources is not verifier
+                        or self.approval != approval or self.objects is not objects
                         or digest(canonical(intent)) != approval.intent_sha256
                         or digest(canonical(value)) != approval.intent_sha256
                         or objects.old_object_id != value["old_object_id"]
@@ -90,23 +96,42 @@ class OldDeploymentGate:
                 remaining()
                 bound()
 
-            current()
-            for _ in range(2):
-                state = self.objects.inspect(value["old_object_id"], deadline=deadline)
+            def observe():
+                state = objects.inspect(value["old_object_id"], deadline=deadline)
                 if state["running"] is not False or state["image_id"] != approval.old_image_id:
                     raise Rejected("deployment-old-object-not-stopped")
-                self._projection(value["old_object_id"], approval, deadline)
+                return self._projection(value["old_object_id"], approval, deadline)
+
+            def sources(projection):
+                if verifier is not None:
+                    observed = copy.deepcopy(value)
+                    receipt = verifier.verify_bind_sources(observed, projection["mounts"], deadline=deadline)
+                    if (canonical(observed) != canonical(value) or type(receipt) is not dict
+                            or receipt != {"schema": "host-recovery-bind-source-result-v1",
+                                "baseline_sha256": value["baseline_sha256"], "mounts": len(projection["mounts"]),
+                                "bind_source_baseline_verified": True, "container_namespace_verified": False,
+                                "start_authorized": False}
+                            or receipt["bind_source_baseline_verified"] is not True
+                            or receipt["container_namespace_verified"] is not False
+                            or receipt["start_authorized"] is not False):
+                        raise Rejected("deployment-bind-source-observation-unconfirmed")
+                    bound()
+
+            current()
+            for _ in range(2):
+                sources(observe())
                 current()
-            # A final projection follows the last external callback. This is only
-            # correspondence under the independently enforced fence, not its proof.
-            state = self.objects.inspect(value["old_object_id"], deadline=deadline)
-            if state["running"] is not False or state["image_id"] != approval.old_image_id:
-                raise Rejected("deployment-old-object-not-stopped")
-            self._projection(value["old_object_id"], approval, deadline)
+            # Source verification invokes its own fence callbacks; reobserve the
+            # daemon after those reads, never infer container namespace identity.
+            projection = observe()
+            if verifier is not None:
+                sources(projection)
+                observe()
             remaining()
             bound()
             return {"schema": "host-recovery-deployment-result-v1", "object_id": value["old_object_id"],
                     "projection_sha256": approval.projection_sha256,
+                    "bind_source_baseline_verified": verifier is not None,
                     "deployment_matches": True, "start_authorized": False}
         except Exception:
             self.failed = True

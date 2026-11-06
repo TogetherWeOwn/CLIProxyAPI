@@ -101,7 +101,7 @@ class WriteSetVerifier:
         self._reader = reader
         self._failed = False
 
-    def _observe(self, intent, deadline, capture):
+    def _observe(self, intent, deadline, capture, validate=None):
         try:
             if self._failed:
                 raise Rejected("write-set-verifier-unavailable")
@@ -113,8 +113,11 @@ class WriteSetVerifier:
             # Fence/clock/descriptor callbacks are external boundaries. Do not
             # accept a caller's changed intent after reading the original files.
             reader._current(deadline)
-            if canonical(intent) != original or reader.intent_sha256 != digest(original):
+            if (self._reader is not reader or self._failed or reader.failed
+                    or canonical(intent) != original or reader.intent_sha256 != digest(original)):
                 raise Rejected("write-set-verifier-original-intent-changed")
+            if validate is not None:
+                validate(reader)
             return result
         except BaseException:
             self._failed = self._reader.failed = True
@@ -132,6 +135,53 @@ class WriteSetVerifier:
 
     def capture_files(self, intent, roles, *, deadline):
         return self._observe(intent, deadline, lambda reader, value: reader._capture_files(value, roles, deadline=deadline))
+
+    def verify_bind_sources(self, intent, mounts, *, deadline):
+        """Match restricted bind sources to approved roots in the caller namespace.
+
+        The deployment gate must independently pin the complete mount projection.
+        This does not inspect a container mount namespace or exclude other writers.
+        File binds, volumes, subpaths and overlapping destinations are unsupported.
+        """
+        saved = copy.deepcopy(mounts)
+        original_reader = self._reader
+        roots = dict(original_reader.roots)
+        approvals = {name: handle.approval for name, handle in roots.items()}
+
+        def validate(reader):
+            if (mounts != saved or reader is not original_reader or set(reader.roots) != set(roots)
+                    or any(reader.roots[name] is not handle or handle.approval != approvals[name]
+                           for name, handle in roots.items())):
+                raise Rejected("write-set-bind-source-observer-changed")
+
+        def capture(reader, value):
+            validate(reader)
+            if type(saved) is not list or not 1 <= len(saved) <= MAX_ROOTS:
+                raise Rejected("write-set-bind-mount-inventory-required")
+            sources = {approval.path for approval in approvals.values()}
+            destinations, seen = [], set()
+            for mount in saved:
+                if (type(mount) is not dict
+                        or set(mount) != {"Type", "Source", "Destination", "Mode", "RW", "Propagation"}
+                        or mount["Type"] != "bind" or mount["RW"] is not False
+                        or mount["Mode"] != "ro" or mount["Propagation"] != "rprivate"
+                        or type(mount["Source"]) is not str or mount["Source"] not in sources
+                        or mount["Source"] in seen):
+                    raise Rejected("write-set-approved-private-readonly-bind-required")
+                path = mount["Destination"]
+                if (type(path) is not str or not path.startswith("/") or len(path) > 4096
+                        or "\0" in path or any(part in ("", ".", "..") for part in path[1:].split("/"))
+                        or any(path == other or path.startswith(other + "/") or other.startswith(path + "/")
+                               for other in destinations)):
+                    raise Rejected("write-set-distinct-bind-destination-required")
+                destinations.append(path)
+                seen.add(mount["Source"])
+            reader._verify_all(deadline)
+            reader._verify_all(deadline)
+            return {"schema": "host-recovery-bind-source-result-v1", "baseline_sha256": reader.pin,
+                    "mounts": len(saved), "bind_source_baseline_verified": True,
+                    "container_namespace_verified": False, "start_authorized": False}
+        return self._observe(intent, deadline, capture, validate)
 
 
 class WriteSetRecovery:
