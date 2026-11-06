@@ -4,8 +4,10 @@ from pathlib import Path
 import sys
 import tarfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import docker_runtime_fixture as fixture
 from docker_runtime_fixture import docker_config, fixture_names, inspect_object, rootfs_archive, validate_info, validate_plugin_mount
 
 
@@ -47,6 +49,16 @@ class DockerRuntimeFixtureTests(unittest.TestCase):
         for root, group in ((Path("/var/lib/docker"), self.slice), (self.root, "system.slice")):
             with self.subTest(root=root, group=group), self.assertRaises(AssertionError):
                 docker_config(root, group)
+
+    def test_dockerd_explicitly_requests_private_mount_propagation(self):
+        with patch.object(fixture, "show", return_value="not-found"), patch.object(fixture, "command") as command:
+            fixture.start_unit(self.root, self.units[1]["dockerd"], self.slice,
+                               "/usr/bin/dockerd", self.root / "docker.json")
+        args = command.call_args.args
+        self.assertIn("--property=PrivateMounts=yes", args)
+        self.assertIn("--property=MountFlags=private", args)
+        self.assertIn("--property=TemporaryFileSystem=/run/docker:rw,nosuid,nodev,noexec,size=1M,mode=0700", args)
+        self.assertIn("--property=InaccessiblePaths=-/run/containerd -/run/docker.sock -/var/lib/docker -/var/lib/containerd", args)
 
     def test_plugin_root_requires_one_private_noexec_tmpfs(self):
         line = "99 20 0:42 / /run/docker rw,nosuid,nodev,noexec - tmpfs tmpfs rw,size=1024k\n"

@@ -128,6 +128,27 @@ introduced. Eight pure fixture methods are authored, not locally run; corrected
 native qualification remains pending exact-head Actions. No production bug
 red/green or approved provenance follows from these fixture corrections.
 
+Exact `8459b1cc7b63f3a2f6409af556b40989aa76f9f1`,
+[Actions 42134868063 Docker job](https://github.com/TogetherWeOwn/CLIProxyAPI/actions/runs/42134868063/job/127620331738),
+reached private HTTP readiness, then failed the plugin-mount isolation assertion
+before image/object/task creation. Both Docker cleanup paths passed. The old
+fixture did not log the rejected mount record, so the precise mismatching field
+is not established. Full Go/race/build/manager/containerd/inventory passed;
+components were canceled with their private-bus and cleanup steps skipped. The
+workflow conclusion is canceled, not a complete qualification pass.
+
+Versioned [systemd v255 namespace setup](https://github.com/systemd/systemd/blob/v255/src/core/namespace.c#L2117-L2120)
+defaults to `MS_SHARED` when no mount-propagation flag is specified. Its later
+recursive slave setup prevents outward propagation, but `PrivateMounts=yes`
+alone does not promise that the mount has no shared peer group. The correction
+explicitly requests `MountFlags=private` for dockerd, retaining the strict
+no-shared/noexec/tmpfs assertion. It also logs the exact plugin mount records
+before validation and independently requires a different mount namespace from
+the fixture. This source-grounded prerequisite correction is pending Actions,
+not a verified diagnosis of the unlogged field or permission to weaken the
+isolation check. A new scripted argv method checks the explicit policy; it is
+not native qualification. No local tests or manager operations were run.
+
 ## Limits and retained gates
 
 The original authority is a diagnostic root fixture, not an authenticated

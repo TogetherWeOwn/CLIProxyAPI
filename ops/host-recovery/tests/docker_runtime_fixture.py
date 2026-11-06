@@ -182,7 +182,10 @@ def start_unit(root, unit, slice_name, executable, config):
     if executable == "/usr/bin/dockerd":
         # Moby's Linux plugin root ignores ExecRoot. Mask the shared path with
         # a fresh service-private tmpfs, never grant access to the host directory.
-        extra = ["--property=TemporaryFileSystem=/run/docker:rw,nosuid,nodev,noexec,size=1M,mode=0700"]
+        # systemd v255 defaults to MS_SHARED inside a private namespace. Request
+        # private propagation explicitly; PrivateMounts alone is not that policy.
+        extra = ["--property=MountFlags=private",
+                 "--property=TemporaryFileSystem=/run/docker:rw,nosuid,nodev,noexec,size=1M,mode=0700"]
     else:
         inaccessible += " -/run/docker"
     command("/usr/bin/systemd-run", "--unit=" + unit, "--slice=" + slice_name,
@@ -302,7 +305,12 @@ def main(probe):
                 pid = int(show(units[epoch]["dockerd"], "MainPID"))
                 require(pid > 1, "private dockerd MainPID required")
                 if private_info(root, pid, current, deadline) is not None:
-                    validate_plugin_mount(Path("/proc/%d/mountinfo" % pid).read_text())
+                    mountinfo = Path("/proc/%d/mountinfo" % pid).read_text()
+                    emit(plugin_mountinfo=[line for line in mountinfo.splitlines()
+                                           if len(line.split()) >= 6 and line.split()[4] == "/run/docker"])
+                    require(os.readlink("/proc/%d/ns/mnt" % pid) != os.readlink("/proc/self/ns/mnt"),
+                            "dockerd shares the fixture's host mount namespace")
+                    validate_plugin_mount(mountinfo)
                     require(show(units[epoch]["dockerd"], "MainPID") == str(pid), "dockerd changed during readiness")
                     emit(private_docker_plugin_tmpfs_observed=True)
                     break
