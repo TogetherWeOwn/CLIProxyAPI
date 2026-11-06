@@ -76,6 +76,40 @@ prefix, it cannot replay an effect, retire the installation or obtain authority
 for another phase. The server does not acquire/transfer the installation lock,
 clear the active intent or automatically advance to a runtime relaunch.
 
+## Restricted auxiliary-command policy
+
+Both fixed sequences now require explicit empty `ExecCondition`, `ExecStartPre`,
+`ExecStartPost`, `ExecReload`, `ExecStop` and `ExecStopPost` lists, plus a typed
+uint32 `ControlPID` equal to zero. Main-process timestamps alone do not cover
+these helpers or their writes. Each execution snapshot reads this policy on the
+same authenticated manager connection, before mask publication, across every
+existing execution barrier, and through outer-return persistence and ACK checks.
+A configured but not-yet-run helper is unsupported, not silently ignored.
+
+The source-bound systemd v255 `dbus-service.c` / `dbus-execute.h` ABI is
+`a(sasbttttuii)`. The reader accepts only that exact empty array. It refuses a
+nonempty array without decoding, logging or executing its path/argv; missing,
+wrong-type, uncertain or trailing data refuses too. No fallback through shell,
+systemctl text or an alternate manager connection is provided. The fixed target
+hash binds the empty-list/zero-control-PID policy. Old target hashes are not
+silently upgraded, and no operational provisioning or release pin is changed.
+
+Both transport observations include `auxiliary_commands_empty_observed=true`
+and `control_pid_zero_observed=true`, never writer/activation exclusion or start
+authority. This is a restricted supported configuration, **not** a complete
+execution fence: it does not cover external writers, detached processes, all
+activation paths, ExecStart privilege semantics, manager-side atomicity or gaps
+between observations. Rejections cannot undo an effect that already occurred.
+No check extends the original inclusive deadline; the added observation overhead
+still requires actual phase measurement in the complete package drills.
+
+Scripted ABI/sequence/IPC negatives cover every auxiliary property, malformed
+empty values, control-PID type/value, changes during reload, runtime kill,
+return durability and post-reply ACK validation. A new Actions-only real-manager
+negative configures an inert `ExecStopPost=/usr/bin/true`, requires refusal before
+mask/stop publication and retains both live pidfds; normal owned cleanup remains.
+These authored methods are unverified until exact-head Actions executes them.
+
 ## Verification and remaining integration
 
 The new connected tests use real original lock-owning subprocesses, kernel

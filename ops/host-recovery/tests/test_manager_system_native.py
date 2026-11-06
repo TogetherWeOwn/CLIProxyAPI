@@ -479,7 +479,10 @@ class SystemManagerTests(unittest.TestCase):
     def test_original_pending_sequence_masks_stops_and_kills_on_one_connection(self):
         self.masked_fixture(composed=True)
 
-    def masked_fixture(self, *, composed):
+    def test_auxiliary_stop_command_refuses_before_masking_or_stopping(self):
+        self.masked_fixture(composed=True, auxiliary=True)
+
+    def masked_fixture(self, *, composed, auxiliary=False):
         paths = activation_paths()
         mask = Path("/etc/systemd/system") / unit_name("masked")
         self.assertFalse(os.path.lexists(mask))
@@ -490,7 +493,7 @@ class SystemManagerTests(unittest.TestCase):
                 "SendSIGKILL=yes\nTimeoutStopSec=" + ("5s" if composed else "1s")
                 + "\nRuntimeMaxSec=60s\nUser=0\nGroup=0\nLimitCORE=0\n"
                 "ExecStart=" + sys.executable + " -I " + str(ROOT / "tests/manager_system_fixture.py")
-                + " " + str(self.root / "ready.sock") + "\n"),
+                + " " + str(self.root / "ready.sock") + "\n" + ("ExecStopPost=/usr/bin/true\n" if auxiliary else "")),
             "dependent": ("[Unit]\nRequires=" + unit_name("masked") + "\nAfter=" + unit_name("masked")
                 + "\n[Service]\nType=oneshot\nExecStart=/usr/bin/true\nRemainAfterExit=yes\n")}
         for suffix, path in paths.items():
@@ -543,7 +546,27 @@ class SystemManagerTests(unittest.TestCase):
             before_start = command(self.systemctl, "show", "--property=ExecMainStartTimestampMonotonic",
                                    "--value", "--", binding.unit).strip()
             self.assertRegex(before_start, rb"[1-9][0-9]*\Z")
+            if auxiliary:
+                shown = command(self.systemctl, "show", "--property=ExecStopPost", "--value", "--", binding.unit)
+                self.assertIn(b"/usr/bin/true", shown)
+                with self.assertRaises(Rejected):
+                    sequence.stop(operation=operation)
+                self.assertFalse(os.path.lexists(mask))
+                self.assertFalse(sequence.completed)
+                self.assertEqual(session._submitted, {})
+                self.assertNotIn("contain_forward", journal._returned)
+                self.assertEqual(sorted(path.name for path in state.iterdir()), ['epoch.json', 'operation-01-pending.json'])
+                for key in ("parent_fd", "child_fd"):
+                    poller = select.poll()
+                    poller.register(pids[key], select.POLLIN)
+                    self.assertFalse(poller.poll(0), "refused submission stopped a fixture process")
+                print(json.dumps({"auxiliary_stop_command_observed": True, "source_submission_refused": True,
+                    "mask_published": False, "stop_submitted": False, "both_pidfds_live": True,
+                    "complete_fence_proven": False}), flush=True)
+                return
             receipt = sequence.stop(operation=operation)
+            self.assertIs(receipt["auxiliary_commands_empty_observed"], True)
+            self.assertIs(receipt["control_pid_zero_observed"], True)
             self.assertEqual(json.loads(sequence._execution_starts), {"forward":int(before_start)})
             self.assertEqual(command(self.systemctl, "show", "--property=ExecMainStartTimestampMonotonic",
                                      "--value", "--", binding.unit).strip(), before_start)

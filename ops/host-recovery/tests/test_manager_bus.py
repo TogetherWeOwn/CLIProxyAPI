@@ -434,3 +434,47 @@ class ExecutionTimestampABITests(unittest.TestCase):
         connection = self.connection(123)
         connection.lib.sd_bus_message_at_end.return_value = 0
         with self.assertRaises(durable.Rejected): connection.fields(None, 'v:t')
+
+
+class EmptyCommandListABITests(unittest.TestCase):
+    def connection(self):
+        connection = object.__new__(bus._Connection)
+        connection.lib = Mock()
+        connection.lib.sd_bus_message_get_signature.return_value = b'v'
+        connection.lib.sd_bus_message_enter_container.return_value = 1
+        connection.lib.sd_bus_message_exit_container.return_value = 1
+        connection.lib.sd_bus_message_at_end.return_value = 1
+        return connection
+
+    def test_exact_empty_exec_list_abi_is_read_without_any_command_field(self):
+        connection = self.connection()
+        self.assertEqual(connection.fields(None, 'v:a(sasbttttuii)'), [[]])
+        self.assertEqual([call.args for call in connection.lib.sd_bus_message_enter_container.call_args_list],
+                         [(None, b'v', b'a(sasbttttuii)'), (None, b'a', b'(sasbttttuii)')])
+        connection.lib.sd_bus_message_read_basic.assert_not_called()
+        self.assertEqual(connection.lib.sd_bus_message_exit_container.call_count, 2)
+
+    def test_nonempty_or_uncertain_array_refuses_without_decoding_argv(self):
+        for code in (0, -1):
+            with self.subTest(code=code):
+                connection = self.connection()
+                connection.lib.sd_bus_message_at_end.return_value = code
+                with self.assertRaises(durable.Rejected): connection.fields(None, 'v:a(sasbttttuii)')
+                connection.lib.sd_bus_message_read_basic.assert_not_called()
+
+    def test_missing_variant_or_array_refuses(self):
+        for returns in ((0,), (1, 0)):
+            with self.subTest(returns=returns):
+                connection = self.connection()
+                connection.lib.sd_bus_message_enter_container.side_effect = returns
+                with self.assertRaises(durable.Rejected): connection.fields(None, 'v:a(sasbttttuii)')
+
+    def test_empty_array_does_not_hide_trailing_message_data(self):
+        connection = self.connection()
+        connection.lib.sd_bus_message_at_end.side_effect = [1, 0]
+        with self.assertRaises(durable.Rejected): connection.fields(None, 'v:a(sasbttttuii)')
+
+    def test_unknown_exec_array_shape_is_not_coerced_to_empty(self):
+        connection = self.connection()
+        with self.assertRaises(durable.Rejected): connection.fields(None, 'v:a(sasasttttuii)')
+        connection.lib.sd_bus_message_enter_container.assert_not_called()

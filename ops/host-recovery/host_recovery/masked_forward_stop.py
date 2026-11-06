@@ -11,9 +11,12 @@ from .broker_authority import SupervisorPeerAuthority
 from .broker_operations import OperationJournal
 from .durable import Rejected, canonical, decode, digest
 from .job_cancellation import WaitingStartCancellation
+from .manager_bus import EMPTY_COMMAND_LIST
 from .manager_jobs import MANAGER, MANAGER_PATH, ForwardStopJobs
 from .mask_reload import ManagerMaskReload
 from .unit_masks import PersistentUnitMasks
+
+AUXILIARY_COMMANDS = ("ExecCondition", "ExecStartPre", "ExecStartPost", "ExecReload", "ExecStop", "ExecStopPost")
 
 
 class _MaskedFixedStop:
@@ -59,7 +62,8 @@ class _MaskedFixedStop:
             "masks": decode(self.masks.configuration()), "jobs": decode(self.jobs.configuration()),
             "cancellation": decode(self.cancellation.configuration()), "reload": decode(self.reload.configuration()),
             "kill_whom": "all", "kill_signal": 9, "fixed_job_admission_witness": "job-new-v1",
-            "fixed_unit_reference": "sender-ref-unit-v1", "post_reload_transition_witness": "reloading-v1"})
+            "fixed_unit_reference": "sender-ref-unit-v1", "post_reload_transition_witness": "reloading-v1",
+            "auxiliary_command_policy": {key: "empty" for key in AUXILIARY_COMMANDS}, "control_pid_policy": "zero"})
 
     @property
     def target_sha256(self):
@@ -159,6 +163,20 @@ class _MaskedFixedStop:
             identity = self.session._call(self.session.owner, "org.freedesktop.DBus.Properties", "Get", "ss",
                 (MANAGER + ".Unit", "Id"), "v:s", path=path)[0]
             self._current()
+            # Main-process timestamps do not cover condition/pre/post/reload/stop
+            # helpers. Reject their configured lists even if they have not run.
+            # This is a restricted policy observation, not continuous exclusion.
+            for key in AUXILIARY_COMMANDS:
+                commands = self.session._call(self.session.owner, "org.freedesktop.DBus.Properties", "Get", "ss",
+                    (MANAGER + ".Service", key), "v:" + EMPTY_COMMAND_LIST, path=path)[0]
+                self._current()
+                if type(commands) is not list or commands:
+                    raise Rejected("masked-fixed-auxiliary-command-unsupported")
+            control = self.session._call(self.session.owner, "org.freedesktop.DBus.Properties", "Get", "ss",
+                (MANAGER + ".Service", "ControlPID"), "v:u", path=path)[0]
+            self._current()
+            if type(control) is not int or control != 0:
+                raise Rejected("masked-fixed-control-process-unconfirmed")
             stamp = self.session._call(self.session.owner, "org.freedesktop.DBus.Properties", "Get", "ss",
                 (MANAGER + ".Service", "ExecMainStartTimestampMonotonic"), "v:t", path=path)[0]
             if identity != unit or type(stamp) is not int or not 0 <= stamp < 2**64 - 1:
@@ -265,6 +283,7 @@ class _MaskedFixedStop:
                     "whole_unit_kill_returned": bool(killed), "fixed_stop_completion_observed": True,
                     "masked_inactive_observed": True, "manager_jobs_retired": False,
                     "fixed_execution_timestamp_count": len(self.roles), "fixed_execution_timestamps_unchanged": True,
+                    "auxiliary_commands_empty_observed": True, "control_pid_zero_observed": True,
                     "fixed_unit_reference_count": len(self.session._fixed_unit_paths),
                     "activation_exclusion_proven": False, "cgroup_quiescence_proven": False,
                     "pending_drained": False, "complete_fence_proven": False,

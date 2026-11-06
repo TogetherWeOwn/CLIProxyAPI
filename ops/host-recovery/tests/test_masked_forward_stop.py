@@ -39,6 +39,8 @@ class MaskedForwardStopTests(unittest.TestCase):
                                                deadline=1090.)
         self.path_state = path
         self.row['ExecMainStartTimestampMonotonic'] = 2**40
+        self.row.update({key: [] for key in ('ExecCondition', 'ExecStartPre', 'ExecStartPost', 'ExecReload', 'ExecStop', 'ExecStopPost')})
+        self.row['ControlPID'] = 0
         self.connection.job_units = self.units
         self.waiting = [41, self.units['forward'].unit, 'start', 'waiting', bus.JOB_PREFIX+'41',
                         bus.MANAGER_PATH+'/unit/forward_service']
@@ -82,6 +84,57 @@ class MaskedForwardStopTests(unittest.TestCase):
 
     def effects(self):
         return [method for _, method, _ in self.connection.calls if method in ('Cancel','Reload','StopUnit','KillUnit')]
+
+    def test_each_auxiliary_command_refuses_before_mask_or_manager_effect(self):
+        for key in ('ExecCondition', 'ExecStartPre', 'ExecStartPost', 'ExecReload', 'ExecStop', 'ExecStopPost'):
+            with self.subTest(key=key):
+                self.setUp()
+                self.row[key] = ['synthetic configured command, not executed']
+                reached = []
+                self.effect_hook = lambda method, args: reached.append(args[1]) if method == 'Get' else None
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertIn(key, reached)
+                self.assertEqual(self.effects(), [])
+                self.assertFalse(self.masks.published)
+                self.assertNotIn('contain_forward', self.journal._returned)
+
+    def test_auxiliary_value_requires_literal_empty_list(self):
+        for value in (None, (), '', False, 0, {}):
+            with self.subTest(value=value):
+                self.setUp()
+                self.row['ExecStopPost'] = value
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertEqual(self.effects(), [])
+
+    def test_control_process_requires_literal_zero_even_with_unchanged_main_timestamp(self):
+        for value in (123, True, False, '0', None, -1):
+            with self.subTest(value=value):
+                self.setUp()
+                self.row['ControlPID'] = value
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertEqual(self.effects(), [])
+
+    def test_auxiliary_command_appearing_during_reload_prevents_stop(self):
+        reached = []
+        def effect(method, args):
+            if method == 'Reload':
+                reached.append(method)
+                self.row['ExecStopPost'] = ['synthetic writer']
+        self.effect_hook = effect
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(reached, ['Reload'])
+        self.assertNotIn('StopUnit', self.effects())
+        self.assertFalse(self.sequence.completed)
+
+    def test_empty_auxiliary_policy_is_bound_in_target_and_observation(self):
+        config = durable.decode(self.sequence.configuration())
+        self.assertEqual(config['auxiliary_command_policy'], {key:'empty' for key in
+            ('ExecCondition', 'ExecStartPre', 'ExecStartPost', 'ExecReload', 'ExecStop', 'ExecStopPost')})
+        self.assertEqual(config['control_pid_policy'], 'zero')
+        result = self.apply()
+        self.assertIs(result['auxiliary_commands_empty_observed'], True)
+        self.assertIs(result['control_pid_zero_observed'], True)
+        self.assertFalse(result['activation_exclusion_proven'] or result['start_allowed'])
 
     def test_own_unit_reference_precedes_mask_publication_and_final_timestamp_checks(self):
         reached = []

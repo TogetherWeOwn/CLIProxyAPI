@@ -21,6 +21,7 @@ SYSTEM_ADDRESS = b"unix:path=/run/dbus/system_bus_socket"
 DBUS = "org.freedesktop.DBus"
 DBUS_PATH = "/org/freedesktop/DBus"
 MAX_EVENTS = 256
+EMPTY_COMMAND_LIST = "a(sasbttttuii)"
 RESULTS = frozenset(("done", "canceled", "timeout", "failed", "dependency", "skipped",
                      "invalid", "assert", "unsupported", "collected", "once"))
 CALLBACK = C.CFUNCTYPE(C.c_int, C.c_void_p, C.c_void_p, C.c_void_p)
@@ -157,11 +158,20 @@ class _Connection:
             raise Rejected("manager-bus-message-signature")
         if signature.startswith("v:"):
             kind = signature[2:]
-            if kind not in ("s", "u", "t", "as", "ay", "(uo)"):
+            if kind not in ("s", "u", "t", "as", "ay", "(uo)", EMPTY_COMMAND_LIST):
                 raise Rejected("manager-bus-fixed-variant-required")
             if self.lib.sd_bus_message_enter_container(message, b"v", kind.encode()) <= 0:
                 raise Rejected("manager-bus-property-type-required")
-            if kind in ("as", "ay"):
+            if kind == EMPTY_COMMAND_LIST:
+                # v255 Service Exec* lists use this exact ABI. Only the empty
+                # policy is supported: never parse, expose or execute an argv.
+                if self.lib.sd_bus_message_enter_container(message, b"a", b"(sasbttttuii)") <= 0:
+                    raise Rejected("manager-bus-command-array-required")
+                if self.lib.sd_bus_message_at_end(message, 0) != 1:
+                    raise Rejected("manager-bus-auxiliary-command-unsupported")
+                _ok(self.lib.sd_bus_message_exit_container(message))
+                values = [[]]
+            elif kind in ("as", "ay"):
                 element = kind[1:]
                 if self.lib.sd_bus_message_enter_container(message, b"a", element.encode()) <= 0:
                     raise Rejected("manager-bus-property-array-required")

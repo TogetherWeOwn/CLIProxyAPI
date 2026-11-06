@@ -70,6 +70,9 @@ class MaskedRuntimeStopTests(unittest.TestCase):
             ActiveState='active', SubState='running', InvocationID=bytes.fromhex(unit.invocation_id),
             ControlGroup=unit.cgroup, MainPID=123, Job=(0, '/'), ExecMainStartTimestampMonotonic=2**40)
             for role,unit in self.units.items()}
+        for row in self.rows.values():
+            row.update({key: [] for key in ('ExecCondition', 'ExecStartPre', 'ExecStartPost', 'ExecReload', 'ExecStop', 'ExecStopPost')})
+            row['ControlPID'] = 0
         self.numbers = {'containerd':41, 'dockerd':42}
         self.connection.inventory = [[number, self.units[role].unit, 'start', 'waiting', bus.JOB_PREFIX+str(number),
             bus.MANAGER_PATH+'/unit/'+role] for role,number in self.numbers.items()]
@@ -128,6 +131,32 @@ class MaskedRuntimeStopTests(unittest.TestCase):
 
     def apply(self):
         return self.sequence.stop(operation=self.operation)
+
+    def test_auxiliary_commands_in_either_runtime_role_prevent_all_effects(self):
+        for role in ('dockerd', 'containerd'):
+            for key in ('ExecCondition', 'ExecStartPre', 'ExecStartPost', 'ExecReload', 'ExecStop', 'ExecStopPost'):
+                with self.subTest(role=role, key=key):
+                    self.setUp()
+                    self.rows[role][key] = ['synthetic configured command']
+                    with self.assertRaises(durable.Rejected): self.apply()
+                    self.assertEqual(self.effects, [])
+                    self.domain.kill.assert_not_called()
+                    self.assertFalse(self.masks.published)
+                    self.assertNotIn('cold_quiesce_runtime', self.journal._returned)
+
+    def test_control_process_after_recursive_kill_prevents_empty_record(self):
+        reached = []
+        def kill(*, check):
+            reached.append('kill')
+            check()
+            self.rows['containerd']['ControlPID'] = 456
+        self.domain.kill.side_effect = kill
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(reached, ['kill'])
+        self.assertFalse((self.path_state/'operation-02-runtime-kill-empty.json').exists())
+        self.assertFalse(self.sequence.completed)
+        self.assertNotIn('cold_quiesce_runtime', self.journal._returned)
+        self.witness.close.assert_called_once()
 
     def test_both_fixed_completions_precede_one_recursive_domain_kill(self):
         reached = []
