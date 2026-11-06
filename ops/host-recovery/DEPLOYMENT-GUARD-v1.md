@@ -49,6 +49,19 @@ projection and deadline read are also followed by a local binding check: neither
 may change the approval, original intent, old object/image IDs or reader instance.
 This does not add another external fence callback or turn point reads into exclusion.
 
+On first use the gate also retains its configured approval, object identities,
+source/view observers, fence and clock callbacks, and the Docker reader's command
+transport, fixed executable/endpoint tuple, clock and start-fence callback. Those
+boundaries must remain unchanged through subsequent observations and the one-shot
+pre-start revalidation. Matching replies from a replacement transport do not
+inherit verification. Checks follow each state/projection read before another
+reader can run, and clock callbacks are bracketed by configuration checks. The
+monotonic clock high-water mark survives between calls; a backward clock cannot
+start a fresh accounting interval. A caught reentrant refusal poisons the outer
+observation. Initial composition before first use is supported, not authenticated
+provisioning. This is defensive binding of the Python interfaces, not isolation
+from arbitrary code execution or continuous transport/daemon authentication.
+
 `RecoveredDeploymentBoundary` supplements an existing independent baseline oracle.
 It validates that oracle's complete receipt first, captures its own receipt copy,
 then runs deployment verification. Before one-shot `start_old` delegation it

@@ -190,6 +190,107 @@ class DeploymentTests(unittest.TestCase):
             self.verify()
         self.assertEqual(reached, ["final-clock"])
 
+    def test_original_observer_configuration_cannot_be_rebound(self):
+        for phase in ("fence", "first-state", "final-projection", "before-start"):
+            for target in ("check", "clock", "transport", "endpoint", "reader-clock", "reader-fence"):
+                with self.subTest(phase=phase, target=target):
+                    self.setUp()
+                    reached = []
+                    def replace_observer():
+                        reached.append((phase, target))
+                        if target == "check":
+                            self.gate.check = lambda **kwargs: True
+                        elif target == "clock":
+                            self.gate.clock = lambda: self.time
+                        elif target == "transport":
+                            self.gate.objects.commands = copy.copy(self.docker)
+                        elif target == "endpoint":
+                            self.gate.objects.prefix = ("/accepted/docker", "--host=unix:///other.sock")
+                        elif target == "reader-clock":
+                            self.gate.objects.clock = lambda: self.time
+                        else:
+                            self.gate.objects.start_fence = lambda: True
+                    if phase == "before-start":
+                        receipt = self.stopped()
+                        replace_observer()
+                        with self.assertRaises(durable.Rejected):
+                            self.start(receipt)
+                        self.assertEqual(self.oracle.starts, 0)
+                    else:
+                        if phase == "fence":
+                            self.on_check = replace_observer
+                        else:
+                            def change(argv):
+                                if len(self.docker.calls) == (1 if phase == "first-state" else 6):
+                                    replace_observer()
+                            self.docker.hook = change
+                        with self.assertRaises(durable.Rejected):
+                            self.verify()
+                    self.assertEqual(reached, [(phase, target)])
+                    self.assertTrue(self.gate.failed)
+                    with self.assertRaises(durable.Rejected):
+                        self.verify()
+
+    def test_caught_reentrant_deployment_observation_poisoning(self):
+        reached = []
+        def reenter():
+            with self.assertRaises(durable.Rejected):
+                self.verify()
+            reached.append(True)
+        self.on_check = reenter
+        with self.assertRaises(durable.Rejected):
+            self.verify()
+        self.assertEqual(reached, [True])
+        self.assertEqual(self.docker.calls, [])
+        self.assertTrue(self.gate.failed)
+
+    def test_clock_cannot_move_backwards_between_observation_and_start(self):
+        receipt = self.stopped()
+        calls = len(self.docker.calls)
+        self.time = 0
+        with self.assertRaises(durable.Rejected):
+            self.start(receipt)
+        self.assertEqual(len(self.docker.calls), calls)
+        self.assertEqual(self.oracle.starts, 0)
+        self.assertTrue(self.gate.failed)
+
+    def test_final_clock_callback_cannot_replace_original_fence(self):
+        reached = []
+        def clock():
+            if len(self.docker.calls) == 6:
+                reached.append(True)
+                self.gate.check = lambda **kwargs: True
+            return self.time
+        self.gate.clock = clock
+        with self.assertRaises(durable.Rejected):
+            self.verify()
+        self.assertEqual(reached, [True])
+        self.assertTrue(self.gate.failed)
+
+    def test_transport_replacement_refuses_before_next_projection(self):
+        reached, replacement_calls = [], []
+        transport = copy.copy(self.docker)
+        transport.run = lambda *args, **kwargs: replacement_calls.append(True)
+        def replace_transport(argv):
+            reached.append(True)
+            self.gate.objects.commands = transport
+        self.docker.hook = replace_transport
+        with self.assertRaises(durable.Rejected):
+            self.verify()
+        self.assertEqual(reached, [True])
+        self.assertEqual(replacement_calls, [])
+        self.assertEqual(len(self.docker.calls), 1)
+
+    def test_unchanged_observers_reused_with_original_clock_and_same_deadline(self):
+        first = self.verify()
+        self.time = 2
+        self.assertEqual(self.verify(), first)
+        receipt = self.stopped()
+        self.time = 3
+        self.assertIs(self.start(receipt), True)
+        self.assertEqual(self.oracle.starts, 1)
+        self.assertFalse(self.gate.failed)
+
     def test_false_numeric_or_lost_fence_poison_gate(self):
         for flag in (False, 1, None):
             with self.subTest(flag=flag):

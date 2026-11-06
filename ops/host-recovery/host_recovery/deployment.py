@@ -7,6 +7,7 @@ This does not authenticate approval, inspect mounted bytes or implement a fence.
 """
 import copy
 from dataclasses import dataclass
+import math
 
 from .commands import Deadline, MAX_OUTPUT
 from .coordinator import validate_baseline_receipt
@@ -52,10 +53,37 @@ class OldDeploymentGate:
         self.objects, self.approval, self.check, self.clock = objects, approval, check, clock
         self.bind_sources = self._bind_sources = bind_sources
         self.daemon_view = self._daemon_view = daemon_view
-        self.failed = False
+        self.failed = self._active = False
+        self._binding, self._last_clock = None, None
 
-    def _projection(self, object_id, approval, deadline):
-        raw = self.objects._run(("container", "inspect", "--format=" + FORMAT, object_id), deadline)
+    def _bound_observers(self):
+        objects = self.objects
+        values = (self.approval, objects.prefix, objects.installation_id, objects.attempt_id,
+                  objects.old_object_id, objects.old_image_id, objects.candidate_image_id)
+        readers = (objects, self.check, self.clock, self.bind_sources, self.daemon_view,
+                   objects.commands, objects.clock, objects.start_fence)
+        # Configuration may be composed before first use, never rebound after an
+        # observation. Retain the actual transport and callbacks, not just facade.
+        if self._binding is None:
+            self._binding = values, readers
+        expected, retained = self._binding
+        if (self.failed or values != expected
+                or any(actual is not original for actual, original in zip(readers, retained))
+                or self.bind_sources is not self._bind_sources or self.daemon_view is not self._daemon_view):
+            raise Rejected("deployment-observer-configuration-changed")
+
+    def _now(self):
+        self._bound_observers()
+        now = self.clock()
+        self._bound_observers()
+        if (type(now) not in (int, float) or not math.isfinite(now)
+                or self._last_clock is not None and now < self._last_clock):
+            raise Rejected("deployment-clock-discontinuity")
+        self._last_clock = now
+        return now
+
+    def _projection(self, objects, object_id, approval, deadline):
+        raw = objects._run(("container", "inspect", "--format=" + FORMAT, object_id), deadline)
         if type(raw) is not bytes or len(raw) > MAX_OUTPUT:
             raise Rejected("deployment-response-bounds")
         value = decode(raw)
@@ -75,14 +103,17 @@ class OldDeploymentGate:
 
     def verify(self, intent, *, deadline):
         try:
-            if self.failed:
+            if self.failed or self._active:
                 raise Rejected("deployment-gate-unavailable")
+            self._active = True
+            self._bound_observers()
             value, approval, objects = copy.deepcopy(intent), self.approval, self.objects
-            verifier, daemon_view = self._bind_sources, self._daemon_view
+            verifier, daemon_view, check = self._bind_sources, self._daemon_view, self.check
             validate_intent(value)
-            remaining = Deadline(self.clock, deadline).remaining
+            remaining = Deadline(self._now, deadline).remaining
 
             def bound():
+                self._bound_observers()
                 if (self.failed or self.bind_sources is not verifier or self.daemon_view is not daemon_view
                         or self.approval != approval or self.objects is not objects
                         or digest(canonical(intent)) != approval.intent_sha256
@@ -94,16 +125,21 @@ class OldDeploymentGate:
             def current():
                 remaining()
                 bound()
-                if self.check(deadline=deadline) is not True:
+                if check(deadline=deadline) is not True:
                     raise Rejected("deployment-approval-or-fence-changed")
+                bound()
                 remaining()
                 bound()
 
             def observe():
+                bound()
                 state = objects.inspect(value["old_object_id"], deadline=deadline)
+                bound()
                 if state["running"] is not False or state["image_id"] != approval.old_image_id:
                     raise Rejected("deployment-old-object-not-stopped")
-                return self._projection(value["old_object_id"], approval, deadline)
+                projection = self._projection(objects, value["old_object_id"], approval, deadline)
+                bound()
+                return projection
 
             def namespace():
                 if daemon_view is not None:
@@ -153,9 +189,11 @@ class OldDeploymentGate:
                     "bind_source_baseline_verified": verifier is not None,
                     "daemon_source_namespace_verified": daemon_view is not None,
                     "deployment_matches": True, "start_authorized": False}
-        except Exception:
+        except BaseException:
             self.failed = True
             raise Rejected("deployment-observation-unconfirmed") from None
+        finally:
+            self._active = False
 
 
 class RecoveredDeploymentBoundary:
