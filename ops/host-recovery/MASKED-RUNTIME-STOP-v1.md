@@ -3,7 +3,8 @@
 `MaskedRuntimeStop` is an embedding adapter for the **two fixed dedicated runtime
 roles**, `dockerd` then `containerd`. It reuses the original-pending forward
 sequence's implementation rather than introducing a second recovery owner or
-installation lock. No operational IPC or runner enables this adapter. No daemon
+installation lock. The explicit connected containment interface can embed this
+adapter, but no installed service or operational runner enables it. No daemon
 is created, relaunched, adopted, registered or started here.
 
 ## Sequence and authority
@@ -82,6 +83,16 @@ the server closes it; direct embedders must close it on every exit. Lost replies
 persistence faults and partial effects permanently close the exchange and journal.
 No replay, repair, new epoch, deadline renewal, restoration, service start or
 settlement follows. A returned submission still never means drained.
+
+The connected path additionally requires the protected [persisted-policy
+observer](PERSISTED-POLICY-v1.md), bound in the target to the original authority,
+fixed runtime units and domain. After containment, before completing the sequence,
+validate original registered object/image identity and independently approved
+restart-disabled raw hostconfig metadata without daemon contact. Reobserve through
+return fsync and ACK; drift refuses. Direct component embedding can omit it but
+reports `persisted_restart_policy_observed=false` and cannot be exposed by the
+connected runtime server. Neither path allows runtime relaunch or proves complete
+writer/job exclusion, old-epoch death, policy provenance or pending drain.
 
 ## Retained recursive-kill history
 

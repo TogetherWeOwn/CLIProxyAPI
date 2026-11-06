@@ -2,6 +2,7 @@
 
 These are connected component tests, not installed operational qualification.
 """
+from dataclasses import replace
 import errno
 import json
 import os
@@ -13,10 +14,12 @@ from host_recovery.broker_operations import OperationJournal
 from host_recovery.manager_jobs import ForwardStopJobs, RuntimeStopJobs
 from host_recovery.masked_forward_stop import MaskedForwardStop
 from host_recovery.masked_runtime_stop import MaskedRuntimeStop
+from host_recovery.unit_masks import PersistentUnitMasks
 import test_broker_client as client_fixture
 import test_masked_forward_stop as forward_fixture
 import test_masked_runtime_stop as runtime_fixture
 import test_privileged_broker as peer_fixture
+from test_persisted_policy import make_policy
 
 
 class _ContainmentProtocolFixture(unittest.TestCase):
@@ -31,6 +34,13 @@ class _ContainmentProtocolFixture(unittest.TestCase):
         self.addCleanup(self.effects.doCleanups)
         self.effects.setUp()
         fx = self.effects
+        self.policy = None
+        if self.runtime:
+            fx.units = {role:replace(unit,unit='cpa-'+role+'.service',
+                        cgroup='/runtime.slice/cpa-'+role+'.service') for role,unit in fx.units.items()}
+            for role,unit in fx.units.items():fx.rows[role].update(Id=unit.unit,ControlGroup=unit.cgroup)
+            fx.masks = PersistentUnitMasks(directory=fx.directory,units=fx.units)
+            self.policy = make_policy(self,self.peer,units=fx.units)
         fx.session.close()
         fx.now = self.peer.now
         fx.session = manager_bus.ManagerJobSession(library=fx.library, library_sha256='a'*64, units=fx.units,
@@ -51,7 +61,8 @@ class _ContainmentProtocolFixture(unittest.TestCase):
         fx.jobs = kind(journal=fx.journal, units=fx.units, busctl='/synthetic/busctl', busctl_sha256='b'*64,
             commands=None, read_helper_hash=lambda path:'b'*64, session=fx.session)
         kwargs = dict(journal=fx.journal, masks=fx.masks, jobs=fx.jobs, authority=self.peer.engine)
-        self.sequence = (MaskedRuntimeStop(**kwargs, domain=fx.domain) if self.runtime else MaskedForwardStop(**kwargs))
+        self.sequence = (MaskedRuntimeStop(**kwargs, domain=fx.domain, policy=self.policy.adapter)
+                         if self.runtime else MaskedForwardStop(**kwargs))
         self.server = ipc.ContainmentServer(authority=self.peer.engine, sequence=self.sequence)
         self.state = state
         self.value = ipc.containment_request(method=self.sequence.method, target_sha256=self.sequence.target_sha256,
@@ -268,6 +279,62 @@ class RuntimeContainmentProtocolTests(_ContainmentProtocolFixture):
         self.assertTrue((self.state/'operation-02-return.json').exists())
         self.effects.witness.close.assert_called_once()
 
+    def test_runtime_protocol_requires_a_bound_policy_before_any_effect(self):
+        fx=self.effects
+        sequence=MaskedRuntimeStop(journal=fx.journal,masks=fx.masks,jobs=fx.jobs,domain=fx.domain,
+                                   authority=self.peer.engine)
+        with self.assertRaisesRegex(durable.Rejected,'^containment-runtime-persisted-policy-required$'):
+            ipc.ContainmentServer(authority=self.peer.engine,sequence=sequence)
+        self.assertEqual(self.effect_names(),[])
+
+    def test_persisted_policy_failure_after_kill_prevents_outer_return_and_ack(self):
+        path=self.policy.path/'hostconfig.json'
+        path.write_bytes(durable.canonical({**self.policy.host,'RestartPolicy':{'Name':'always','MaximumRetryCount':0}}))
+        self.queue();self.refused()
+        self.assertEqual([item[0] for item in self.effects.effects].count('slice-kill'),1)
+        self.assertFalse((self.state/'operation-02-return.json').exists())
+        self.effects.witness.close.assert_called_once()
+
+    def test_metadata_drift_during_outer_return_refuses_before_reply(self):
+        self.queue();reached=[]
+        original=self.effects.journal.returned
+        def returned(*args,**kwargs):
+            value=original(*args,**kwargs);reached.append(True)
+            path=self.policy.path/'config.v2.json'
+            path.write_bytes(durable.canonical({**self.policy.config,'Image':'sha256:'+'8'*64}))
+            return value
+        with patch.object(self.effects.journal,'returned',side_effect=returned):self.refused()
+        self.assertEqual(reached,[True])
+        self.assertTrue((self.state/'operation-02-return.json').exists())
+        self.effects.witness.close.assert_called_once()
+
+    def test_repopulation_during_policy_read_is_not_hidden_by_valid_metadata(self):
+        from host_recovery import persisted_policy
+        original=persisted_policy.read_file;reached=[]
+        def read(*args,**kwargs):
+            value=original(*args,**kwargs)
+            if args[1]=='hostconfig.json' and not reached:
+                reached.append(True);self.effects.domain.populated.return_value=True
+            return value
+        self.queue()
+        with patch.object(persisted_policy,'read_file',side_effect=read):self.refused()
+        self.assertEqual(reached,[True])
+        self.assertFalse((self.state/'operation-02-return.json').exists())
+        self.effects.witness.close.assert_called_once()
+
+    def test_policy_storage_fault_is_reached_after_containment_without_return(self):
+        from host_recovery import persisted_policy
+        original=persisted_policy.read_file;reached=[]
+        def read(*args,**kwargs):
+            if args[1]=='hostconfig.json':
+                reached.append(True);raise OSError(errno.EIO,'synthetic read failure')
+            return original(*args,**kwargs)
+        self.queue()
+        with patch.object(persisted_policy,'read_file',side_effect=read):self.refused()
+        self.assertEqual(reached,[True])
+        self.assertEqual([item[0] for item in self.effects.effects].count('slice-kill'),1)
+        self.assertFalse((self.state/'operation-02-return.json').exists())
+        self.effects.witness.close.assert_called_once()
 
 
 class ContainmentClientTests(unittest.TestCase):

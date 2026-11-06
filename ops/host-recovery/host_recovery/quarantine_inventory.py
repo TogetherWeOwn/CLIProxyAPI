@@ -39,6 +39,57 @@ def lines(raw, *, pattern, limit):
     return sorted(values)
 
 
+def original_registry(*, authority, topology, deadline, check):
+    """Read the original protected intent/registrations without runtime contact."""
+    check()
+    approval = authority.approval
+    with open_approved_directory(authority.lock.journal) as root:
+        before = metadata(root.fd, uid=approval.uid, gid=approval.gid, directory=True, private=True)
+        first = names(root.fd)
+        raw, st = read_file(root.fd, "intent.json", limit=16384)
+        intent = decode(raw)
+        validate_intent(intent)
+        if (digest(canonical(intent)) != approval.intent_sha256
+                or (st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode)) != (approval.uid, approval.gid, 0o600)
+                or st.st_dev != before.st_dev):
+            raise Rejected("quarantine-inventory-original-intent-required")
+        pins = topology.manifest()["pins"]
+        if any(intent[field] != pins[expected] for field, expected in (
+                ("candidate_image_id", "candidate_image_sha256"),
+                ("baseline_sha256", "baseline_sha256"), ("policy_sha256", "policy_sha256"))):
+            raise Rejected("quarantine-inventory-original-pins-required")
+        objects = {}
+        records = {"intent.json": (raw, signature(st))}
+        for name in first:
+            if name.startswith((".stage-", ".recovery-stage-")):
+                raise Rejected("quarantine-inventory-ambiguous-staging")
+            if not name.startswith("object-"):
+                continue
+            match = REGISTRATION.fullmatch(name)
+            if match is None or objects:
+                raise Rejected("quarantine-inventory-registration-ambiguous")
+            raw, st = read_file(root.fd, name, limit=16384)
+            record = decode(raw)
+            validate_registration(record, intent)
+            if (record["object_id"] != match[1] or st.st_dev != before.st_dev
+                    or (st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode)) != (approval.uid, approval.gid, 0o600)):
+                raise Rejected("quarantine-inventory-registration-unconfirmed")
+            objects[match[1]] = record
+            records[name] = (raw, signature(st))
+        for name, (raw, stamp) in records.items():
+            again, st = read_file(root.fd, name, limit=16384)
+            if again != raw or signature(st) != stamp:
+                raise Rejected("quarantine-inventory-registry-changed")
+        if (names(root.fd) != first
+                or signature(metadata(root.fd, uid=approval.uid, gid=approval.gid,
+                                      directory=True, private=True)) != signature(before)):
+            raise Rejected("quarantine-inventory-registry-changed")
+        root.validate()
+    check()
+    return intent, objects, canonical({name: {"sha256": digest(raw), "signature": stamp}
+                                      for name, (raw, stamp) in records.items()})
+
+
 class QuarantineInventory:
     """Non-authorizing observation for a *future qualified* quarantine runtime.
 
@@ -87,53 +138,8 @@ class QuarantineInventory:
             raise Rejected("quarantine-inventory-configuration-changed")
 
     def _registry(self, deadline):
-        self._current(deadline)
-        approval = self.authority.approval
-        with open_approved_directory(self.authority.lock.journal) as root:
-            before = metadata(root.fd, uid=approval.uid, gid=approval.gid, directory=True, private=True)
-            first = names(root.fd)
-            raw, st = read_file(root.fd, "intent.json", limit=16384)
-            intent = decode(raw)
-            validate_intent(intent)
-            if (digest(canonical(intent)) != approval.intent_sha256
-                    or (st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode)) != (approval.uid, approval.gid, 0o600)
-                    or st.st_dev != before.st_dev):
-                raise Rejected("quarantine-inventory-original-intent-required")
-            pins = self.topology.manifest()["pins"]
-            if any(intent[field] != pins[expected] for field, expected in (
-                    ("candidate_image_id", "candidate_image_sha256"),
-                    ("baseline_sha256", "baseline_sha256"), ("policy_sha256", "policy_sha256"))):
-                raise Rejected("quarantine-inventory-original-pins-required")
-            objects = {}
-            records = {"intent.json": (raw, signature(st))}
-            for name in first:
-                if name.startswith((".stage-", ".recovery-stage-")):
-                    raise Rejected("quarantine-inventory-ambiguous-staging")
-                if not name.startswith("object-"):
-                    continue
-                match = REGISTRATION.fullmatch(name)
-                if match is None or objects:
-                    raise Rejected("quarantine-inventory-registration-ambiguous")
-                raw, st = read_file(root.fd, name, limit=16384)
-                record = decode(raw)
-                validate_registration(record, intent)
-                if (record["object_id"] != match[1] or st.st_dev != before.st_dev
-                        or (st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode)) != (approval.uid, approval.gid, 0o600)):
-                    raise Rejected("quarantine-inventory-registration-unconfirmed")
-                objects[match[1]] = record
-                records[name] = (raw, signature(st))
-            for name, (raw, stamp) in records.items():
-                again, st = read_file(root.fd, name, limit=16384)
-                if again != raw or signature(st) != stamp:
-                    raise Rejected("quarantine-inventory-registry-changed")
-            if (names(root.fd) != first
-                    or signature(metadata(root.fd, uid=approval.uid, gid=approval.gid,
-                                          directory=True, private=True)) != signature(before)):
-                raise Rejected("quarantine-inventory-registry-changed")
-            root.validate()
-        self._current(deadline)
-        return intent, objects, canonical({name: {"sha256": digest(raw), "signature": stamp}
-                                          for name, (raw, stamp) in records.items()})
+        return original_registry(authority=self.authority, topology=self.topology, deadline=deadline,
+                                 check=lambda: self._current(deadline))
 
     def _run(self, argv, deadline):
         self._current(deadline)

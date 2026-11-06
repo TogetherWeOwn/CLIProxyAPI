@@ -11,6 +11,7 @@ from .broker_runtime import RuntimeDomain
 from .durable import Rejected, canonical, decode, digest
 from .manager_jobs import RuntimeStopJobs, completion_name
 from .masked_forward_stop import _MaskedFixedStop
+from .persisted_policy import PersistedObjectPolicy
 from .runtime_kill import record_names
 from .runtime_processes import RuntimeProcessWitness
 from .topology import RUNTIME_ROLES
@@ -23,13 +24,23 @@ class MaskedRuntimeStop(_MaskedFixedStop):
     target_schema = "host-recovery-masked-runtime-stop-target-v1"
     observation_schema = "host-recovery-masked-runtime-stop-observation-v1"
 
-    def __init__(self, *, journal, masks, jobs, domain, authority=None):
+    def __init__(self, *, journal, masks, jobs, domain, authority=None, policy=None):
+        if policy is not None and (not isinstance(policy, PersistedObjectPolicy) or policy.authority is not authority):
+            raise Rejected("masked-runtime-original-persisted-policy-required")
+        self.policy = self._original_policy = policy
+        self._policy_observation = None
         if (not isinstance(journal, OperationJournal) or not isinstance(domain, RuntimeDomain)
                 or not isinstance(jobs, RuntimeStopJobs)
                 or any(unit.cgroup != domain.cgroup + "/" + unit.unit for unit in jobs.units.values())
                 or "contain_forward" not in journal._returned):
             raise Rejected("masked-runtime-original-domain-and-forward-return-required")
         # A previous return is sequencing evidence, NOT forward quiescence/drain.
+        if policy is not None:
+            runtime = policy.topology.manifest()["runtime"]
+            if (runtime["cgroup_path"] != domain.cgroup
+                    or any(runtime["units"][role] != {"unit": unit.unit, "effective_sha256": unit.properties_sha256}
+                           for role, unit in jobs.units.items())):
+                raise Rejected("masked-runtime-persisted-policy-topology-mismatch")
         self.domain = self._original_domain = domain
         self._forward = journal._pending.get("contain_forward")
         if self._forward is None:
@@ -41,12 +52,15 @@ class MaskedRuntimeStop(_MaskedFixedStop):
 
     def configuration(self):
         value = decode(super().configuration())
-        value.update(domain=decode(self.domain.configuration()), forward_operation_sha256=digest(self._forward))
+        value.update(domain=decode(self.domain.configuration()), forward_operation_sha256=digest(self._forward),
+                     persisted_policy=None if self.policy is None else decode(self.policy.configuration()))
         return canonical(value)
 
     def _current(self):
         super()._current()
-        if (self.domain is not self._original_domain or self._forward != self.journal._pending.get("contain_forward")
+        if (self.domain is not self._original_domain or self.policy is not self._original_policy
+                or self.policy is not None and (self.policy.failed or self.policy.authority is not self.authority)
+                or self._forward != self.journal._pending.get("contain_forward")
                 or "contain_forward" not in self.journal._returned):
             raise Rejected("masked-runtime-original-domain-or-forward-changed")
         self.domain.current()
@@ -100,7 +114,11 @@ class MaskedRuntimeStop(_MaskedFixedStop):
         # Publication can itself lose authority or observe repopulation. Saved
         # observations cannot replace the final live check or grant a cold return.
         self._final_check()
+        if self.policy is not None:
+            self._policy_observation = canonical(self.policy.observe(deadline=self.session.deadline, check=self._current))
+            self._final_check()
         return {"recursive_domain_kill_returned": True, "domain_empty_observed": True,
+                "persisted_restart_policy_observed": self._policy_observation is not None, "runtime_relaunch_allowed": False,
                 "observed_runtime_process_count": self._witness.count, "observed_runtime_processes_dead": True,
                 "runtime_stop_completion_count": len(self.roles), "runtime_containment_coverage_proven": False}
 
@@ -114,6 +132,9 @@ class MaskedRuntimeStop(_MaskedFixedStop):
         if self._witness is None:
             raise Rejected("masked-runtime-process-witness-required")
         self._witness.require_dead(check=self._current)
+        if self._policy_observation is not None:
+            if canonical(self.policy.observe(deadline=self.session.deadline, check=self._current)) != self._policy_observation:
+                raise Rejected("masked-runtime-persisted-policy-changed")
         # Authority/projection reads are external boundaries too. Recheck the
         # kernel observation after them; never turn a missing cgroup into zero.
         if self.domain.populated() is not False:

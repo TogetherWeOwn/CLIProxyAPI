@@ -53,7 +53,8 @@ def containment_response(value):
     observation.update(fixed_stop_completion_observed=True, masked_inactive_observed=True)
     if value["method"] == "cold_quiesce_runtime":
         observation.update(recursive_domain_kill_returned=True, domain_empty_observed=True,
-                           observed_runtime_processes_dead=True, runtime_containment_coverage_proven=False)
+                           observed_runtime_processes_dead=True, runtime_containment_coverage_proven=False,
+                           persisted_restart_policy_observed=True, runtime_relaunch_allowed=False)
     return {"schema": "host-recovery-containment-response-v1", "request_sha256": digest(canonical(value)),
         "binding_sha256": value["binding_sha256"], "epoch_sha256": value["epoch_sha256"],
         "nonce": value["nonce"], "method": value["method"], "target_sha256": value["target_sha256"],
@@ -75,6 +76,8 @@ class ContainmentServer(ObservationServer):
         super().__init__(authority=authority, epoch=decode(sequence.journal._epoch))
         if authority._binding != sequence.journal._binding:
             raise Rejected("containment-original-journal-required")
+        if type(sequence) is MaskedRuntimeStop and sequence.policy is None:
+            raise Rejected("containment-runtime-persisted-policy-required")
         self.sequence, self.journal = sequence, sequence.journal
         self._original = authority, sequence, sequence.journal
         self._target = sequence.target_sha256

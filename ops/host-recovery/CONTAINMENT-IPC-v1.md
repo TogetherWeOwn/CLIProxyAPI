@@ -20,7 +20,9 @@ matching hashes do not authenticate provisioning.
 
 Only `contain_forward` (sequence 1) and `cold_quiesce_runtime` (sequence 2) are
 supported. The latter requires the original forward submission's durable return;
-that return proves sequencing, **not forward quiescence or drain**. Every other
+that return proves sequencing, **not forward quiescence or drain**. It also
+requires the original protected [persisted-policy observer](PERSISTED-POLICY-v1.md)
+in its fixed target; no legacy policy-free runtime sequence is exposed. Every other
 method, unknown field, target mismatch, epoch mismatch or changed deadline refuses
 before pending publication. There is no per-packet unit, filesystem path, signal,
 executable, environment, API request, import or effect callback.
@@ -48,7 +50,9 @@ Under the journal's existing internal mutex (not a second installation flock):
    or recursive kernel effect. Dispatch the fixed sequence once.
 3. Require its exact operation/target, matching stop completions, inactive masks
    and literal deny flags. Runtime submission additionally requires the original
-   captured pidfds dead and the exact runtime domain explicitly empty.
+   captured pidfds dead, the exact runtime domain explicitly empty, and the
+   source-version-bound offline object/hostconfig policy observation. That policy
+   must agree through post-return/ACK rechecks; runtime relaunch remains denied.
 4. Publish a separate outer `returned` record, always `pending_drained=false`.
    Recheck original peer/lock, fixed job absence, inactive effective projections,
    execution timestamps and, for runtime, kernel emptiness/process death after
