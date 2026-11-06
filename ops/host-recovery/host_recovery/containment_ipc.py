@@ -54,7 +54,7 @@ def containment_response(value):
                        auxiliary_commands_empty_observed=True, control_pid_zero_observed=True,
                        autonomous_launch_policy_observed=True)
     if value["method"] == "cold_quiesce_runtime":
-        observation.update(recursive_domain_kill_returned=True, domain_empty_observed=True,
+        observation.update(recursive_domain_kill_returned=True, domain_empty_observed=True, domain_frozen_observed=True,
                            observed_runtime_processes_dead=True, runtime_containment_coverage_proven=False,
                            persisted_restart_policy_observed=True, runtime_relaunch_allowed=False)
     return {"schema": "host-recovery-containment-response-v1", "request_sha256": digest(canonical(value)),

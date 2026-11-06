@@ -324,6 +324,37 @@ class RuntimeContainmentProtocolTests(_ContainmentProtocolFixture):
         self.assertEqual(self.effects.journal._returned, {'contain_forward','cold_quiesce_runtime'})
         self.assertEqual([item[0] for item in self.effects.effects].count('slice-kill'), 1)
 
+    def test_runtime_thaw_during_return_durability_refuses_before_reply(self):
+        self.queue()
+        reached = []
+        def fault(point):
+            if point == 'directory-fsync' and (self.state/'operation-02-return.json').exists():
+                reached.append(point)
+                self.effects.domain.frozen.return_value = False
+        self.effects.journal.fault = fault
+        self.refused()
+        self.assertEqual(reached, ['directory-fsync'])
+        self.assertTrue((self.state/'operation-02-return.json').exists())
+        self.effects.domain.freeze.assert_called_once()
+        self.effects.domain.kill.assert_called_once()
+        self.effects.witness.close.assert_called_once()
+
+    def test_runtime_thaw_after_reply_prevents_ack_completion(self):
+        self.queue()
+        original = self.peer.peer.reply
+        reached = []
+        def reply(*args):
+            result = original(*args)
+            reached.append('reply')
+            self.effects.domain.frozen.return_value = False
+            return result
+        with patch.object(self.peer.peer, 'reply', side_effect=reply): self.refused()
+        self.assertEqual(reached, ['reply'])
+        self.assertTrue((self.state/'operation-02-return.json').exists())
+        self.effects.domain.freeze.assert_called_once()
+        self.effects.domain.kill.assert_called_once()
+        self.effects.witness.close.assert_called_once()
+
     def test_runtime_repopulation_after_return_refuses_and_closes_witness(self):
         self.queue()
         original = self.effects.journal.returned

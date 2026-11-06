@@ -839,8 +839,15 @@ class SystemManagerTests(unittest.TestCase):
         directory = context.__enter__()
         self.addCleanup(context.__exit__, None, None, None)
         masks = PersistentUnitMasks(directory=directory, units=units)
+        freeze_observations = []
         def current():
             self.current()
+            if sequence._domain_frozen:
+                group = Path('/sys/fs/cgroup' + cgroup)
+                self.assertEqual((group/'cgroup.freeze').read_bytes(), b'1\n')
+                self.assertEqual(dict(line.split() for line in (group/'cgroup.events').read_text().splitlines())['frozen'], '1')
+                if not sequence._domain_killed:
+                    freeze_observations.append('frozen-before-kill')
             # Before the source recursive write, both third-fixture pidfds must
             # remain live, even after both fixed units have actually completed.
             if not sequence._domain_killed:
@@ -868,6 +875,9 @@ class SystemManagerTests(unittest.TestCase):
         self.assertEqual({role:command(self.systemctl, "show", "--property=ExecMainStartTimestampMonotonic",
                                       "--value", "--", unit.unit).strip() for role,unit in units.items()}, before_starts)
         self.assertTrue(receipt["recursive_domain_kill_returned"] and receipt["domain_empty_observed"])
+        self.assertIs(receipt['domain_frozen_observed'], True)
+        self.assertTrue(freeze_observations)
+        self.assertIs(domain.frozen(), True)
         self.assertEqual(receipt["runtime_stop_completion_count"], 2)
         self.assertEqual(receipt["fixed_stop_admission_count"], 2)
         self.assertIs(receipt["fixed_jobs_absent_observed"], True)

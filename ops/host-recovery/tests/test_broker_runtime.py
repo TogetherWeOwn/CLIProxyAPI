@@ -128,6 +128,97 @@ class RuntimeContainmentTests(unittest.TestCase):
         self.assertTrue(self.adapter.failed)
         self.assertEqual(self.operations.status()['state'], 'reconciliation_required')
 
+    def test_freeze_writes_only_fixed_descriptor_relative_request(self):
+        path = self.group_path/'cgroup.freeze'
+        path.write_bytes(b'0\n')
+        reached = []
+        def check():
+            reached.append(path.read_bytes())
+        self.domain.freeze(check=check)
+        self.assertEqual(reached, [b'0\n',b'1\n'])
+        self.assertEqual(path.read_bytes(), b'1\n')
+        # A returned write is not a completed kernel freeze.
+        self.assertIs(self.domain.frozen(), False)
+        self.events.write_bytes(b'populated 1\nfrozen 1\n')
+        self.assertIs(self.domain.frozen(), True)
+        path.write_bytes(b'0\n')
+        self.assertIs(self.domain.frozen(), False, 'ancestor freeze must not replace our own request')
+
+    def test_freeze_requires_exact_request_and_explicit_completed_event(self):
+        path = self.group_path/'cgroup.freeze'
+        path.write_bytes(b'1\n')
+        for raw in (b'', b'populated 0\n', b'populated 0\nfrozen 2\n',
+                    b'populated 0\nfrozen 1\nfrozen 1\n'):
+            with self.subTest(events=raw):
+                self.events.write_bytes(raw)
+                with self.assertRaises(durable.Rejected): self.domain.frozen()
+        self.events.write_bytes(b'populated 0\nfrozen 1\n')
+        for raw in (b'', b'1', b'1\nextra\n', b'01\n', b'1\n'*600):
+            with self.subTest(request=raw):
+                path.write_bytes(raw)
+                with self.assertRaises(durable.Rejected): self.domain.frozen()
+
+    def test_freeze_link_or_multi_link_file_refuses_before_write(self):
+        path = self.group_path/'cgroup.freeze'
+        target = self.group_path/'other-freeze'
+        target.write_bytes(b'0\n')
+        path.symlink_to(target)
+        with self.assertRaises(OSError): self.domain.freeze(check=lambda:None)
+        self.assertEqual(target.read_bytes(), b'0\n')
+        path.unlink()
+        os.link(target,path)
+        with self.assertRaises(durable.Rejected): self.domain.freeze(check=lambda:None)
+        self.assertEqual(target.read_bytes(), b'0\n')
+
+    def test_freeze_authority_failure_never_writes_or_rolls_back_a_returned_write(self):
+        path = self.group_path/'cgroup.freeze'
+        for late in (False,True):
+            with self.subTest(late=late):
+                path.write_bytes(b'0\n')
+                reached = []
+                def check():
+                    reached.append(path.read_bytes())
+                    if not late or len(reached) == 2: raise durable.Rejected('lost')
+                with self.assertRaises(durable.Rejected): self.domain.freeze(check=check)
+                self.assertEqual(path.read_bytes(), b'1\n' if late else b'0\n')
+                self.assertEqual(len(reached), 2 if late else 1)
+
+    def test_freeze_replacement_during_authority_read_refuses_before_write(self):
+        path = self.group_path/'cgroup.freeze'
+        path.write_bytes(b'0\n')
+        old = self.group_path/'original-freeze'
+        def check():
+            path.rename(old)
+            path.write_bytes(b'0\n')
+        with self.assertRaises(durable.Rejected): self.domain.freeze(check=check)
+        self.assertEqual(path.read_bytes(), b'0\n')
+        self.assertEqual(old.read_bytes(), b'0\n')
+
+    def test_freeze_short_write_and_storage_errors_are_not_retried(self):
+        path = self.group_path/'cgroup.freeze'
+        path.write_bytes(b'0\n')
+        for result in (1, OSError(errno.EIO,'synthetic'), OSError(errno.ENOSPC,'synthetic')):
+            with self.subTest(result=str(result)):
+                kwargs = {'side_effect':result} if isinstance(result,Exception) else {'return_value':result}
+                with patch.object(os,'write',**kwargs) as write:
+                    with self.assertRaises((durable.Rejected,OSError)): self.domain.freeze(check=lambda:None)
+                write.assert_called_once()
+                self.assertEqual(path.read_bytes(), b'0\n')
+
+    def test_freeze_request_drift_across_event_read_is_not_completed(self):
+        path = self.group_path/'cgroup.freeze'
+        path.write_bytes(b'1\n')
+        original = self.domain._events
+        reached = []
+        def changed():
+            reached.append('events')
+            value = original()
+            path.write_bytes(b'0\n')
+            return value
+        with patch.object(self.domain,'_events',side_effect=changed):
+            with self.assertRaises(durable.Rejected): self.domain.frozen()
+        self.assertEqual(reached,['events'])
+
     def test_dynamic_cgroup_event_timestamps_are_not_persistent_file_pins(self):
         original = os.fstat
         inode = self.events.stat().st_ino

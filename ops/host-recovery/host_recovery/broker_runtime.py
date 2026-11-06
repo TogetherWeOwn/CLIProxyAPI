@@ -84,9 +84,9 @@ class RuntimeDomain:
             if (current.st_dev, current.st_ino) != (self.device, self.inode):
                 raise Rejected("runtime-domain-path-changed")
 
-    def _events(self):
+    def _read_control(self, name):
         self.current()
-        fd = os.open("cgroup.events", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=self.fd)
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=self.fd)
         try:
             before = os.fstat(fd)
             if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_dev != self.device
@@ -102,7 +102,7 @@ class RuntimeDomain:
                     raise Rejected("runtime-domain-events-overflow")
                 blocks.append(block)
             after = os.fstat(fd)
-            path = os.stat("cgroup.events", dir_fd=self.fd, follow_symlinks=False)
+            path = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
             # kernfs event values are dynamic and do not have persistent-file
             # size/timestamp semantics. Keep mount/path/inode and metadata pins,
             # not durable.read_file's immutable-content signature contract.
@@ -115,7 +115,10 @@ class RuntimeDomain:
         finally:
             os.close(fd)
 
-    def populated(self):
+    def _events(self):
+        return self._read_control("cgroup.events")
+
+    def _event_values(self):
         raw = self._events()
         values = {}
         for line in raw.decode("ascii").splitlines():
@@ -127,7 +130,53 @@ class RuntimeDomain:
         if "populated" not in values:
             raise Rejected("runtime-domain-populated-missing")
         self.current()
-        return values["populated"] == "1"
+        return values
+
+    def populated(self):
+        return self._event_values()["populated"] == "1"
+
+    def frozen(self):
+        """Require an own freeze request and the kernel's completed freeze state.
+
+        A request alone, an ancestor's freeze or a missing event is not enough.
+        Privileged thaw/migration and cgroup recreation still require exclusion.
+        """
+        requested = self._read_control("cgroup.freeze")
+        if requested not in (b"0\n", b"1\n"):
+            raise Rejected("runtime-domain-freeze-schema")
+        values = self._event_values()
+        if "frozen" not in values:
+            raise Rejected("runtime-domain-frozen-missing")
+        trailing = self._read_control("cgroup.freeze")
+        if trailing != requested:
+            raise Rejected("runtime-domain-freeze-request-changed")
+        self.current()
+        return requested == b"1\n" and values["frozen"] == "1"
+
+    def freeze(self, *, check):
+        """One own-subtree freeze request; no thaw or arbitrary file operation."""
+        self.current()
+        fd = os.open("cgroup.freeze", os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=self.fd)
+        try:
+            before = os.fstat(fd)
+            def identity(info):
+                return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink)
+            if (not stat.S_ISREG(before.st_mode) or before.st_dev != self.device or before.st_nlink != 1
+                    or os.listxattr(fd)
+                    or identity(before) != identity(os.stat("cgroup.freeze", dir_fd=self.fd, follow_symlinks=False))):
+                raise Rejected("runtime-domain-freeze-file-unconfirmed")
+            self.current()
+            check()
+            if (identity(before) != identity(os.fstat(fd))
+                    or identity(before) != identity(os.stat("cgroup.freeze", dir_fd=self.fd, follow_symlinks=False))
+                    or os.listxattr(fd)):
+                raise Rejected("runtime-domain-freeze-file-changed")
+            if os.write(fd, b"1\n") != 2:
+                raise Rejected("runtime-domain-freeze-write-unconfirmed")
+            self.current()
+            check()
+        finally:
+            os.close(fd)
 
     def kill(self, *, check):
         """One descriptor-relative kernel write; never fall back to PID killing.

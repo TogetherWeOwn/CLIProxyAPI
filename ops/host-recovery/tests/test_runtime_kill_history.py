@@ -15,7 +15,7 @@ class RuntimeKillHistoryTests(unittest.TestCase):
     closed = fixture.BrokerHistoryTests.closed
     reload_records = reload_fixture.MaskReloadHistoryTests.reload_records
 
-    def prepare(self, *, phase=2, forward=True, method='cold_quiesce_runtime'):
+    def prepare(self, *, phase=2, forward=True, method='cold_quiesce_runtime', version=1):
         if forward:
             previous = self.pending('contain_forward')
             self.journal.returned(previous, result='returned')
@@ -46,9 +46,54 @@ class RuntimeKillHistoryTests(unittest.TestCase):
         empty = {'schema':'host-recovery-runtime-kill-empty-v1',
             'return_sha256':durable.digest(durable.canonical(returned)), 'domain_empty_observed':True,
             'runtime_containment_coverage_proven':False}
+        if version == 2:
+            pending.update(schema='host-recovery-runtime-kill-pending-v2', domain_freeze_required=True)
+            returned.update(schema='host-recovery-runtime-kill-return-v2', domain_frozen_observed=True,
+                            pending_sha256=durable.digest(durable.canonical(pending)))
+            empty.update(schema='host-recovery-runtime-kill-empty-v2', domain_frozen_observed=True,
+                         return_sha256=durable.digest(durable.canonical(returned)))
         names, values = runtime_kill.record_names(operation['sequence']), (pending, returned, empty)
         for name,value in zip(names[:phase+1],values): self.write(name,value)
         return operation, names, values
+
+    def test_freezer_v2_history_retains_each_uncertain_phase_without_authority(self):
+        for phase, expected in enumerate(('unreturned','returned_without_empty_observation','empty_observed_unproven')):
+            with self.subTest(phase=phase):
+                self.setUp()
+                self.prepare(version=2, phase=phase)
+                before = self.records()
+                report = self.inspect()
+                self.assertEqual(report['operations'][1]['runtime_kill']['classification'],expected)
+                self.closed(report)
+                self.assertEqual(before,self.records())
+
+    def test_freezer_history_flags_are_literal_and_mixed_versions_refuse(self):
+        for index,field in ((0,'domain_freeze_required'),(1,'domain_frozen_observed'),(2,'domain_frozen_observed')):
+            for action in ('missing','integer','false','version'):
+                with self.subTest(index=index,action=action):
+                    self.setUp()
+                    _, names, values = self.prepare(version=2)
+                    changed = dict(values[index])
+                    if action == 'missing': changed.pop(field)
+                    elif action == 'version': changed['schema'] = changed['schema'].replace('-v2','-v1')
+                    else: changed[field] = 1 if action == 'integer' else False
+                    values[index].clear(); values[index].update(changed)
+                    # Keep digest links valid so each negative reaches schema/flag validation.
+                    values[1]['pending_sha256'] = durable.digest(durable.canonical(values[0]))
+                    values[2]['return_sha256'] = durable.digest(durable.canonical(values[1]))
+                    for name,value in zip(names,values): self.write(name,value)
+                    with self.assertRaises(durable.Rejected): self.inspect()
+
+    def test_kill_only_v1_history_cannot_smuggle_a_freezer_claim(self):
+        for index,field in ((0,'domain_freeze_required'),(1,'domain_frozen_observed'),(2,'domain_frozen_observed')):
+            with self.subTest(index=index):
+                self.setUp()
+                _, names, values = self.prepare()
+                values[index][field] = True
+                values[1]['pending_sha256'] = durable.digest(durable.canonical(values[0]))
+                values[2]['return_sha256'] = durable.digest(durable.canonical(values[1]))
+                for name,value in zip(names,values): self.write(name,value)
+                with self.assertRaises(durable.Rejected): self.inspect()
 
     def test_each_phase_is_read_only_and_never_reconstructs_authority(self):
         for phase, expected in enumerate(('unreturned','returned_without_empty_observation','empty_observed_unproven')):

@@ -50,6 +50,8 @@ class MaskedRuntimeStopTests(unittest.TestCase):
         self.domain.cgroup = '/runtime.slice'
         self.domain.configuration.return_value = durable.canonical({'synthetic_domain':True})
         self.domain.populated.return_value = False
+        self.domain.frozen.return_value = True
+        self.domain.freeze.side_effect = lambda *, check:check()
         def kill(*, check):
             self.effects.append(('slice-kill', None))
             check()
@@ -133,6 +135,125 @@ class MaskedRuntimeStopTests(unittest.TestCase):
 
     def apply(self):
         return self.sequence.stop(operation=self.operation)
+
+    def test_freeze_requires_durable_pending_and_both_stops_before_kill(self):
+        reached = []
+        def freeze(*, check):
+            pending = durable.decode((self.path_state/kill_names(2)[0]).read_bytes())
+            self.assertEqual(pending['schema'], 'host-recovery-runtime-kill-pending-v2')
+            self.assertIs(pending['domain_freeze_required'], True)
+            for role in self.units:
+                self.assertEqual(durable.decode((self.path_state/completion_name(2,role)).read_bytes())['result'], 'done')
+            self.domain.kill.assert_not_called()
+            check()
+            reached.append('freeze')
+        def kill(*, check):
+            self.assertEqual(reached, ['freeze'])
+            self.assertTrue(self.sequence._domain_frozen)
+            check()
+            reached.append('kill')
+        self.domain.freeze.side_effect, self.domain.kill.side_effect = freeze, kill
+        result = self.apply()
+        self.assertEqual(reached, ['freeze','kill'])
+        self.assertIs(result['domain_frozen_observed'], True)
+        self.assertFalse(result['complete_fence_proven'] or result['start_allowed'])
+        self.assertEqual(durable.decode(self.sequence.configuration())['runtime_freeze_policy'],
+                         'own-subtree-freeze-before-kill-v1')
+
+    def test_freeze_publication_fault_never_reaches_freeze_or_kill(self):
+        for point in ('create','write','file-fsync','rename','directory-fsync','readback'):
+            for code in (errno.EIO, errno.ENOSPC):
+                with self.subTest(point=point, code=code):
+                    self.setUp()
+                    reached = []
+                    def fault(actual):
+                        if (all(completion_name(2,role) in self.journal._records for role in self.units)
+                                and kill_names(2)[0] not in self.journal._records and actual == point):
+                            reached.append(actual)
+                            raise OSError(code, 'synthetic')
+                    self.journal.fault = fault
+                    with self.assertRaises(durable.Rejected): self.apply()
+                    self.assertEqual(reached, [point])
+                    self.domain.freeze.assert_not_called()
+                    self.domain.kill.assert_not_called()
+                    self.witness.close.assert_called_once()
+
+    def test_freeze_write_failure_retains_pending_and_never_retries(self):
+        for code in (errno.EIO, errno.ENOSPC):
+            with self.subTest(code=code):
+                self.setUp()
+                reached = []
+                def freeze(*, check):
+                    check()
+                    reached.append('freeze')
+                    raise OSError(code, 'synthetic')
+                self.domain.freeze.side_effect = freeze
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertEqual(reached, ['freeze'])
+                self.domain.kill.assert_not_called()
+                self.assertTrue((self.path_state/kill_names(2)[0]).exists())
+                self.assertFalse(any((self.path_state/name).exists() for name in kill_names(2)[1:]))
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.domain.freeze.assert_called_once()
+
+    def test_freeze_completion_wait_uses_original_deadline_and_requires_literal_boolean(self):
+        for outcome in ('expired','unknown','complete'):
+            with self.subTest(outcome=outcome):
+                self.setUp()
+                reached = []
+                def frozen():
+                    if not reached:
+                        reached.append('wait')
+                        return False
+                    if outcome == 'expired': self.now = 1090.
+                    return True if outcome == 'complete' else False if outcome == 'expired' else 1
+                self.domain.frozen.side_effect = frozen
+                if outcome == 'complete':
+                    self.assertTrue(self.apply()['domain_frozen_observed'])
+                    self.domain.kill.assert_called_once()
+                else:
+                    with self.assertRaises(durable.Rejected): self.apply()
+                    self.domain.kill.assert_not_called()
+                    self.assertFalse((self.path_state/kill_names(2)[1]).exists())
+                self.domain.freeze.assert_called_once()
+                self.assertEqual(self.session.deadline, 1090.)
+
+    def test_original_authority_loss_while_waiting_for_freeze_prevents_kill(self):
+        reached = []
+        def frozen():
+            reached.append('freeze-observation')
+            self.check_hook = lambda:(_ for _ in ()).throw(durable.Rejected('lost'))
+            return False
+        self.domain.frozen.side_effect = frozen
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(reached, ['freeze-observation'])
+        self.domain.freeze.assert_called_once()
+        self.domain.kill.assert_not_called()
+        self.assertFalse((self.path_state/kill_names(2)[1]).exists())
+
+    def test_thaw_during_kill_or_empty_publication_refuses_without_retry(self):
+        for phase in ('kill','empty'):
+            with self.subTest(phase=phase):
+                self.setUp()
+                reached = []
+                def kill(*, check):
+                    check()
+                    if phase == 'kill':
+                        reached.append('kill')
+                        self.domain.frozen.return_value = False
+                def fault(point):
+                    if phase == 'empty' and point == 'directory-fsync' and (self.path_state/kill_names(2)[2]).exists():
+                        reached.append('empty')
+                        self.domain.frozen.return_value = False
+                self.domain.kill.side_effect, self.journal.fault = kill, fault
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertEqual(reached, [phase])
+                self.assertEqual((self.path_state/kill_names(2)[2]).exists(), phase == 'empty')
+                self.assertFalse(self.sequence.completed)
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.domain.freeze.assert_called_once()
+                self.domain.kill.assert_called_once()
+                self.witness.close.assert_called_once()
 
     def test_autonomous_launch_in_either_runtime_role_prevents_all_effects(self):
         for role in ('dockerd', 'containerd'):

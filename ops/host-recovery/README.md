@@ -736,6 +736,40 @@ helper, protected provisioning or operational runner is enabled. Regression meth
 (including an Actions-only real-manager forced-restart negative) are authored;
 require exact-head Actions results before claiming execution or qualification.
 
+## Pinned runtime subtree freeze before recursive kill
+
+The fixed masked-runtime sequence now requires an own-subtree `cgroup.freeze=1`
+request and an explicit completed `frozen 1` kernel event **after** both fixed stop
+completions and **before** recursive `cgroup.kill`. Both writes use the same pinned
+slice descriptor. The existing durable kill-pending barrier precedes the freeze
+write too; the target binds `own-subtree-freeze-before-kill-v1`. Freeze completion
+uses the original manager-session deadline, not a new timer. Missing freezer
+support, malformed or uncertain reads, short/error writes, lost authority or an
+expired wait refuse; there is no retry, alternate path, implicit thaw or fallback.
+Freeze and empty/dead-process observations are rechecked through outer return
+persistence and transport ACK. A failed trailing check cannot undo either write.
+
+The versioned kill phase records use v2 with literal `domain_freeze_required` /
+`domain_frozen_observed` flags and the original digest links. The retained-history
+reader accepts exact v1 kill-only histories without upgrading them to freezer
+proof, and rejects mixed versions or missing/nonliteral v2 flags. Saved records
+cannot reconstruct a live freezer, authorize replay/thaw, or prove drain.
+
+Linux v6.8's `Documentation/admin-guide/cgroup-v2.rst` specifies that a completed
+freeze stops the contained subtree until explicitly unfrozen; fatal signals still
+work. It also explicitly allows migration **out** of a frozen subtree, deletion of
+an empty frozen cgroup, and new subgroups. Therefore this kernel mechanism is **not**
+a complete launch/writer interlock: independent provisioning and exclusive control
+of thaw, migration, cgroup replacement and every runtime/writer path remain due.
+No launch/boot/restart exclusion, all-job retirement, cold/quarantine reconciliation,
+recovery/start/settlement or production authority follows from it. The legacy
+non-masked embedding adapter does not gain a freeze claim.
+
+New ordinary regressions and independent freezer assertions in the Actions-only
+real-manager runtime fixture are authored, **not yet verified**. No local runtime,
+manager, full-suite, CI mirror or build execution is needed or authorized. Exact-head
+Actions must establish the result, including the required compile and cleanup.
+
 ## Remaining acceptance work (not implemented or not proved)
 
 1. Persistent systemd supervisor with admission, durable active-attempt latch,
