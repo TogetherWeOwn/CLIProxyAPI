@@ -54,13 +54,37 @@ class DockerObjects:
         self.old_image_id = old_image_id
         self.candidate_image_id = intent["candidate_image_id"]
         self.start_fence = start_fence
+        self._quiescence_binding = None
+        self._quiescing = self._quiescence_failed = False
+
+    def _quiescence_bound(self):
+        values = (self.prefix, self.installation_id, self.attempt_id, self.old_object_id,
+                  self.old_image_id, self.candidate_image_id)
+        readers = (self.commands, self.clock, self.start_fence)
+        if self._quiescence_binding is None:
+            self._quiescence_binding = values, readers
+        original, retained = self._quiescence_binding
+        if (self._quiescence_failed or values != original
+                or any(actual is not expected for actual, expected in zip(readers, retained))):
+            raise Rejected("daemon-quiescence-boundaries-changed")
+
+    def _quiescence_clock(self):
+        self._quiescence_bound()
+        now = self.clock()
+        self._quiescence_bound()
+        return now
 
     def _fenced(self):
         if self.start_fence() is not True:
             raise Rejected("daemon-start-and-pending-operation-fence-unconfirmed")
 
     def _run(self, args, deadline):
-        return self.commands.run(self.prefix + args, deadline=deadline)
+        if self._quiescing:
+            self._quiescence_bound()
+        raw = self.commands.run(self.prefix + args, deadline=deadline)
+        if self._quiescing:
+            self._quiescence_bound()
+        return raw
 
     def inspect(self, object_id, *, deadline):
         timer = Deadline(self.clock, deadline)
@@ -125,21 +149,32 @@ class DockerObjects:
                 for value in values]
 
     def quiesce(self, *, deadline):
-        timer = Deadline(self.clock, deadline)
-        timer.remaining()
-        self._fenced()
-        timer.remaining()
-        owned = self._owned_ids(deadline)
-        all_ids = [self.old_object_id] + owned
-        # Inspect every object before any stop, so an ownership/policy mismatch
-        # cannot cause an unrelated object to be killed as a guessed candidate.
-        before = [self.inspect(object_id, deadline=deadline) for object_id in all_ids]
-        for value in before:
-            if value["running"]:
-                self._run(("container", "kill", "--signal=KILL", value["object_id"]), deadline)
-        after = [self.inspect(object_id, deadline=deadline) for object_id in all_ids]
-        if owned != self._owned_ids(deadline):
-            raise Rejected("daemon-ownership-changed-during-quiescence")
-        self._fenced()
-        timer.remaining()
-        return all(value["running"] is False for value in after)
+        entered = False
+        try:
+            if self._quiescing or self._quiescence_failed:
+                raise Rejected("daemon-quiescence-unavailable")
+            self._quiescing = entered = True
+            timer = Deadline(self._quiescence_clock, deadline)
+            timer.remaining()
+            self._fenced()
+            timer.remaining()
+            owned = self._owned_ids(deadline)
+            all_ids = [self.old_object_id] + owned
+            # Inspect every object before any stop, so an ownership/policy mismatch
+            # cannot cause an unrelated object to be killed as a guessed candidate.
+            before = [self.inspect(object_id, deadline=deadline) for object_id in all_ids]
+            for value in before:
+                if value["running"]:
+                    self._run(("container", "kill", "--signal=KILL", value["object_id"]), deadline)
+            after = [self.inspect(object_id, deadline=deadline) for object_id in all_ids]
+            if owned != self._owned_ids(deadline):
+                raise Rejected("daemon-ownership-changed-during-quiescence")
+            self._fenced()
+            timer.remaining()
+            return all(value["running"] is False for value in after)
+        except BaseException:
+            self._quiescence_failed = True
+            raise
+        finally:
+            if entered:
+                self._quiescing = False

@@ -154,6 +154,98 @@ class DaemonTests(unittest.TestCase):
                 with self.assertRaises(commands.CommandUncertain):
                     self.engine.quiesce(deadline=50)
 
+    def test_quiescence_rejects_configuration_drift_at_external_boundaries(self):
+        replacements = {"old_object_id": "f" * 64, "old_image_id": "f" * 64,
+                        "candidate_image_id": "0" * 64, "installation_id": "replacement",
+                        "attempt_id": "replacement", "prefix": ("/replacement/docker",),
+                        "commands": ScriptedDocker(), "clock": lambda: 1,
+                        "start_fence": lambda: True}
+        for phase in ("final-fence", "final-clock"):
+            for field, replacement in replacements.items():
+                with self.subTest(phase=phase, field=field):
+                    self.setUp()
+                    reached, fences = [], []
+                    def change():
+                        reached.append(field)
+                        setattr(self.engine, field, replacement)
+                    def fence():
+                        fences.append(True)
+                        if phase == "final-fence" and len(fences) == 2:
+                            change()
+                        return True
+                    def clock():
+                        if phase == "final-clock" and len(fences) == 2 and not reached:
+                            change()
+                        return self.time
+                    self.engine.start_fence = fence
+                    self.engine.clock = clock
+                    with self.assertRaises(durable.Rejected):
+                        self.engine.quiesce(deadline=50)
+                    self.assertEqual(reached, [field])
+                    self.assertEqual(sum("inspect" in argv for argv in self.transport.calls), 4)
+                    self.assertFalse(any("kill" in argv for argv in self.transport.calls))
+
+    def test_initial_fence_rebinding_refuses_before_any_daemon_command(self):
+        def fence():
+            self.engine.old_object_id = "0" * 64
+            return True
+        self.engine.start_fence = fence
+        with self.assertRaises(durable.Rejected):
+            self.engine.quiesce(deadline=50)
+        self.assertEqual(self.transport.calls, [])
+
+    def test_kill_return_rebinding_refuses_before_any_following_command(self):
+        object_id = self.value["old_object_id"]
+        self.transport.rows[object_id] = row(object_id, running=True)
+        def killed(transport, stopped):
+            transport.rows[stopped] = row(stopped)
+            self.engine.commands = ScriptedDocker()
+        self.transport.after_kill = killed
+        with self.assertRaises(durable.Rejected):
+            self.engine.quiesce(deadline=50)
+        self.assertEqual(sum("inspect" in argv for argv in self.transport.calls), 2)
+        self.assertEqual(sum("kill" in argv for argv in self.transport.calls), 1)
+        self.assertEqual(self.engine.commands.calls, [])
+
+    def test_caught_reentrant_quiescence_poisons_original_before_commands(self):
+        reached = []
+        def fence():
+            with self.assertRaises(durable.Rejected):
+                self.engine.quiesce(deadline=50)
+            reached.append(True)
+            return True
+        self.engine.start_fence = fence
+        with self.assertRaises(durable.Rejected):
+            self.engine.quiesce(deadline=50)
+        self.assertEqual(reached, [True])
+        self.assertEqual(self.transport.calls, [])
+        self.engine.start_fence = lambda: True
+        with self.assertRaises(durable.Rejected):
+            self.engine.quiesce(deadline=50)
+        self.assertEqual(reached, [True])
+        self.assertEqual(self.transport.calls, [])
+
+    def test_successful_quiescence_retains_binding_for_later_attempts(self):
+        self.fences = [True] * 4
+        self.transport.lists = [["a" * 64]] * 4
+        self.assertTrue(self.engine.quiesce(deadline=50))
+        self.assertTrue(self.engine.quiesce(deadline=50))
+        calls = len(self.transport.calls)
+        self.engine.commands = ScriptedDocker()
+        with self.assertRaises(durable.Rejected):
+            self.engine.quiesce(deadline=50)
+        self.assertEqual(len(self.transport.calls), calls)
+        self.assertEqual(self.engine.commands.calls, [])
+
+    def test_failed_quiescence_is_not_redispatched_after_transport_recovers(self):
+        self.transport.failure = commands.CommandUncertain("synthetic-lost-reply")
+        with self.assertRaises(commands.CommandUncertain):
+            self.engine.quiesce(deadline=50)
+        self.transport.failure = None
+        with self.assertRaises(durable.Rejected):
+            self.engine.quiesce(deadline=50)
+        self.assertEqual(len(self.transport.calls), 1)
+
     def test_foreign_ownership_or_changed_image_is_rejected_before_any_kill(self):
         for update in ({"ownership_id": "foreign"}, {"installation_id": "foreign"}, {"image_id": "sha256:" + "0" * 64},
                        {"object_id": "b" * 64}):

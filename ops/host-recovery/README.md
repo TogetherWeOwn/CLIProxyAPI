@@ -433,8 +433,16 @@ as a substitute for the accepted production binaries.
   exact installation/attempt ownership, no-restart/no-auto-remove checks and
   reinspection of every stopped object. Multiple attempt-owned objects are all
   considered for recovery; short/foreign/changed IDs fail closed. It exposes no
-  create/start/update/restart/remove operation. Tests use **scripted CLI replies**,
-  not an actual daemon or installed authorization boundary.
+  create/start/update/restart/remove operation. Quiescence retains its first-use
+  object/image/ownership, executable/endpoint, command transport, clock and fence
+  bindings through command replies and the final fence/clock callbacks. Drift,
+  reentrancy or uncertainty poisons that instance's quiescence path; a later reply
+  cannot silently redispatch an uncertain operation or adopt replacement bindings.
+  This is defensive interface binding, not transport authentication or protection
+  against arbitrary Python code. Tests use **scripted CLI replies**, not an actual
+  daemon or installed authorization boundary. Matching stopped observations still
+  depend on the external complete fence; no fresh mounted-byte, readiness, drain,
+  restoration/start or settlement authority is supplied by these binding checks.
 
 The manager and daemon adapters both require an independent, currently enforced
 start/pending-operation fence. Their injected Boolean acknowledgment is an
