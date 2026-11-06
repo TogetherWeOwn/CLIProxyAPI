@@ -4,6 +4,7 @@ Diagnostic byte pins are not release provenance. No default daemon, image pull,
 production metadata, host bind mount or operational recovery authority is used.
 """
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -11,6 +12,7 @@ from pathlib import Path
 import re
 import select
 import shutil
+import socket
 import stat
 import struct
 import sys
@@ -77,6 +79,45 @@ def docker_config(root, slice_name):
             "runtimes": {"cpa": {"path": "/usr/bin/runc"}}, "default-runtime": "cpa",
             "live-restore": False, "bridge": "none", "iptables": False, "ip6tables": False,
             "ip-forward": False, "ip-masq": False, "userland-proxy": False, "log-driver": "none"}
+
+
+def validate_info(info, root):
+    require(info["DockerRootDir"] == str(root / "docker") and info["Driver"] == "vfs"
+            and info["CgroupDriver"] == "systemd" and info["LiveRestoreEnabled"] is False
+            and info["Swarm"]["LocalNodeState"] == "inactive", "effective Docker isolation mismatch")
+
+
+def private_info(root, pid, current, deadline):
+    # The pinned CLI's formatted info returns success even when ServerErrors is
+    # nonempty and also executes discovered client-plugin metadata helpers. Use
+    # the exact fixture socket, not CLI formatting or any ambient/TCP endpoint.
+    class PrivateDockerHTTP(http.client.HTTPConnection):
+        def connect(self):
+            current()
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.settimeout(min(3, max(0.001, deadline - time.monotonic())))
+            self.sock.connect(str(root / "docker.sock"))
+            peer = struct.unpack("3i", self.sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            require(peer == (pid, 0, 0), "private Docker socket peer mismatch")
+            current()
+    connection = PrivateDockerHTTP("private-fixture")
+    try:
+        connection.request("GET", "/v1.48/info", headers={"Connection": "close"})
+        response = connection.getresponse()
+        raw = response.read(1024 * 1024 + 1)
+        require(response.status == 200 and len(raw) <= 1024 * 1024, "private Docker info response invalid")
+        current()
+        result = json.loads(raw)
+        validate_info(result, root)
+        emit(private_docker_info=result, peer_pid=pid)
+        return result
+    except (FileNotFoundError, ConnectionRefusedError):
+        # Only a not-yet-listening socket is a startup retry; malformed/effective
+        # policy, peer drift, timeout or an actual server error fails the fixture.
+        current()
+        return None
+    finally:
+        connection.close()
 
 
 def inspect_object(row, object_id, image_id, slice_name, *, running):
@@ -235,12 +276,10 @@ def main(probe):
             while True:
                 current()
                 require(show(units[epoch]["dockerd"], "ActiveState") == "active", "dockerd startup failed")
-                result = docker_cmd("info", "--format={{json .}}", check=False)
-                if result.returncode == 0:
-                    info = json.loads(result.stdout)
-                    require(info["DockerRootDir"] == str(root / "docker") and info["Driver"] == "vfs"
-                            and info["CgroupDriver"] == "systemd" and info["LiveRestoreEnabled"] is False
-                            and info["Swarm"]["LocalNodeState"] == "inactive", "effective Docker isolation mismatch")
+                pid = int(show(units[epoch]["dockerd"], "MainPID"))
+                require(pid > 1, "private dockerd MainPID required")
+                if private_info(root, pid, current, deadline) is not None:
+                    require(show(units[epoch]["dockerd"], "MainPID") == str(pid), "dockerd changed during readiness")
                     break
                 select.select([], [], [], 0.02)
             # The root is 0700 even if the local daemon uses a broader socket

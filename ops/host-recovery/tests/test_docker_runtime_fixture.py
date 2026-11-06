@@ -6,7 +6,7 @@ import tarfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from docker_runtime_fixture import docker_config, fixture_names, inspect_object, rootfs_archive
+from docker_runtime_fixture import docker_config, fixture_names, inspect_object, rootfs_archive, validate_info
 
 
 class DockerRuntimeFixtureTests(unittest.TestCase):
@@ -47,6 +47,17 @@ class DockerRuntimeFixtureTests(unittest.TestCase):
         for root, group in ((Path("/var/lib/docker"), self.slice), (self.root, "system.slice")):
             with self.subTest(root=root, group=group), self.assertRaises(AssertionError):
                 docker_config(root, group)
+
+    def test_effective_info_requires_actual_server_fields(self):
+        info = {"DockerRootDir": str(self.root / "docker"), "Driver": "vfs", "CgroupDriver": "systemd",
+                "LiveRestoreEnabled": False, "Swarm": {"LocalNodeState": "inactive"}}
+        validate_info(info, self.root)
+        for field, value in (("DockerRootDir", ""), ("Driver", ""), ("CgroupDriver", "cgroupfs"),
+                             ("LiveRestoreEnabled", True), ("Swarm", {"LocalNodeState": ""})):
+            changed = copy.deepcopy(info)
+            changed[field] = value
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                validate_info(changed, self.root)
 
     def test_restart_policy_is_checked_before_start_and_after_cold_restart(self):
         self.inspect(self.row)

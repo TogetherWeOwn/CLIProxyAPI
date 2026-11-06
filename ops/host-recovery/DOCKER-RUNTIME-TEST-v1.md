@@ -11,7 +11,10 @@ the existing containerd/shim/runc pins. Docker's embedded VCS/import/distro
 provenance remains unresolved; these byte pins do not approve production tools.
 No installation, default-daemon access, image pull or production operation is
 performed. All client calls have an explicit private endpoint and a fresh empty
-client configuration directory, with a clean environment.
+client configuration directory, with a clean environment. Readiness uses a fixed
+read-only `/v1.48/info` request over that private Unix socket, with kernel peer
+PID/UID/GID matched to the actual dockerd service. It never falls back to TCP,
+ambient endpoints, CLI info formatting or client-plugin metadata discovery.
 
 ## Source constraints checked before construction
 
@@ -84,6 +87,29 @@ source-reference correspondence, not a binary attestation.
    the private root. Uncertain mounts retain evidence and fail; no lazy unmount,
    shared cleanup or prefix sweep is allowed. Hosted runner retirement remains
    the native bound after cancellation/failure.
+
+## Initial reached fixture failure and correction
+
+Exact `d6dd64e8fd6bd075265538ecede13942c9730e8f`,
+[Actions 42133748379 Docker job](https://github.com/TogetherWeOwn/CLIProxyAPI/actions/runs/42133748379/job/127616544646),
+failed before image import/object/task creation. Both private daemons started,
+but the first formatted CLI info call exited 0 with empty server fields and an
+explicit `ServerErrors` connection-refused entry. The unchanged effective-input
+assertion refused it; cleanup removed the exact domain/root and the independent
+always step confirmed absence. This is not a Docker containment result.
+
+The pinned Docker CLI
+[`info.go:83-123`](https://github.com/docker/cli/blob/b8034c0ed70494a90c133461d145cd072d920d7c/cli/command/system/info.go#L83-L123)
+collects client/plugin metadata and returns the formatter result even after a
+server error. The raw initial output includes the discovered buildx/Compose
+metadata. The corrected readiness path avoids that discovery entirely and uses
+the private read-only HTTP endpoint with kernel peer checks. Only a missing or
+not-yet-listening socket retries within the original fixture deadline; wrong
+peers, malformed/effective inputs, timeout and server errors refuse. Task,
+policy, cold-start, executable/death and cleanup assertions are unchanged.
+Seven pure fixture methods are now authored, not locally run; corrected native
+qualification remains pending exact-head Actions. No production bug red/green
+or approved provenance is inferred from this fixture correction.
 
 ## Limits and retained gates
 
