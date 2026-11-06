@@ -98,30 +98,55 @@ class WriteSetVerifier:
     def __init__(self, reader):
         if not isinstance(reader, WriteSetRecovery) or reader.restored:
             raise Rejected("write-set-fresh-verifier-required")
-        self._reader = reader
-        self._failed = False
+        self._reader = self._original_reader = reader
+        self._failed = self._active = False
+        self._binding = None
+
+    def _bound_reader(self):
+        reader = self._original_reader
+        if (self._reader is not reader or self._failed or reader.failed or reader.closed or reader.restored):
+            raise Rejected("write-set-verifier-unavailable")
+        # Bind the configured reader on first use, then retain it across file,
+        # role and bind-source observations. No callbacks run in this check.
+        if self._binding is None:
+            self._binding = (reader.pin, reader.check, reader.clock, reader.backup, reader.backup.approval,
+                             reader.roots, {name: (handle, handle.approval) for name, handle in reader.roots.items()})
+        pin, check, clock, backup, approval, roots, handles = self._binding
+        if (reader.pin != pin or reader.check is not check or reader.clock is not clock
+                or reader.backup is not backup or backup.approval != approval or reader.roots is not roots
+                or set(roots) != set(handles)
+                or any(roots[name] is not handle or handle.approval != approved
+                       for name, (handle, approved) in handles.items())):
+            raise Rejected("write-set-verifier-boundaries-changed")
+        return reader
 
     def _observe(self, intent, deadline, capture, validate=None):
+        reader = self._original_reader
         try:
-            if self._failed:
-                raise Rejected("write-set-verifier-unavailable")
+            if self._active:
+                raise Rejected("write-set-verifier-reentrant-observation")
+            self._active = True
+            self._bound_reader()
             original = canonical(intent)
             value = decode(original)
-            reader = self._reader
             reader._bound(value, deadline)
+            self._bound_reader()
             result = capture(reader, value)
+            self._bound_reader()
             # Fence/clock/descriptor callbacks are external boundaries. Do not
             # accept a caller's changed intent after reading the original files.
             reader._current(deadline)
-            if (self._reader is not reader or self._failed or reader.failed
-                    or canonical(intent) != original or reader.intent_sha256 != digest(original)):
+            self._bound_reader()
+            if canonical(intent) != original or reader.intent_sha256 != digest(original):
                 raise Rejected("write-set-verifier-original-intent-changed")
             if validate is not None:
                 validate(reader)
             return result
         except BaseException:
-            self._failed = self._reader.failed = True
+            self._failed = reader.failed = True
             raise
+        finally:
+            self._active = False
 
     def verify_files(self, intent, *, deadline):
         def capture(reader, value):
@@ -144,7 +169,7 @@ class WriteSetVerifier:
         File binds, volumes, subpaths and overlapping destinations are unsupported.
         """
         saved = copy.deepcopy(mounts)
-        original_reader = self._reader
+        original_reader = self._original_reader
         roots = dict(original_reader.roots)
         approvals = {name: handle.approval for name, handle in roots.items()}
 

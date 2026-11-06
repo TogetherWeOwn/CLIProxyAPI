@@ -154,6 +154,122 @@ class WriteSetVerifierTests(unittest.TestCase):
         with self.open() as observer, self.assertRaises(durable.Rejected):
             observer.capture_files(self.fx.value, {"config": self.roles["config"], "alias": self.roles["config"]}, deadline=1100)
 
+    def test_trailing_callback_cannot_replace_observer_boundaries(self):
+        for field in ("check", "clock", "pin", "backup", "roots"):
+            with self.subTest(field=field), self.open() as observer:
+                reader = observer._reader
+                scanned, changed = [], []
+                verify = reader._verify_all
+                def capture(deadline):
+                    result = verify(deadline)
+                    scanned.append("complete-scan")
+                    return result
+                def check(*, deadline):
+                    if len(scanned) == 2 and not changed:
+                        changed.append(field)
+                        if field == "check":
+                            reader.check = lambda **kwargs: False
+                        elif field == "clock":
+                            reader.clock = lambda: 1
+                        elif field == "pin":
+                            reader.pin = "0" * 64
+                        elif field == "backup":
+                            reader.backup = copy.copy(reader.backup)
+                        else:
+                            reader.roots = dict(reader.roots)
+                    return True
+                reader.check = check
+                with patch.object(reader, "_verify_all", side_effect=capture), self.assertRaises(durable.Rejected):
+                    observer.verify_files(self.fx.value, deadline=1100)
+                self.assertEqual(scanned, ["complete-scan", "complete-scan"])
+                self.assertEqual(changed, [field])
+                with self.assertRaises(durable.Rejected):
+                    observer.verify_files(self.fx.value, deadline=1100)
+
+    def test_original_configuration_is_retained_between_observations(self):
+        for field in ("check", "clock", "pin", "backup", "roots"):
+            with self.subTest(field=field), self.open() as observer:
+                observer.verify_files(self.fx.value, deadline=1100)
+                reader = observer._reader
+                original = getattr(reader, field)
+                replacements = {"check": lambda **kwargs: True, "clock": lambda: self.fx.time,
+                                "pin": "0" * 64, "backup": copy.copy(reader.backup), "roots": dict(reader.roots)}
+                setattr(reader, field, replacements[field])
+                with patch.object(reader, "_verify_all", side_effect=AssertionError("rebound observer read")), self.assertRaises(
+                        durable.Rejected):
+                    observer.verify_files(self.fx.value, deadline=1100)
+                setattr(reader, field, original)
+                with self.assertRaises(durable.Rejected):
+                    observer.verify_files(self.fx.value, deadline=1100)
+
+    def test_role_and_bind_views_retain_the_same_configuration(self):
+        for view in ("roles", "binds"):
+            with self.subTest(view=view), self.open() as observer:
+                observer.verify_files(self.fx.value, deadline=1100)
+                observer._reader.clock = lambda: self.fx.time
+                mounts = [{"Type": "bind", "Source": self.fx.approvals["config"].path,
+                           "Destination": "/synthetic-config", "Mode": "ro", "RW": False, "Propagation": "rprivate"}]
+                with self.assertRaises(durable.Rejected):
+                    if view == "roles":
+                        observer.capture_files(self.fx.value, self.roles, deadline=1100)
+                    else:
+                        observer.verify_bind_sources(self.fx.value, mounts, deadline=1100)
+
+    def test_caught_reentrant_observation_poisoning_is_sticky(self):
+        with self.open() as observer:
+            reached = []
+            def check(*, deadline):
+                if not reached:
+                    reached.append("reentrant-call")
+                    with self.assertRaises(durable.Rejected):
+                        observer.capture_files(self.fx.value, self.roles, deadline=deadline)
+                return True
+            reader = observer._reader
+            reader.check = check
+            with self.assertRaises(durable.Rejected):
+                observer.verify_files(self.fx.value, deadline=1100)
+            self.assertEqual(reached, ["reentrant-call"])
+            self.assertTrue(reader.failed)
+            with self.assertRaises(durable.Rejected):
+                observer.verify_files(self.fx.value, deadline=1100)
+
+    def test_reader_replacement_poisons_the_original_without_dereferencing_replacement(self):
+        for view in ("files", "roles", "binds"):
+            with self.subTest(view=view), self.open() as observer:
+                reader = observer._reader
+                observer._reader = object()
+                with self.assertRaises(durable.Rejected):
+                    if view == "files":
+                        observer.verify_files(self.fx.value, deadline=1100)
+                    elif view == "roles":
+                        observer.capture_files(self.fx.value, self.roles, deadline=1100)
+                    else:
+                        observer.verify_bind_sources(self.fx.value, [], deadline=1100)
+                self.assertTrue(reader.failed)
+                observer._reader = reader
+                with self.assertRaises(durable.Rejected):
+                    observer.verify_files(self.fx.value, deadline=1100)
+
+    def test_changed_root_handle_in_original_mapping_refuses(self):
+        with self.open() as observer:
+            observer.verify_files(self.fx.value, deadline=1100)
+            reader = observer._reader
+            original = reader.roots["config"]
+            reader.roots["config"] = copy.copy(original)
+            with self.assertRaises(durable.Rejected):
+                observer.capture_files(self.fx.value, self.roles, deadline=1100)
+            reader.roots["config"] = original
+            with self.assertRaises(durable.Rejected):
+                observer.verify_files(self.fx.value, deadline=1100)
+
+    def test_observer_cannot_be_reused_after_reader_restoration(self):
+        with self.open() as observer:
+            observer.verify_files(self.fx.value, deadline=1100)
+            observer._reader.restore_complete(self.fx.value, deadline=1100)
+            with self.assertRaises(durable.Rejected):
+                observer.verify_files(self.fx.value, deadline=1100)
+        self.fx.assert_baseline()
+
     def test_mutating_returned_capture_or_receipt_cannot_change_next_observation(self):
         with self.open() as observer:
             files = observer.capture_files(self.fx.value, self.roles, deadline=1100)

@@ -311,6 +311,10 @@ as a substitute for the accepted production binaries.
   no service start or semantic oracle. A separate `open_write_set_verifier` view
   opens fresh approved handles, verifies complete current files and supplies
   semantic-helper input without restoring or trusting a restorer's success flag.
+  First observation binds its configured baseline pin, fence/clock callbacks and
+  approved backup/root handles across all three views. Replacement, mutation-use
+  or caught reentrant observation poisons the observer; no success receipt can
+  be returned after a trailing callback changes that binding.
   It is not an OS sandbox or an authenticated independent observer service; all
   fence/runtime/readiness and actual reader-permission prerequisites remain.
   Real multi-root/process/SIGKILL and storage
