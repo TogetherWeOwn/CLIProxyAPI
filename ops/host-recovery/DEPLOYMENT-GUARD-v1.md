@@ -113,6 +113,55 @@ namespace inode/content correspondence, executable/plugin discovery and readines
 remain missing independent oracle facts. No missing receipt fact may be filled
 from this optional flag, and no start grant follows from it.
 
+## Optional same-view daemon observation
+
+`daemon_view=ProcessMountView` is an additional, restricted option requiring the
+baseline source observer above. Its caller must supply an **already authenticated**
+daemon PID and pidfd, plus a check that retains the original daemon transport,
+manager identity and complete fence. This module does not discover/authenticate a
+daemon from a PID, label, environment variable, inspect reply or current pathname.
+No operational service currently provisions this boundary; passing an arbitrary
+process's pidfd is not daemon authentication.
+
+`open_process_mount_view` duplicates that supplied pidfd, checks its kernel type,
+fdinfo PID and liveness, and anchors a proc directory while the pidfd remains live.
+It opens kernel mount-namespace and root handles for the caller and that process.
+Both namespace identities must agree (`NS_GET_NSTYPE` must identify a mount
+namespace), and both root identities must agree by device, inode **and mount ID**.
+Same inode through a different root mount is insufficient. Different namespaces,
+chroots, unsupported kernels, unavailable procfs/nsfs or denied reads refuse;
+there is no setns, numeric-PID fallback, permission adjustment or path repair.
+
+The first matching namespace/root handles remain open for the context's lifetime,
+preventing their identity reuse from silently replacing the original view. Fresh
+point observations bracket the baseline source reads. The final daemon projection
+follows the last source/view callback. Process death, identity/view drift, context closure, failed deadline,
+nonliteral/failed check, callback replacement or caught reentrancy poisons the
+observer. Its retained descriptors close on every context exit; it never closes
+the supplied caller-owned pidfd. Public output has only a view digest and explicit
+non-authorizing facts, not raw proc paths or process/root identity tuples.
+
+The deployment result's `daemon_source_namespace_verified` reports whether this
+optional view was actually checked, not whether a daemon identity was independently
+provisioned. Removing/replacing a configured view before one-shot old-start
+revalidation refuses. Without the option that field is false.
+
+**Same namespace/root does not verify container-mounted bytes.** Matching point
+observations establish a shared path-resolution view only at the observed points;
+they do not establish historical mount provenance when Docker created a bind,
+continuous namespace/root/submount/writer exclusion, a stopped container's future
+mount tree, image-layer integrity, plugin discovery, readiness, transport
+provenance or any missing baseline-oracle fact. A daemon in an intentionally
+private namespace remains unsupported by this option, not permission to weaken
+its sandbox or reseal its approval. The complete external fence and independent
+container/runtime verification remain mandatory. No start or settlement is enabled.
+
+Tests authored for this option use real own-process/child pidfds and proc/nsfs
+handles with scripted authority callbacks, plus scripted namespace/root-mismatch,
+read-fault and deployment fixtures. They are not real-daemon namespace qualification,
+privileged namespace-switch tests or full-package recovery evidence. Execution and
+CI results must be recorded separately; authored tests are not passing evidence.
+
 ## What this does not prove
 
 A matching projection cannot establish mounted file contents/metadata, effective
