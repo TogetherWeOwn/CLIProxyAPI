@@ -14,6 +14,10 @@ original intent, and captures role bytes from the **current root scans**, not it
 backup blobs. The aggregate inventory still includes unrelated providers, exact
 nine selected auths, original metadata and all other managed roots. Unsupported
 links/metadata, unknown additions, root replacement or read uncertainty refuse.
+Alternatively, a fresh `WriteSetVerifier` supplies independently reopened approved
+handles and complete baseline observations without invoking restoration or trusting
+its progress flag. This read-only API is not an OS sandbox or an authenticated
+observer service; both handles and the external fence still need provisioning.
 
 `RestoredInputSnapshot` requires four distinct approved `(root, relative-file)`
 roles: `config`, `compose_source`, `frozen_rendered_compose`, and `environment`.
@@ -73,6 +77,12 @@ intent/receipt is required, the pending call is consumed and the guard runs agai
 Changed files/fence, incomplete oracle, helper failure, deadline uncertainty or a
 lost start response cannot reuse the call. The actual start boundary must still
 revalidate manager/daemon/writer fence, effective mounts and all owned objects.
+The wrapper snapshots the receipt immediately and retains the same oracle/gate
+instances. It rejects caller-intent drift, mutation of a callback's intent copy,
+receipt edits during the last gate, boundary replacement, or a caught reentrant
+refusal. Verification is never rebound to changed inputs; only the original
+snapshots can reach the one-shot delegation. These local identity checks do not
+implement authentication, continuous writer exclusion or the independent oracle.
 
 The coordinator's original arm/deadlines, independent alert attempt and durable
 terminal-write rules are unchanged. Candidate guards are not required to restore

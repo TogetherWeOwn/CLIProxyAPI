@@ -104,11 +104,21 @@ class RecoveredInputBoundary:
             if self.attempted or self.failed:
                 raise Rejected("baseline-input-oracle-once-only")
             self.attempted = True
-            receipt = self.boundary.verify_baseline_stopped(copy.deepcopy(intent), deadline=deadline)
-            validate_baseline_receipt(intent, receipt)
-            if self.gate.verify(copy.deepcopy(intent), deadline=deadline) is not True:
+            value, boundary, gate = copy.deepcopy(intent), self.boundary, self.gate
+            original = canonical(value)
+            observed = copy.deepcopy(value)
+            receipt = copy.deepcopy(boundary.verify_baseline_stopped(observed, deadline=deadline))
+            validate_baseline_receipt(value, receipt)
+            if (canonical(intent) != original or canonical(observed) != original
+                    or self.failed or self.boundary is not boundary or self.gate is not gate):
+                raise Rejected("baseline-input-original-oracle-changed")
+            observed = copy.deepcopy(value)
+            if gate.verify(observed, deadline=deadline) is not True:
                 raise Rejected("baseline-input-gate-unconfirmed")
-            self.pending = (digest(canonical(intent)), canonical(receipt))
+            if (canonical(intent) != original or canonical(observed) != original
+                    or self.failed or self.boundary is not boundary or self.gate is not gate):
+                raise Rejected("baseline-input-original-oracle-changed")
+            self.pending = (digest(original), canonical(receipt), boundary, gate)
             return copy.deepcopy(receipt)
         except Exception:
             self.failed = True
@@ -116,13 +126,21 @@ class RecoveredInputBoundary:
 
     def start_old(self, intent, receipt, *, deadline):
         try:
+            value, saved = copy.deepcopy(intent), copy.deepcopy(receipt)
             if (self.failed or self.pending is None
-                    or self.pending != (digest(canonical(intent)), canonical(receipt))):
+                    or self.pending[:2] != (digest(canonical(value)), canonical(saved))
+                    or self.pending[2] is not self.boundary or self.pending[3] is not self.gate):
                 raise Rejected("baseline-input-original-oracle-required")
             self.pending = None  # Never reuse a grant after a lost start response.
-            if self.gate.verify(copy.deepcopy(intent), deadline=deadline) is not True:
+            boundary, gate = self.boundary, self.gate
+            observed = copy.deepcopy(value)
+            if gate.verify(observed, deadline=deadline) is not True:
                 raise Rejected("baseline-input-gate-unconfirmed")
-            return self.boundary.start_old(copy.deepcopy(intent), copy.deepcopy(receipt), deadline=deadline)
+            if (canonical(intent) != canonical(value) or canonical(observed) != canonical(value)
+                    or canonical(receipt) != canonical(saved)
+                    or self.failed or self.boundary is not boundary or self.gate is not gate):
+                raise Rejected("baseline-input-original-oracle-changed")
+            return boundary.start_old(value, saved, deadline=deadline)
         except Exception:
             self.failed = True
             raise Rejected("baseline-input-old-start-unconfirmed") from None

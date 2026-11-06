@@ -141,6 +141,55 @@ class DeploymentTests(unittest.TestCase):
             self.verify()
         self.assertEqual(self.checks, 3)
 
+    def test_final_projection_cannot_change_original_binding(self):
+        for target in ("approval", "intent", "object", "image"):
+            with self.subTest(target=target):
+                self.setUp()
+                reached = []
+                def mutate(argv):
+                    if len(self.docker.calls) != 6:
+                        return
+                    self.assertEqual(argv[-2], "--format=" + deployment.FORMAT)
+                    reached.append(target)
+                    if target == "approval":
+                        self.gate.approval = replace(self.gate.approval, intent_sha256="0" * 64)
+                    elif target == "intent":
+                        self.value["package_sha256"] = "0" * 64
+                    elif target == "object":
+                        self.gate.objects.old_object_id = "0" * 64
+                    else:
+                        self.gate.objects.old_image_id = "0" * 64
+                self.docker.hook = mutate
+                with self.assertRaises(durable.Rejected):
+                    self.verify()
+                self.assertEqual(reached, [target])
+                self.docker.hook = None
+                with self.assertRaises(durable.Rejected):
+                    self.verify()
+
+    def test_final_projection_cannot_replace_the_object_reader(self):
+        original = self.gate.objects
+        def replace_reader(argv):
+            if len(self.docker.calls) == 6:
+                self.gate.objects = copy.copy(original)
+        self.docker.hook = replace_reader
+        with self.assertRaises(durable.Rejected):
+            self.verify()
+        self.assertIsNot(self.gate.objects, original)
+        self.assertEqual(len(self.docker.calls), 6)
+
+    def test_final_deadline_read_cannot_change_the_original_binding(self):
+        reached = []
+        def clock():
+            if len(self.docker.calls) == 6:
+                reached.append("final-clock")
+                self.value["package_sha256"] = "0" * 64
+            return self.time
+        self.gate.clock = clock
+        with self.assertRaises(durable.Rejected):
+            self.verify()
+        self.assertEqual(reached, ["final-clock"])
+
     def test_false_numeric_or_lost_fence_poison_gate(self):
         for flag in (False, 1, None):
             with self.subTest(flag=flag):

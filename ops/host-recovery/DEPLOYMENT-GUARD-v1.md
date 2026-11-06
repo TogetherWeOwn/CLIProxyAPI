@@ -44,7 +44,10 @@ explicit fence callback. The last state and projection reads follow the last
 external callback; callback changes to identity/approval/intent cannot become new
 approval. Stopped-state observation retains `DockerObjects`' exact image,
 restart=no, no auto-removal and unambiguous-state checks. Every failure poisons the
-gate; a later green read does not reuse uncertain verification.
+gate; a later green read does not reuse uncertain verification. The final daemon
+projection and deadline read are also followed by a local binding check: neither
+may change the approval, original intent, old object/image IDs or reader instance.
+This does not add another external fence callback or turn point reads into exclusion.
 
 `RecoveredDeploymentBoundary` supplements an existing independent baseline oracle.
 It validates that oracle's complete receipt first, captures its own receipt copy,
@@ -53,6 +56,12 @@ requires the original intent/receipt and reruns the deployment gate. The validat
 receipt is copied before external callbacks. Lost start response or
 fence/deployment failure cannot reuse the delegation. It can be composed with
 `RecoveredInputBoundary`; neither wrapper manufactures any missing oracle fact.
+Both wrappers retain the original oracle/gate instances through the one-shot
+handoff. They detach the receipt before any later callback, pass separate intent
+copies to the oracle and gate, and reject changed caller/callback inputs or a
+caught reentrant refusal. The start callback receives the originally verified
+intent/receipt snapshots, never a later borrowed version. Swapping a boundary or
+gate before or during the handoff refuses rather than transferring verification.
 The actual start boundary must still revalidate all requirements atomically under
 the enforced fence. No new start command is provided here.
 

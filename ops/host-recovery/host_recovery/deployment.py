@@ -70,24 +70,25 @@ class OldDeploymentGate:
         try:
             if self.failed:
                 raise Rejected("deployment-gate-unavailable")
-            value, approval = copy.deepcopy(intent), self.approval
+            value, approval, objects = copy.deepcopy(intent), self.approval, self.objects
             validate_intent(value)
             remaining = Deadline(self.clock, deadline).remaining
 
+            def bound():
+                if (self.approval != approval or self.objects is not objects
+                        or digest(canonical(intent)) != approval.intent_sha256
+                        or digest(canonical(value)) != approval.intent_sha256
+                        or objects.old_object_id != value["old_object_id"]
+                        or objects.old_image_id != approval.old_image_id):
+                    raise Rejected("deployment-approval-or-fence-changed")
+
             def current():
                 remaining()
-                if (self.approval != approval or digest(canonical(intent)) != approval.intent_sha256
-                        or digest(canonical(value)) != approval.intent_sha256
-                        or self.objects.old_object_id != value["old_object_id"]
-                        or self.objects.old_image_id != approval.old_image_id
-                        or self.check(deadline=deadline) is not True):
-                    raise Rejected("deployment-approval-or-fence-changed")
-                # The callback may itself change these borrowed objects.
-                if (self.approval != approval or digest(canonical(intent)) != approval.intent_sha256
-                        or self.objects.old_object_id != value["old_object_id"]
-                        or self.objects.old_image_id != approval.old_image_id):
+                bound()
+                if self.check(deadline=deadline) is not True:
                     raise Rejected("deployment-approval-or-fence-changed")
                 remaining()
+                bound()
 
             current()
             for _ in range(2):
@@ -103,6 +104,7 @@ class OldDeploymentGate:
                 raise Rejected("deployment-old-object-not-stopped")
             self._projection(value["old_object_id"], approval, deadline)
             remaining()
+            bound()
             return {"schema": "host-recovery-deployment-result-v1", "object_id": value["old_object_id"],
                     "projection_sha256": approval.projection_sha256,
                     "deployment_matches": True, "start_authorized": False}
@@ -124,10 +126,20 @@ class RecoveredDeploymentBoundary:
             if self.attempted or self.failed:
                 raise Rejected("deployment-oracle-once-only")
             self.attempted = True
-            receipt = copy.deepcopy(self.boundary.verify_baseline_stopped(copy.deepcopy(intent), deadline=deadline))
-            validate_baseline_receipt(intent, receipt)
-            self.gate.verify(intent, deadline=deadline)
-            self.pending = (digest(canonical(intent)), canonical(receipt))
+            value, boundary, gate = copy.deepcopy(intent), self.boundary, self.gate
+            original = canonical(value)
+            observed = copy.deepcopy(value)
+            receipt = copy.deepcopy(boundary.verify_baseline_stopped(observed, deadline=deadline))
+            validate_baseline_receipt(value, receipt)
+            if (canonical(intent) != original or canonical(observed) != original
+                    or self.failed or self.boundary is not boundary or self.gate is not gate):
+                raise Rejected("deployment-original-oracle-changed")
+            observed = copy.deepcopy(value)
+            gate.verify(observed, deadline=deadline)
+            if (canonical(intent) != original or canonical(observed) != original
+                    or self.failed or self.boundary is not boundary or self.gate is not gate):
+                raise Rejected("deployment-original-oracle-changed")
+            self.pending = (digest(original), canonical(receipt), boundary, gate)
             return copy.deepcopy(receipt)
         except Exception:
             self.failed = True
@@ -137,11 +149,18 @@ class RecoveredDeploymentBoundary:
         try:
             value, saved = copy.deepcopy(intent), copy.deepcopy(receipt)
             if (self.failed or self.pending is None
-                    or self.pending != (digest(canonical(value)), canonical(saved))):
+                    or self.pending[:2] != (digest(canonical(value)), canonical(saved))
+                    or self.pending[2] is not self.boundary or self.pending[3] is not self.gate):
                 raise Rejected("deployment-original-oracle-required")
             self.pending = None
-            self.gate.verify(intent, deadline=deadline)
-            return self.boundary.start_old(value, saved, deadline=deadline)
+            boundary, gate = self.boundary, self.gate
+            observed = copy.deepcopy(value)
+            gate.verify(observed, deadline=deadline)
+            if (canonical(intent) != canonical(value) or canonical(observed) != canonical(value)
+                    or canonical(receipt) != canonical(saved)
+                    or self.failed or self.boundary is not boundary or self.gate is not gate):
+                raise Rejected("deployment-original-oracle-changed")
+            return boundary.start_old(value, saved, deadline=deadline)
         except Exception:
             self.failed = True
             raise Rejected("deployment-old-start-unconfirmed") from None
