@@ -1,11 +1,13 @@
 """Original-operation forward mask/cancel/reload/stop/KILL composition.
 
-Embedding only: no IPC or runner enables it. A stopped masked projection and an
+Explicit embedding/containment IPC only; no operational runner enables it.
+A stopped masked projection and an
 exact stop completion are not actual-exec exclusion, cgroup quiescence, complete
 activation ownership, cold-runtime reconciliation, drain or recovery authority.
 """
 import re
 
+from .broker_authority import SupervisorPeerAuthority
 from .broker_operations import OperationJournal
 from .durable import Rejected, canonical, decode, digest
 from .job_cancellation import WaitingStartCancellation
@@ -27,13 +29,21 @@ class _MaskedFixedStop:
     target_schema = None
     observation_schema = None
 
-    def __init__(self, *, journal, masks, jobs):
+    def __init__(self, *, journal, masks, jobs, authority=None):
+        if authority is not None and (not isinstance(authority, SupervisorPeerAuthority)
+                or not isinstance(journal, OperationJournal) or authority._binding != journal._binding):
+            raise Rejected("masked-stop-original-peer-authority-required")
+        self.authority = self._original_authority = authority
+        self._returned_raw = None
+        self._resources_closed = False
         if (not isinstance(journal, OperationJournal) or not isinstance(masks, PersistentUnitMasks)
                 or not isinstance(jobs, self.jobs_type) or jobs.journal is not journal
                 or masks.units != jobs.units or masks.attempted or jobs._attempted):
             raise Rejected("masked-forward-original-unused-boundaries-required")
         self.journal, self.masks, self.jobs = journal, masks, jobs
         self.session = jobs.session
+        if authority is not None and self.session.authority is not authority:
+            raise Rejected("masked-stop-manager-original-peer-required")
         self.cancellation = WaitingStartCancellation(journal=journal, masks=masks, session=self.session)
         self.reload = ManagerMaskReload(journal=journal, masks=masks, session=self.session)
         self._original = (journal, masks, jobs, self.session, self.cancellation, self.reload)
@@ -59,13 +69,22 @@ class _MaskedFixedStop:
         if (self._mode != (self.method, self.roles, self.jobs_type, self.target_schema, self.observation_schema)
                 or self.failed or self._configuration != self.configuration() or self._operation is None
                 or (self.journal, self.masks, self.jobs, self.session, self.cancellation, self.reload) != self._original
-                or self.jobs.session is not self.session or self.jobs.failed):
+                or self.jobs.session is not self.session or self.jobs.failed
+                or self.authority is not self._original_authority):
             raise Rejected("masked-forward-configuration-changed")
+        if self.authority is not None:
+            self.authority.observe(deadline=self.session.deadline)
         operation = decode(self._operation)
         self.journal._current()
         self.journal._time(self.session.deadline)
+        returned = self.method in self.journal._returned
+        expected_return = canonical({"schema": "host-recovery-broker-return-v1",
+            "operation_id": operation["operation_id"], "result": "returned", "pending_drained": False})
+        saved_return = self.journal._records.get("operation-%02d-return.json" % operation["sequence"])
         if (self._operation != self.journal._pending.get(self.method)
-                or self.method in self.journal._returned
+                or returned and (not self.completed or self._returned_raw != expected_return
+                                 or saved_return is None or saved_return[0] != expected_return)
+                or not returned and self._returned_raw is not None
                 or operation["deadline"] != self.session.deadline or operation["target_sha256"] != self.target_sha256):
             raise Rejected("masked-forward-original-pending-required")
         self.session.identity()
@@ -73,9 +92,56 @@ class _MaskedFixedStop:
             self.masks.observe(current=self.session._current)
         self.journal._current()
         self.journal._time(self.session.deadline)
-        if (self._configuration != self.configuration()
+        if self.authority is not None:
+            self.authority.observe(deadline=self.session.deadline)
+        self.journal._time(self.session.deadline)
+        if (self._configuration != self.configuration() or self.authority is not self._original_authority
                 or (self.journal, self.masks, self.jobs, self.session, self.cancellation, self.reload) != self._original):
             raise Rejected("masked-forward-trailing-configuration-changed")
+
+    def record_return(self):
+        """Persist the completed submission, not drain or installation settlement.
+
+        The connected broker calls this before replying. Recheck the live fixed
+        manager/process observations after return durability; a lost peer or disk
+        fault leaves the original operation consumed, never replayable.
+        """
+        with self.journal._mutex:
+            try:
+                if not self.completed or self._returned_raw is not None:
+                    raise Rejected("masked-stop-completed-unreturned-operation-required")
+                self.revalidate_completed()
+                value = self.journal.returned(decode(self._operation), result="returned")
+                self._returned_raw = canonical(value)
+                self.revalidate_completed()
+                return decode(self._returned_raw)
+            except Exception:
+                self.failed = self.journal._failed = self.session.failed = True
+                raise Rejected("masked-stop-return-unconfirmed") from None
+
+    def revalidate_completed(self):
+        """Read-only post-submission checks, including after the outer fsync/ACK."""
+        if not self.completed or self._resources_closed:
+            raise Rejected("masked-stop-live-completed-sequence-required")
+        self._execution_current()
+        self.session._fixed_jobs_absent()
+        for role in self.roles:
+            path = self.session._fixed_unit_paths[role]
+            row = {}
+            for key, interface, kind in (("Id", "Unit", "s"), ("LoadState", "Unit", "s"),
+                    ("ActiveState", "Unit", "s"), ("SubState", "Unit", "s"),
+                    ("MainPID", "Service", "u"), ("Job", "Unit", "(uo)")):
+                self._current()
+                row[key] = self.session._call(self.session.owner, "org.freedesktop.DBus.Properties", "Get", "ss",
+                    (MANAGER + "." + interface, key), "v:" + kind, path=path)[0]
+                self._current()
+            if (row["Id"] != self.jobs.units[role].unit or row["LoadState"] != "masked"
+                    or (row["ActiveState"], row["SubState"]) not in (("inactive", "dead"), ("failed", "failed"))
+                    or type(row["MainPID"]) is not int or row["MainPID"] != 0
+                    or row["Job"] != (0, "/") or type(row["Job"][0]) is not int):
+                raise Rejected("masked-stop-trailing-inactive-projection-unconfirmed")
+        self._final_check()
+        self._execution_current()
 
     def _execution_snapshot(self):
         starts = {}
@@ -208,12 +274,21 @@ class _MaskedFixedStop:
                 self.failed = self._original[0]._failed = self._original[3].failed = True
                 raise Rejected("masked-forward-stop-unconfirmed") from None
             finally:
-                try:
-                    self._release()
-                except Exception:
-                    self.failed = self._original[0]._failed = self._original[3].failed = True
-                    self.completed = False
-                    raise Rejected("masked-forward-resource-release-unconfirmed") from None
+                # A connected containment server retains process witnesses through
+                # return fsync and ACK revalidation, then always closes them.
+                if self.authority is None or not self.completed:
+                    self.close()
+
+    def close(self):
+        if self._resources_closed:
+            return
+        self._resources_closed = True
+        try:
+            self._release()
+        except Exception:
+            self.failed = self._original[0]._failed = self._original[3].failed = True
+            self.completed = False
+            raise Rejected("masked-forward-resource-release-unconfirmed") from None
 
 
 class MaskedForwardStop(_MaskedFixedStop):

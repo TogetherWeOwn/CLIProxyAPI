@@ -18,6 +18,12 @@ original outer pending operation and all runner/IPC denies. Matching completion
 and inactive mask observations are not all-job retirement, actual-exec exclusion,
 cgroup quiescence, drain or recovery/start authority.
 
+The separate opt-in [connected containment protocol](CONTAINMENT-IPC-v1.md)
+joins these fixed sequences to original kernel peer/flock/input authority and a
+separate durable submission return. It accepts no per-packet effect parameters
+and grants no complete fence, restoration, start or settlement. No operational
+entrypoint enables it; the observation-only protocol retains its effect denies.
+
 The separate [whole-runtime inventory observation](QUARANTINE-INVENTORY-v1.md)
 compares unfiltered full daemon IDs and fixed containerd namespace/task metadata
 with the protected original journal. It remains read-only/non-authorizing and

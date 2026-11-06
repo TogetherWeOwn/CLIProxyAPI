@@ -269,7 +269,11 @@ class ManagerJobSession:
     Opening/subscribing is non-mutating. stop() is only for a journaled fixed
     runtime stop and must be called after durable pending publication.
     """
-    def __init__(self, *, library, library_sha256, units, deadline, clock, check):
+    def __init__(self, *, library, library_sha256, units, deadline, clock, check, authority=None):
+        from .broker_authority import SupervisorPeerAuthority
+        if authority is not None and not isinstance(authority, SupervisorPeerAuthority):
+            raise Rejected("manager-bus-original-peer-authority-required")
+        self.authority = self._original_authority = authority
         if (not isinstance(library, ProtectedFile) or library.uid != 0 or library.gid != 0
                 or not fixed_roles(units)
                 or any(not isinstance(unit, UnitBinding) for unit in units.values())
@@ -325,7 +329,7 @@ class ManagerJobSession:
     def _current(self):
         from dataclasses import asdict
         now = self.clock()
-        if (self.failed or self._thread != threading.get_ident()
+        if (self.failed or self._thread != threading.get_ident() or self.authority is not self._original_authority
                 or type(now) not in (float, int) or not math.isfinite(now)
                 or self.deadline != self._original_deadline
                 or type(self.deadline) not in (float, int) or not math.isfinite(self.deadline)
@@ -337,6 +341,8 @@ class ManagerJobSession:
         self._last_clock = now
         self.library.validate()
         self.check()
+        if self.authority is not None:
+            self.authority.observe(deadline=self.deadline)
         # The authority check itself can consume the last allowance.
         after = self.clock()
         if type(after) not in (float, int) or not math.isfinite(after) or after < now or after >= self.deadline:
@@ -344,7 +350,7 @@ class ManagerJobSession:
             raise Rejected("manager-bus-deadline-lost")
         self._last_clock = after
         self.library.validate()
-        if (self.deadline != self._original_deadline
+        if (self.deadline != self._original_deadline or self.authority is not self._original_authority
                 or self._units != canonical({role: asdict(unit) for role, unit in self.units.items()})):
             self.failed = True
             raise Rejected("manager-bus-trailing-configuration-changed")

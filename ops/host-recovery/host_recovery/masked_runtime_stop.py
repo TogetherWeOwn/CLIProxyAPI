@@ -1,6 +1,7 @@
 """Original-pending dedicated-runtime masks, stop completions and slice kill.
 
-Embedding only; no IPC/runner enables this adapter. Trusted provisioning must
+Explicit embedding/containment IPC only; no operational runner enables it.
+Trusted provisioning must
 bind every runtime/shim/task and activation/writer path to the approved domain.
 A recursive kill and repeated empty observations do not establish that coverage,
 old-epoch death, quarantine reconciliation, pending drain or recovery authority.
@@ -22,7 +23,7 @@ class MaskedRuntimeStop(_MaskedFixedStop):
     target_schema = "host-recovery-masked-runtime-stop-target-v1"
     observation_schema = "host-recovery-masked-runtime-stop-observation-v1"
 
-    def __init__(self, *, journal, masks, jobs, domain):
+    def __init__(self, *, journal, masks, jobs, domain, authority=None):
         if (not isinstance(journal, OperationJournal) or not isinstance(domain, RuntimeDomain)
                 or not isinstance(jobs, RuntimeStopJobs)
                 or any(unit.cgroup != domain.cgroup + "/" + unit.unit for unit in jobs.units.values())
@@ -36,7 +37,7 @@ class MaskedRuntimeStop(_MaskedFixedStop):
         self._domain_killed = False
         self._witness = None
         domain.current()
-        super().__init__(journal=journal, masks=masks, jobs=jobs)
+        super().__init__(journal=journal, masks=masks, jobs=jobs, authority=authority)
 
     def configuration(self):
         value = decode(super().configuration())

@@ -74,10 +74,14 @@ are public. These volatile samples are not continuous actual-exec exclusion,
 control-process/writer coverage or a reconstructible crash witness; see the
 [shared observation limits](MASKED-FORWARD-STOP-v1.md#fixed-unit-execution-timestamp-observations).
 
-The adapter never publishes the **outer** cold-quiesce return or drains the
-operation. Lost replies, persistence faults and partial effects permanently close
-this instance, its manager session and journal. No replay, repair, new epoch,
-deadline renewal, restoration, service start or settlement follows.
+`stop` alone never publishes the **outer** cold-quiesce return or drains the
+operation. The optional [connected containment protocol](CONTAINMENT-IPC-v1.md)
+can separately persist that submission return through `record_return`, with fresh
+post-fsync/ACK observations. An authority-bound sequence retains its witness until
+the server closes it; direct embedders must close it on every exit. Lost replies,
+persistence faults and partial effects permanently close the exchange and journal.
+No replay, repair, new epoch, deadline renewal, restoration, service start or
+settlement follows. A returned submission still never means drained.
 
 ## Retained recursive-kill history
 
