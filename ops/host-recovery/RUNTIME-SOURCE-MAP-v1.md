@@ -164,7 +164,7 @@ activation/writer/old-epoch exclusion, all-job retirement, cold/quarantine
 registration/drain, reboot, operational authority or full recovery acceptance.
 Current supervisor/worker/IPC execution, restore/start and settlement denies stay.
 
-### Daemon-only stop counterexample (new assertions pending Actions)
+### Daemon-only stop counterexample (qualified component at exact source)
 
 The next fixture revision adds a distinct authenticated daemon stop before the
 recursive-domain kill. It copies the installed root-owned libsystemd bytes into
@@ -194,8 +194,17 @@ as whole-service quiescence, not complete activation exclusion or a recovery
 acceptance result. No masked two-runtime-role composition, Docker restart/restore
 closure, durable object registration, reboot, pending drain, baseline/readiness
 oracle, producer/replay completeness, operational runner or measured recovery cap
-is qualified by it. New assertions require exact-head Actions evidence before a
-pass is claimed; no local native-library/manager/runtime execution is permitted.
+is qualified by it. Exact source `3c698064a41531830f5cb8aee8b377a20e332a45`
+passed all seven jobs in [Actions 42129659342](https://github.com/TogetherWeOwn/CLIProxyAPI/actions/runs/42129659342),
+including the runtime counterexample and both cleanup paths, 1,506 ordinary
+Python methods (21 intentional skips), 14 separate private-bus methods and seven
+real-manager methods. No local native-library/manager/runtime execution occurred.
+
+The next Docker integration witness is described in
+[DOCKER-RUNTIME-TEST-v1.md](DOCKER-RUNTIME-TEST-v1.md). It uses the previously
+observed daemon/client byte pins, not new production provenance or installation
+authority. Its source-level assertions require their own exact-head Actions
+results; no Docker qualification pass follows from the containerd result.
 
 REA angle: use the shipped tools' own build identifiers and the exact public
 upstream source to identify discovery, socket placement, cgroup migration and
