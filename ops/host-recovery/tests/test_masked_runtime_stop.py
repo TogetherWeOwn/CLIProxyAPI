@@ -51,6 +51,8 @@ class MaskedRuntimeStopTests(unittest.TestCase):
         self.domain.configuration.return_value = durable.canonical({'synthetic_domain':True})
         self.domain.populated.return_value = False
         self.domain.frozen.return_value = True
+        self.domain.descendants_sealed.return_value = True
+        self.domain.seal_descendants.side_effect = lambda *, check:check()
         self.domain.freeze.side_effect = lambda *, check:check()
         def kill(*, check):
             self.effects.append(('slice-kill', None))
@@ -136,11 +138,93 @@ class MaskedRuntimeStopTests(unittest.TestCase):
     def apply(self):
         return self.sequence.stop(operation=self.operation)
 
+    def test_descendant_seal_requires_pending_and_both_stops_before_freeze(self):
+        reached = []
+        def seal(*, check):
+            pending = durable.decode((self.path_state/kill_names(2)[0]).read_bytes())
+            self.assertEqual(pending['schema'], 'host-recovery-runtime-kill-pending-v3')
+            self.assertIs(pending['domain_descendants_seal_required'], True)
+            for role in self.units:
+                self.assertEqual(durable.decode((self.path_state/completion_name(2,role)).read_bytes())['result'], 'done')
+            self.domain.freeze.assert_not_called()
+            self.domain.kill.assert_not_called()
+            check()
+            reached.append('seal')
+        def freeze(*, check):
+            self.assertEqual(reached, ['seal'])
+            self.assertTrue(self.sequence._descendants_sealed)
+            check()
+            reached.append('freeze')
+        self.domain.seal_descendants.side_effect = seal
+        self.domain.freeze.side_effect = freeze
+        result = self.apply()
+        self.assertEqual(reached, ['seal', 'freeze'])
+        self.assertIs(result['domain_descendants_sealed_observed'], True)
+        self.assertEqual(durable.decode(self.sequence.configuration())['runtime_descendants_policy'],
+                         'zero-limit-before-freeze-v1')
+        self.assertFalse(result['complete_fence_proven'] or result['start_allowed'])
+
+    def test_descendant_seal_failure_retains_pending_and_never_retries(self):
+        for code in (errno.EIO, errno.ENOSPC):
+            with self.subTest(code=code):
+                self.setUp()
+                reached = []
+                def seal(*, check):
+                    check()
+                    reached.append('seal')
+                    raise OSError(code, 'synthetic')
+                self.domain.seal_descendants.side_effect = seal
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertEqual(reached, ['seal'])
+                self.assertTrue((self.path_state/kill_names(2)[0]).exists())
+                self.assertFalse(any((self.path_state/name).exists() for name in kill_names(2)[1:]))
+                self.domain.freeze.assert_not_called()
+                self.domain.kill.assert_not_called()
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.domain.seal_descendants.assert_called_once()
+                self.witness.close.assert_called_once()
+
+    def test_descendant_seal_requires_literal_readback_before_freeze(self):
+        for value in (False, 1, None):
+            with self.subTest(value=value):
+                self.setUp()
+                self.domain.descendants_sealed.return_value = value
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.domain.seal_descendants.assert_called_once()
+                self.domain.freeze.assert_not_called()
+                self.domain.kill.assert_not_called()
+                self.assertFalse((self.path_state/kill_names(2)[1]).exists())
+
+    def test_descendant_limit_reopening_during_freeze_kill_or_empty_refuses(self):
+        for phase in ('freeze', 'kill', 'empty'):
+            with self.subTest(phase=phase):
+                self.setUp()
+                reached = []
+                def reopen():
+                    reached.append(phase)
+                    self.domain.descendants_sealed.return_value = False
+                def freeze(*, check):
+                    check()
+                    if phase == 'freeze': reopen()
+                def kill(*, check):
+                    check()
+                    if phase == 'kill': reopen()
+                def fault(point):
+                    if phase == 'empty' and point == 'directory-fsync' and (self.path_state/kill_names(2)[2]).exists(): reopen()
+                self.domain.freeze.side_effect, self.domain.kill.side_effect = freeze, kill
+                self.journal.fault = fault
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertEqual(reached, [phase])
+                self.assertFalse(self.sequence.completed)
+                self.assertEqual(self.domain.kill.call_count, 0 if phase == 'freeze' else 1)
+                self.domain.seal_descendants.assert_called_once()
+                self.witness.close.assert_called_once()
+
     def test_freeze_requires_durable_pending_and_both_stops_before_kill(self):
         reached = []
         def freeze(*, check):
             pending = durable.decode((self.path_state/kill_names(2)[0]).read_bytes())
-            self.assertEqual(pending['schema'], 'host-recovery-runtime-kill-pending-v2')
+            self.assertEqual(pending['schema'], 'host-recovery-runtime-kill-pending-v3')
             self.assertIs(pending['domain_freeze_required'], True)
             for role in self.units:
                 self.assertEqual(durable.decode((self.path_state/completion_name(2,role)).read_bytes())['result'], 'done')
@@ -174,6 +258,7 @@ class MaskedRuntimeStopTests(unittest.TestCase):
                     self.journal.fault = fault
                     with self.assertRaises(durable.Rejected): self.apply()
                     self.assertEqual(reached, [point])
+                    self.domain.seal_descendants.assert_not_called()
                     self.domain.freeze.assert_not_called()
                     self.domain.kill.assert_not_called()
                     self.witness.close.assert_called_once()

@@ -43,11 +43,16 @@ added. These are supported inventory limits, not measured recovery phase caps.
    already completed, issue at most one whole-unit KILL. Wait for the exact
    authenticated `done` completion and persist/recheck it. Repeat for containerd,
    in that order. Inactive projections still need their own stop completions.
-5. Only after both stop completions, durably publish the recursive-kill pending
-   phase, binding the original operation, pinned domain configuration and both
-   exact completion-record hashes. Recheck original authority before one
+5. Only after both stop completions, durably publish the v3 recursive-kill pending
+   phase, binding the original operation, pinned domain configuration, both exact
+   completion-record hashes and the required descendant-limit/freeze policies.
+   Set the pinned domain's `cgroup.max.descendants` to **zero**, verify the exact
+   kernel readback, then request its own `cgroup.freeze=1` and wait for the kernel's
+   completed `frozen=1` event. Recheck original authority before one
    descriptor-relative `cgroup.kill` write. Separately persist its returned phase;
-   a successful write alone is not an empty-domain observation.
+   a successful write alone is not an empty-domain observation. Recheck the zero
+   limit and own completed freeze through empty publication, outer return and ACK.
+   No retry, thaw or limit-reopening operation exists.
 6. Wait for explicit `populated=false` under the same original inclusive deadline,
    not a renewed kill/collection allowance. Separately persist the digest-linked
    empty observation, then recheck live authority and emptiness after publication
@@ -61,8 +66,8 @@ added. These are supported inventory limits, not measured recovery phase caps.
 
 The result exposes only `observed_runtime_process_count` and
 `observed_runtime_processes_dead`, not PIDs or cgroup paths. The sampled process
-set is volatile, not a durable death certificate: retained kill-record schemas
-are unchanged and can never reconstruct these witnesses after a crash. No claim
+set is volatile, not a durable death certificate: retained kill records contain
+no process-set data and can never reconstruct these witnesses after a crash. No claim
 is made about processes escaped before capture, processes between the two sample
 boundaries, later launches, unobserved daemons/shims or external writers.
 
@@ -94,7 +99,37 @@ reports `persisted_restart_policy_observed=false` and cannot be exposed by the
 connected runtime server. Neither path allows runtime relaunch or proves complete
 writer/job exclusion, old-epoch death, policy provenance or pending drain.
 
+## Kernel descendant-creation limit
+
+Linux v6.8 source at `e8f897f4afef0031fe618a8e94127a0934896aba`
+[documents](https://github.com/torvalds/linux/blob/e8f897f4afef0031fe618a8e94127a0934896aba/Documentation/admin-guide/cgroup-v2.rst#L948-L953)
+that the descendant limit rejects new cgroups when the existing count meets or
+exceeds it. The [mkdir ancestry check](https://github.com/torvalds/linux/blob/e8f897f4afef0031fe618a8e94127a0934896aba/kernel/cgroup/cgroup.c#L5706-L5731)
+checks **every ancestor**; zero therefore also rejects creation beneath an
+already-existing descendant. Existing groups need not be removed before setting
+zero. This is a kernel-enforced creation limit while retained, not just a sampled
+empty-directory observation.
+
+It does not prevent deletion of existing groups, migration to/from them, root
+replacement, privileged changes to the limit, or privileged thaw. The original
+independent ownership/provisioning and complete launch/writer exclusion are still
+required. A missing/unsupported control, noncanonical scalar, short write, EIO,
+ENOSPC, lost original authority or observed limit reopening refuses. Do not replace
+unsupported kernels with a directory-listing heuristic.
+
+Ordinary tests use scripted kernel boundaries. The Actions-only real-manager
+fixture includes positive mkdir/rmdir controls at the exact runtime root and an
+existing task subgroup, then requires actual `EAGAIN` refusals at both after the
+source limit write. Existing stop/death/freeze/emptiness assertions remain. These
+new assertions are **unverified until exact-head Actions executes them**, not
+shared-host qualification or a complete lifecycle/activation fence.
+
 ## Retained recursive-kill history
+
+v1 remains kill-only; v2 additionally records the required freeze observation;
+v3 additionally requires literal descendant-seal policy/observation flags at all
+three phases. Versions cannot be mixed and old records cannot acquire newer
+claims. All versions remain non-authorizing history.
 
 Three canonical restricted records use the original operation sequence:
 `runtime-kill-pending`, `runtime-kill-return` and `runtime-kill-empty`. Each

@@ -153,26 +153,49 @@ class RuntimeDomain:
         self.current()
         return requested == b"1\n" and values["frozen"] == "1"
 
+    def descendants_sealed(self):
+        """Observe the kernel descendant-creation limit, not process migration.
+
+        Zero forbids mkdir anywhere below this domain, including when existing
+        descendants remain. It does not prevent deletion, privileged limit changes,
+        root replacement, migration into existing groups or a privileged thaw.
+        """
+        raw = self._read_control("cgroup.max.descendants")
+        if raw != b"max\n":
+            if (not raw.endswith(b"\n") or not raw[:-1].isdigit()
+                    or len(raw) > 11 or str(int(raw[:-1])).encode("ascii") + b"\n" != raw
+                    or int(raw[:-1]) > 2147483647):
+                raise Rejected("runtime-domain-descendants-limit-schema")
+        self.current()
+        return raw == b"0\n"
+
+    def seal_descendants(self, *, check):
+        """One fixed kernel limit write; no reopening or caller-selected value."""
+        self._write_control("cgroup.max.descendants", b"0\n", "descendants-limit", check)
+
     def freeze(self, *, check):
         """One own-subtree freeze request; no thaw or arbitrary file operation."""
+        self._write_control("cgroup.freeze", b"1\n", "freeze", check)
+
+    def _write_control(self, name, raw, label, check):
         self.current()
-        fd = os.open("cgroup.freeze", os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=self.fd)
+        fd = os.open(name, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=self.fd)
         try:
             before = os.fstat(fd)
             def identity(info):
                 return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink)
             if (not stat.S_ISREG(before.st_mode) or before.st_dev != self.device or before.st_nlink != 1
                     or os.listxattr(fd)
-                    or identity(before) != identity(os.stat("cgroup.freeze", dir_fd=self.fd, follow_symlinks=False))):
-                raise Rejected("runtime-domain-freeze-file-unconfirmed")
+                    or identity(before) != identity(os.stat(name, dir_fd=self.fd, follow_symlinks=False))):
+                raise Rejected("runtime-domain-" + label + "-file-unconfirmed")
             self.current()
             check()
             if (identity(before) != identity(os.fstat(fd))
-                    or identity(before) != identity(os.stat("cgroup.freeze", dir_fd=self.fd, follow_symlinks=False))
+                    or identity(before) != identity(os.stat(name, dir_fd=self.fd, follow_symlinks=False))
                     or os.listxattr(fd)):
-                raise Rejected("runtime-domain-freeze-file-changed")
-            if os.write(fd, b"1\n") != 2:
-                raise Rejected("runtime-domain-freeze-write-unconfirmed")
+                raise Rejected("runtime-domain-" + label + "-file-changed")
+            if os.write(fd, raw) != len(raw):
+                raise Rejected("runtime-domain-" + label + "-write-unconfirmed")
             self.current()
             check()
         finally:

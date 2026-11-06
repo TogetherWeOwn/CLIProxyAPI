@@ -46,6 +46,7 @@ class MaskedRuntimeStop(_MaskedFixedStop):
         if self._forward is None:
             raise Rejected("masked-runtime-original-forward-required")
         self._domain_killed = False
+        self._descendants_sealed = False
         self._domain_frozen = False
         self._witness = None
         domain.current()
@@ -55,7 +56,8 @@ class MaskedRuntimeStop(_MaskedFixedStop):
         value = decode(super().configuration())
         value.update(domain=decode(self.domain.configuration()), forward_operation_sha256=digest(self._forward),
                      persisted_policy=None if self.policy is None else decode(self.policy.configuration()),
-                     runtime_freeze_policy="own-subtree-freeze-before-kill-v1")
+                     runtime_freeze_policy="own-subtree-freeze-before-kill-v1",
+                     runtime_descendants_policy="zero-limit-before-freeze-v1")
         return canonical(value)
 
     def _current(self):
@@ -67,6 +69,8 @@ class MaskedRuntimeStop(_MaskedFixedStop):
             raise Rejected("masked-runtime-original-domain-or-forward-changed")
         self.domain.current()
         super()._current()
+        if self._descendants_sealed and self.domain.descendants_sealed() is not True:
+            raise Rejected("masked-runtime-descendants-limit-lost")
         if self._domain_frozen and self.domain.frozen() is not True:
             raise Rejected("masked-runtime-frozen-domain-lost")
         self.journal._time(self.session.deadline)
@@ -85,13 +89,19 @@ class MaskedRuntimeStop(_MaskedFixedStop):
             raise Rejected("masked-runtime-domain-kill-exhausted")
         operation = decode(self._operation)
         pending_name, return_name, empty_name = record_names(operation["sequence"])
-        pending = {"schema": "host-recovery-runtime-kill-pending-v2", "operation_id": operation["operation_id"],
+        pending = {"schema": "host-recovery-runtime-kill-pending-v3", "operation_id": operation["operation_id"],
+            "domain_descendants_seal_required": True,
             "domain_freeze_required": True, "domain_sha256": digest(self.domain.configuration()),
             "stop_completions_sha256": {role: digest(self.journal._records[completion_name(operation["sequence"], role)][0])
                                         for role in self.roles}}
         # Durable intent precedes the kernel write. A lost return never permits
         # redispatch, including when the last durable record is only pending.
         self.journal._write(pending_name, pending)
+        self._current()
+        self.domain.seal_descendants(check=self._current)
+        if self.domain.descendants_sealed() is not True:
+            raise Rejected("masked-runtime-descendants-seal-unconfirmed")
+        self._descendants_sealed = True
         self._current()
         self.domain.freeze(check=self._current)
         while True:
@@ -110,7 +120,8 @@ class MaskedRuntimeStop(_MaskedFixedStop):
         self._domain_killed = True
         self.domain.kill(check=self._current)
         self._current()
-        returned = {"schema": "host-recovery-runtime-kill-return-v2", "pending_sha256": digest(canonical(pending)),
+        returned = {"schema": "host-recovery-runtime-kill-return-v3", "pending_sha256": digest(canonical(pending)),
+                    "domain_descendants_sealed_observed": True,
                     "domain_frozen_observed": True, "recursive_domain_kill_returned": True, "pending_drained": False}
         self.journal._write(return_name, returned)
         self._current()
@@ -127,7 +138,8 @@ class MaskedRuntimeStop(_MaskedFixedStop):
                 raise Rejected("masked-runtime-domain-deadline")
             self.session._connection.wait(max(1, min(50000, int(remaining * 1000000))))
         self._final_check()
-        self.journal._write(empty_name, {"schema": "host-recovery-runtime-kill-empty-v2",
+        self.journal._write(empty_name, {"schema": "host-recovery-runtime-kill-empty-v3",
+            "domain_descendants_sealed_observed": True,
             "return_sha256": digest(canonical(returned)), "domain_empty_observed": True, "domain_frozen_observed": True,
             "runtime_containment_coverage_proven": False})
         # Publication can itself lose authority or observe repopulation. Saved
@@ -137,6 +149,7 @@ class MaskedRuntimeStop(_MaskedFixedStop):
             self._policy_observation = canonical(self.policy.observe(deadline=self.session.deadline, check=self._current))
             self._final_check()
         return {"recursive_domain_kill_returned": True, "domain_empty_observed": True, "domain_frozen_observed": True,
+                "domain_descendants_sealed_observed": True,
                 "persisted_restart_policy_observed": self._policy_observation is not None, "runtime_relaunch_allowed": False,
                 "observed_runtime_process_count": self._witness.count, "observed_runtime_processes_dead": True,
                 "runtime_stop_completion_count": len(self.roles), "runtime_containment_coverage_proven": False}
@@ -145,7 +158,8 @@ class MaskedRuntimeStop(_MaskedFixedStop):
         self.session._fixed_jobs_absent()
         self._execution_current()
         self._current()
-        if not self._domain_killed or not self._domain_frozen or self.domain.populated() is not False:
+        if (not self._domain_killed or not self._domain_frozen or not self._descendants_sealed
+                or self.domain.populated() is not False):
             raise Rejected("masked-runtime-empty-domain-unconfirmed")
         self._current()
         if self._witness is None:

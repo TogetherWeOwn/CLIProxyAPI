@@ -818,6 +818,20 @@ class SystemManagerTests(unittest.TestCase):
         info = os.fstat(fd)
         domain = RuntimeDomain(fd=fd, mount_root="/sys/fs/cgroup", cgroup=cgroup, device=info.st_dev, inode=info.st_ino)
         self.assertTrue(domain.populated())
+        group = Path('/sys/fs/cgroup' + cgroup)
+        # Positive mkdir controls on the exact same root/existing descendant.
+        # These are inert empty groups, not manager units or arbitrary paths.
+        creation_parents = (group, group / paths['task'].name)
+        def remove_owned_empty(path):
+            if path.exists(): path.rmdir()
+        for parent in creation_parents:
+            for name in ('cpa-descendant-control', 'cpa-descendant-denied'):
+                owned = parent/name
+                self.assertFalse(owned.exists())
+                self.addCleanup(remove_owned_empty, owned)
+            control = parent/'cpa-descendant-control'
+            control.mkdir()
+            control.rmdir()
         state = self.root / "runtime-state"
         state.mkdir(mode=0o700)
         state_fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
@@ -839,11 +853,20 @@ class SystemManagerTests(unittest.TestCase):
         directory = context.__enter__()
         self.addCleanup(context.__exit__, None, None, None)
         masks = PersistentUnitMasks(directory=directory, units=units)
-        freeze_observations = []
+        freeze_observations, creation_refusals = [], []
         def current():
             self.current()
+            if sequence._descendants_sealed:
+                self.assertEqual((group/'cgroup.max.descendants').read_bytes(), b'0\n')
+                if not creation_refusals:
+                    import errno
+                    for parent in creation_parents:
+                        with self.assertRaises(OSError) as refused:
+                            (parent/'cpa-descendant-denied').mkdir()
+                        self.assertEqual(refused.exception.errno, errno.EAGAIN)
+                        self.assertFalse((parent/'cpa-descendant-denied').exists())
+                    creation_refusals.append('kernel-denied-root-and-existing-descendant')
             if sequence._domain_frozen:
-                group = Path('/sys/fs/cgroup' + cgroup)
                 self.assertEqual((group/'cgroup.freeze').read_bytes(), b'1\n')
                 self.assertEqual(dict(line.split() for line in (group/'cgroup.events').read_text().splitlines())['frozen'], '1')
                 if not sequence._domain_killed:
@@ -876,8 +899,11 @@ class SystemManagerTests(unittest.TestCase):
                                       "--value", "--", unit.unit).strip() for role,unit in units.items()}, before_starts)
         self.assertTrue(receipt["recursive_domain_kill_returned"] and receipt["domain_empty_observed"])
         self.assertIs(receipt['domain_frozen_observed'], True)
+        self.assertIs(receipt['domain_descendants_sealed_observed'], True)
+        self.assertEqual(creation_refusals, ['kernel-denied-root-and-existing-descendant'])
         self.assertTrue(freeze_observations)
         self.assertIs(domain.frozen(), True)
+        self.assertIs(domain.descendants_sealed(), True)
         self.assertEqual(receipt["runtime_stop_completion_count"], 2)
         self.assertEqual(receipt["fixed_stop_admission_count"], 2)
         self.assertIs(receipt["fixed_jobs_absent_observed"], True)

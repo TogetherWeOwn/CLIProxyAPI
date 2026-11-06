@@ -128,6 +128,74 @@ class RuntimeContainmentTests(unittest.TestCase):
         self.assertTrue(self.adapter.failed)
         self.assertEqual(self.operations.status()['state'], 'reconciliation_required')
 
+    def test_descendant_seal_has_fixed_zero_write_and_independent_readback(self):
+        path = self.group_path/'cgroup.max.descendants'
+        path.write_bytes(b'1\n')
+        self.assertIs(self.domain.descendants_sealed(), False)
+        reached = []
+        self.domain.seal_descendants(check=lambda:reached.append(path.read_bytes()))
+        self.assertEqual(reached, [b'1\n', b'0\n'])
+        self.assertIs(self.domain.descendants_sealed(), True)
+        path.write_bytes(b'max\n')
+        self.assertIs(self.domain.descendants_sealed(), False)
+
+    def test_descendant_limit_requires_canonical_kernel_scalar(self):
+        path = self.group_path/'cgroup.max.descendants'
+        for raw in (b'', b'0', b'00\n', b'-1\n', b' 0\n', b'0\nextra\n', b'2147483648\n', b'max\n'*600):
+            with self.subTest(raw=raw):
+                path.write_bytes(raw)
+                with self.assertRaises(durable.Rejected): self.domain.descendants_sealed()
+        for raw in (b'1\n', b'2147483647\n', b'max\n'):
+            path.write_bytes(raw)
+            self.assertIs(self.domain.descendants_sealed(), False)
+
+    def test_descendant_seal_refuses_links_and_replacement_before_write(self):
+        path = self.group_path/'cgroup.max.descendants'
+        target = self.group_path/'original-limit'
+        target.write_bytes(b'1\n')
+        path.symlink_to(target)
+        with self.assertRaises(OSError): self.domain.seal_descendants(check=lambda:None)
+        path.unlink()
+        os.link(target, path)
+        with self.assertRaises(durable.Rejected): self.domain.seal_descendants(check=lambda:None)
+        self.assertEqual(target.read_bytes(), b'1\n')
+        path.unlink()
+        path.write_bytes(b'1\n')
+        def changed():
+            path.rename(self.group_path/'saved-limit')
+            path.write_bytes(b'1\n')
+        with self.assertRaises(durable.Rejected): self.domain.seal_descendants(check=changed)
+        self.assertEqual(path.read_bytes(), b'1\n')
+        self.assertEqual((self.group_path/'saved-limit').read_bytes(), b'1\n')
+
+    def test_descendant_seal_authority_loss_keeps_uncertain_write_without_reopening(self):
+        path = self.group_path/'cgroup.max.descendants'
+        for late in (False, True):
+            with self.subTest(late=late):
+                path.write_bytes(b'1\n')
+                reached = []
+                def check():
+                    reached.append(path.read_bytes())
+                    if not late or len(reached) == 2: raise durable.Rejected('lost')
+                with self.assertRaises(durable.Rejected): self.domain.seal_descendants(check=check)
+                self.assertEqual(path.read_bytes(), b'0\n' if late else b'1\n')
+                self.assertEqual(len(reached), 2 if late else 1)
+
+    def test_descendant_seal_short_write_and_faults_are_not_retried(self):
+        path = self.group_path/'cgroup.max.descendants'
+        path.write_bytes(b'1\n')
+        for result in (1, OSError(errno.EIO,'synthetic'), OSError(errno.ENOSPC,'synthetic')):
+            with self.subTest(result=str(result)):
+                kwargs = {'side_effect':result} if isinstance(result,Exception) else {'return_value':result}
+                with patch.object(os,'write',**kwargs) as write:
+                    with self.assertRaises((durable.Rejected,OSError)): self.domain.seal_descendants(check=lambda:None)
+                write.assert_called_once()
+                self.assertEqual(path.read_bytes(), b'1\n')
+
+    def test_missing_descendant_limit_is_not_a_sealed_domain(self):
+        with self.assertRaises(OSError): self.domain.descendants_sealed()
+        with self.assertRaises(OSError): self.domain.seal_descendants(check=lambda:None)
+
     def test_freeze_writes_only_fixed_descriptor_relative_request(self):
         path = self.group_path/'cgroup.freeze'
         path.write_bytes(b'0\n')

@@ -46,15 +46,57 @@ class RuntimeKillHistoryTests(unittest.TestCase):
         empty = {'schema':'host-recovery-runtime-kill-empty-v1',
             'return_sha256':durable.digest(durable.canonical(returned)), 'domain_empty_observed':True,
             'runtime_containment_coverage_proven':False}
-        if version == 2:
-            pending.update(schema='host-recovery-runtime-kill-pending-v2', domain_freeze_required=True)
-            returned.update(schema='host-recovery-runtime-kill-return-v2', domain_frozen_observed=True,
+        if version >= 2:
+            pending.update(schema='host-recovery-runtime-kill-pending-v%d'%version, domain_freeze_required=True)
+            if version >= 3: pending['domain_descendants_seal_required'] = True
+            returned.update(schema='host-recovery-runtime-kill-return-v%d'%version, domain_frozen_observed=True,
                             pending_sha256=durable.digest(durable.canonical(pending)))
-            empty.update(schema='host-recovery-runtime-kill-empty-v2', domain_frozen_observed=True,
+            if version >= 3: returned['domain_descendants_sealed_observed'] = True
+            empty.update(schema='host-recovery-runtime-kill-empty-v%d'%version, domain_frozen_observed=True,
                          return_sha256=durable.digest(durable.canonical(returned)))
+            if version >= 3: empty['domain_descendants_sealed_observed'] = True
         names, values = runtime_kill.record_names(operation['sequence']), (pending, returned, empty)
         for name,value in zip(names[:phase+1],values): self.write(name,value)
         return operation, names, values
+
+    def test_sealed_v3_history_keeps_each_phase_uncertain_without_authority(self):
+        for phase, expected in enumerate(('unreturned','returned_without_empty_observation','empty_observed_unproven')):
+            with self.subTest(phase=phase):
+                self.setUp()
+                self.prepare(version=3, phase=phase)
+                before = self.records()
+                report = self.inspect()
+                self.assertEqual(report['operations'][1]['runtime_kill']['classification'], expected)
+                self.closed(report)
+                self.assertEqual(before, self.records())
+
+    def test_sealed_history_requires_literal_flags_and_exact_version_links(self):
+        for index,field in ((0,'domain_descendants_seal_required'),(1,'domain_descendants_sealed_observed'),
+                            (2,'domain_descendants_sealed_observed')):
+            for action in ('missing','integer','false','version'):
+                with self.subTest(index=index,action=action):
+                    self.setUp()
+                    _, names, values = self.prepare(version=3)
+                    if action == 'missing': values[index].pop(field)
+                    elif action == 'version': values[index]['schema'] = values[index]['schema'].replace('-v3','-v2')
+                    else: values[index][field] = 1 if action == 'integer' else False
+                    values[1]['pending_sha256'] = durable.digest(durable.canonical(values[0]))
+                    values[2]['return_sha256'] = durable.digest(durable.canonical(values[1]))
+                    for name,value in zip(names,values): self.write(name,value)
+                    with self.assertRaises(durable.Rejected): self.inspect()
+
+    def test_legacy_histories_cannot_smuggle_descendant_seal_claims(self):
+        for version in (1,2):
+            for index,field in ((0,'domain_descendants_seal_required'),(1,'domain_descendants_sealed_observed'),
+                                (2,'domain_descendants_sealed_observed')):
+                with self.subTest(version=version,index=index):
+                    self.setUp()
+                    _, names, values = self.prepare(version=version)
+                    values[index][field] = True
+                    values[1]['pending_sha256'] = durable.digest(durable.canonical(values[0]))
+                    values[2]['return_sha256'] = durable.digest(durable.canonical(values[1]))
+                    for name,value in zip(names,values): self.write(name,value)
+                    with self.assertRaises(durable.Rejected): self.inspect()
 
     def test_freezer_v2_history_retains_each_uncertain_phase_without_authority(self):
         for phase, expected in enumerate(('unreturned','returned_without_empty_observation','empty_observed_unproven')):
@@ -128,7 +170,7 @@ class RuntimeKillHistoryTests(unittest.TestCase):
                 self.assertEqual(before, self.records())
 
     def test_exact_shapes_literal_flags_and_digest_links_are_required(self):
-        changes = ((0,'schema','other'), (0,'operation_id','f'*64), (0,'domain_sha256',True),
+        changes = ((0,'schema','other'), (0,'schema',[]), (0,'operation_id','f'*64), (0,'domain_sha256',True),
             (0,'stop_completions_sha256',{}), (0,'extra',True), (1,'pending_sha256','f'*64),
             (1,'recursive_domain_kill_returned',1), (1,'pending_drained',0), (1,'extra',True),
             (2,'return_sha256','f'*64), (2,'domain_empty_observed',1),
