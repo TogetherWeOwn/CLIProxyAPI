@@ -11,12 +11,18 @@ from .broker_authority import SupervisorPeerAuthority
 from .broker_operations import OperationJournal
 from .durable import Rejected, canonical, decode, digest
 from .job_cancellation import WaitingStartCancellation
-from .manager_bus import EMPTY_COMMAND_LIST
+from .manager_bus import EMPTY_COMMAND_LIST, EMPTY_EXIT_STATUS
 from .manager_jobs import MANAGER, MANAGER_PATH, ForwardStopJobs
 from .mask_reload import ManagerMaskReload
 from .unit_masks import PersistentUnitMasks
 
 AUXILIARY_COMMANDS = ("ExecCondition", "ExecStartPre", "ExecStartPost", "ExecReload", "ExecStop", "ExecStopPost")
+LAUNCH_POLICY = (("Restart", "Service", "s", "no"),
+    ("RestartForceExitStatus", "Service", EMPTY_EXIT_STATUS, [[], []]),
+    ("Triggers", "Unit", "as", []), ("TriggeredBy", "Unit", "as", []),
+    ("OnFailure", "Unit", "as", []), ("OnSuccess", "Unit", "as", []),
+    ("FailureAction", "Unit", "s", "none"), ("SuccessAction", "Unit", "s", "none"),
+    ("StartLimitAction", "Unit", "s", "none"))
 
 
 class _MaskedFixedStop:
@@ -63,7 +69,9 @@ class _MaskedFixedStop:
             "cancellation": decode(self.cancellation.configuration()), "reload": decode(self.reload.configuration()),
             "kill_whom": "all", "kill_signal": 9, "fixed_job_admission_witness": "job-new-v1",
             "fixed_unit_reference": "sender-ref-unit-v1", "post_reload_transition_witness": "reloading-v1",
-            "auxiliary_command_policy": {key: "empty" for key in AUXILIARY_COMMANDS}, "control_pid_policy": "zero"})
+            "auxiliary_command_policy": {key: "empty" for key in AUXILIARY_COMMANDS}, "control_pid_policy": "zero",
+            "launch_policy": {key: expected for key, _, _, expected in LAUNCH_POLICY},
+            "unit_names_policy": "canonical_only"})
 
     @property
     def target_sha256(self):
@@ -163,6 +171,21 @@ class _MaskedFixedStop:
             identity = self.session._call(self.session.owner, "org.freedesktop.DBus.Properties", "Get", "ss",
                 (MANAGER + ".Unit", "Id"), "v:s", path=path)[0]
             self._current()
+            # Check effective manager policy, not only the manifest assertion.
+            # These samples reject unsupported launch paths; they neither exclude
+            # other writers nor fence a launch already admitted by the manager.
+            names = self.session._call(self.session.owner, "org.freedesktop.DBus.Properties", "Get", "ss",
+                (MANAGER + ".Unit", "Names"), "v:as", path=path)[0]
+            self._current()
+            if type(names) is not list or names != [unit]:
+                raise Rejected("masked-fixed-alias-unsupported")
+            for key, interface, kind, expected in LAUNCH_POLICY:
+                value = self.session._call(self.session.owner, "org.freedesktop.DBus.Properties", "Get", "ss",
+                    (MANAGER + "." + interface, key), "v:" + kind, path=path)[0]
+                self._current()
+                if (type(value) is not type(expected) or value != expected
+                        or kind == EMPTY_EXIT_STATUS and any(type(item) is not list for item in value)):
+                    raise Rejected("masked-fixed-autonomous-launch-unsupported")
             # Main-process timestamps do not cover condition/pre/post/reload/stop
             # helpers. Reject their configured lists even if they have not run.
             # This is a restricted policy observation, not continuous exclusion.
@@ -284,6 +307,7 @@ class _MaskedFixedStop:
                     "masked_inactive_observed": True, "manager_jobs_retired": False,
                     "fixed_execution_timestamp_count": len(self.roles), "fixed_execution_timestamps_unchanged": True,
                     "auxiliary_commands_empty_observed": True, "control_pid_zero_observed": True,
+                    "autonomous_launch_policy_observed": True,
                     "fixed_unit_reference_count": len(self.session._fixed_unit_paths),
                     "activation_exclusion_proven": False, "cgroup_quiescence_proven": False,
                     "pending_drained": False, "complete_fence_proven": False,

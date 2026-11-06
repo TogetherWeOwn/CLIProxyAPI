@@ -41,6 +41,8 @@ class MaskedForwardStopTests(unittest.TestCase):
         self.row['ExecMainStartTimestampMonotonic'] = 2**40
         self.row.update({key: [] for key in ('ExecCondition', 'ExecStartPre', 'ExecStartPost', 'ExecReload', 'ExecStop', 'ExecStopPost')})
         self.row['ControlPID'] = 0
+        self.row.update(durable.decode(self.sequence.configuration())['launch_policy'])
+        self.row['Names'] = [self.units['forward'].unit]
         self.connection.job_units = self.units
         self.waiting = [41, self.units['forward'].unit, 'start', 'waiting', bus.JOB_PREFIX+'41',
                         bus.MANAGER_PATH+'/unit/forward_service']
@@ -84,6 +86,76 @@ class MaskedForwardStopTests(unittest.TestCase):
 
     def effects(self):
         return [method for _, method, _ in self.connection.calls if method in ('Cancel','Reload','StopUnit','KillUnit')]
+
+    def test_restart_policies_refuse_before_mask_or_manager_effect(self):
+        for value in ('always', 'on-failure', 'on-success', 'on-abnormal', '', None, False):
+            with self.subTest(value=value):
+                self.setUp()
+                self.row['Restart'] = value
+                reached = []
+                self.effect_hook = lambda method, args: reached.append(args[1]) if method == 'Get' else None
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertIn('Restart', reached)
+                self.assertEqual(self.effects(), [])
+                self.assertFalse(self.masks.published)
+
+    def test_forced_restart_is_not_overridden_by_restart_no(self):
+        for value in ([[0], []], [[], [9]], [], [[], [] , []], [(), ()], ([], []), None):
+            with self.subTest(value=value):
+                self.setUp()
+                self.row['RestartForceExitStatus'] = value
+                self.assertEqual(self.row['Restart'], 'no')
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertEqual(self.effects(), [])
+
+    def test_activation_and_outcome_hooks_refuse_without_exposing_unit_names(self):
+        for key in ('Triggers', 'TriggeredBy', 'OnFailure', 'OnSuccess'):
+            for value in (['unapproved.service'], (), None, False, ''):
+                with self.subTest(key=key, value=value):
+                    self.setUp()
+                    self.row[key] = value
+                    with self.assertRaises(durable.Rejected): self.apply()
+                    self.assertEqual(self.effects(), [])
+                    self.assertFalse(self.masks.published)
+
+    def test_manager_actions_must_be_explicitly_none(self):
+        for key in ('FailureAction', 'SuccessAction', 'StartLimitAction'):
+            for value in ('reboot', '', None, False):
+                with self.subTest(key=key, value=value):
+                    self.setUp()
+                    self.row[key] = value
+                    with self.assertRaises(durable.Rejected): self.apply()
+                    self.assertEqual(self.effects(), [])
+
+    def test_only_canonical_unit_name_is_supported(self):
+        unit = self.units['forward'].unit
+        for names in ([], [unit, 'alias.service'], ['alias.service'], [unit, unit], (unit,), None):
+            with self.subTest(names=names):
+                self.setUp()
+                self.row['Names'] = names
+                with self.assertRaises(durable.Rejected): self.apply()
+                self.assertEqual(self.effects(), [])
+
+    def test_launch_policy_loss_during_reload_prevents_stop(self):
+        reached = []
+        def effect(method, args):
+            if method == 'Reload':
+                reached.append(method)
+                self.row['TriggeredBy'] = ['late.socket']
+        self.effect_hook = effect
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(reached, ['Reload'])
+        self.assertNotIn('StopUnit', self.effects())
+        self.assertFalse(self.sequence.completed)
+
+    def test_launch_policy_is_bound_without_claiming_exclusion(self):
+        config = durable.decode(self.sequence.configuration())
+        self.assertEqual(config['unit_names_policy'], 'canonical_only')
+        self.assertEqual(config['launch_policy']['Restart'], 'no')
+        self.assertEqual(config['launch_policy']['RestartForceExitStatus'], [[], []])
+        result = self.apply()
+        self.assertIs(result['autonomous_launch_policy_observed'], True)
+        self.assertFalse(result['activation_exclusion_proven'] or result['complete_fence_proven'])
 
     def test_each_auxiliary_command_refuses_before_mask_or_manager_effect(self):
         for key in ('ExecCondition', 'ExecStartPre', 'ExecStartPost', 'ExecReload', 'ExecStop', 'ExecStopPost'):

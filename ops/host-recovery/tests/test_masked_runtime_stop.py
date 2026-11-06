@@ -70,9 +70,11 @@ class MaskedRuntimeStopTests(unittest.TestCase):
             ActiveState='active', SubState='running', InvocationID=bytes.fromhex(unit.invocation_id),
             ControlGroup=unit.cgroup, MainPID=123, Job=(0, '/'), ExecMainStartTimestampMonotonic=2**40)
             for role,unit in self.units.items()}
-        for row in self.rows.values():
+        for role, row in self.rows.items():
             row.update({key: [] for key in ('ExecCondition', 'ExecStartPre', 'ExecStartPost', 'ExecReload', 'ExecStop', 'ExecStopPost')})
             row['ControlPID'] = 0
+            row.update(durable.decode(self.sequence.configuration())['launch_policy'])
+            row['Names'] = [self.units[role].unit]
         self.numbers = {'containerd':41, 'dockerd':42}
         self.connection.inventory = [[number, self.units[role].unit, 'start', 'waiting', bus.JOB_PREFIX+str(number),
             bus.MANAGER_PATH+'/unit/'+role] for role,number in self.numbers.items()]
@@ -131,6 +133,32 @@ class MaskedRuntimeStopTests(unittest.TestCase):
 
     def apply(self):
         return self.sequence.stop(operation=self.operation)
+
+    def test_autonomous_launch_in_either_runtime_role_prevents_all_effects(self):
+        for role in ('dockerd', 'containerd'):
+            for key, value in (('Restart', 'always'), ('RestartForceExitStatus', [[1], []]),
+                    ('TriggeredBy', ['late.socket']), ('OnFailure', ['late.service']),
+                    ('Names', [self.units[role].unit, 'alias.service'])):
+                with self.subTest(role=role, key=key):
+                    self.setUp()
+                    self.rows[role][key] = value
+                    with self.assertRaises(durable.Rejected): self.apply()
+                    self.assertEqual(self.effects, [])
+                    self.domain.kill.assert_not_called()
+                    self.assertFalse(self.masks.published)
+
+    def test_restart_drift_after_recursive_kill_prevents_empty_publication(self):
+        reached = []
+        def kill(*, check):
+            reached.append('kill')
+            check()
+            self.rows['containerd']['RestartForceExitStatus'] = [[], [9]]
+        self.domain.kill.side_effect = kill
+        with self.assertRaises(durable.Rejected): self.apply()
+        self.assertEqual(reached, ['kill'])
+        self.assertFalse((self.path_state/'operation-02-runtime-kill-empty.json').exists())
+        self.assertFalse(self.sequence.completed)
+        self.witness.close.assert_called_once()
 
     def test_auxiliary_commands_in_either_runtime_role_prevent_all_effects(self):
         for role in ('dockerd', 'containerd'):

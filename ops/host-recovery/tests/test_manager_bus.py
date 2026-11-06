@@ -436,6 +436,48 @@ class ExecutionTimestampABITests(unittest.TestCase):
         with self.assertRaises(durable.Rejected): connection.fields(None, 'v:t')
 
 
+class EmptyExitStatusABITests(unittest.TestCase):
+    def connection(self):
+        connection = object.__new__(bus._Connection)
+        connection.lib = Mock()
+        connection.lib.sd_bus_message_get_signature.return_value = b'v'
+        connection.lib.sd_bus_message_enter_container.return_value = 1
+        connection.lib.sd_bus_message_exit_container.return_value = 1
+        connection.lib.sd_bus_message_at_end.return_value = 1
+        return connection
+
+    def test_two_explicit_empty_exit_status_arrays_are_required(self):
+        connection = self.connection()
+        self.assertEqual(connection.fields(None, 'v:(aiai)'), [[[], []]])
+        self.assertEqual([call.args for call in connection.lib.sd_bus_message_enter_container.call_args_list],
+            [(None, b'v', b'(aiai)'), (None, b'r', b'aiai'), (None, b'a', b'i'), (None, b'a', b'i')])
+        connection.lib.sd_bus_message_read_basic.assert_not_called()
+        self.assertEqual(connection.lib.sd_bus_message_exit_container.call_count, 4)
+
+    def test_nonempty_or_uncertain_exit_status_array_refuses_without_reading_codes(self):
+        for result in (0, -1):
+            for position in (0, 1):
+                with self.subTest(result=result, position=position):
+                    connection = self.connection()
+                    connection.lib.sd_bus_message_at_end.side_effect = [1] * position + [result]
+                    with self.assertRaises(durable.Rejected): connection.fields(None, 'v:(aiai)')
+                    connection.lib.sd_bus_message_read_basic.assert_not_called()
+
+    def test_missing_variant_struct_or_either_array_refuses(self):
+        for position in range(4):
+            with self.subTest(position=position):
+                connection = self.connection()
+                connection.lib.sd_bus_message_enter_container.side_effect = [1] * position + [0]
+                with self.assertRaises(durable.Rejected): connection.fields(None, 'v:(aiai)')
+
+    def test_trailing_struct_or_message_data_refuses(self):
+        for position in (2, 3):
+            with self.subTest(position=position):
+                connection = self.connection()
+                connection.lib.sd_bus_message_at_end.side_effect = [1] * position + [0]
+                with self.assertRaises(durable.Rejected): connection.fields(None, 'v:(aiai)')
+
+
 class EmptyCommandListABITests(unittest.TestCase):
     def connection(self):
         connection = object.__new__(bus._Connection)

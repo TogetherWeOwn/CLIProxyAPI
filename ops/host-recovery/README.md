@@ -713,6 +713,29 @@ real synthetic lock-owning Unix peer with scripted manager replies; root identit
 and client tests use scripted credentials/transport, **not** a real root-service
 or full-system drill. New methods require exact-head Actions verification.
 
+## Effective autonomous-launch policy observations
+
+The fixed forward and runtime masked-stop sequences check the original manager
+connection's effective `Restart=no`, explicitly empty `RestartForceExitStatus`
+(exit codes **and** signals), empty `Triggers`/`TriggeredBy` and `OnFailure`/`OnSuccess`,
+`FailureAction`/`SuccessAction`/`StartLimitAction=none`, and exactly the canonical
+unit in `Names`. Unsupported aliases, activation/outcome hooks or automatic restart
+policies refuse before mask publication or stop submission. These conservative
+initial rules also reject failure hooks that would launch another service; they
+are not instructions to remove a required operational hook or repin an installation.
+
+The policy is bound into the original pending operation's target and rechecked
+with execution observations through return durability and transport ACK. The
+v255 forced-restart ABI is `(aiai)`; either nonempty array refuses without reading
+exit values. `Restart=no` alone is insufficient when forced restart statuses exist.
+
+These are point observations, **not** an actual-execution launch interlock,
+continuous writer/activation exclusion, boot/enablement/dependency-graph coverage,
+all-job retirement, drain or recovery/start/settlement authority. No runtime launch
+helper, protected provisioning or operational runner is enabled. Regression methods
+(including an Actions-only real-manager forced-restart negative) are authored;
+require exact-head Actions results before claiming execution or qualification.
+
 ## Remaining acceptance work (not implemented or not proved)
 
 1. Persistent systemd supervisor with admission, durable active-attempt latch,

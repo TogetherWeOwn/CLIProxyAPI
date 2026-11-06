@@ -188,6 +188,34 @@ class ContainmentProtocolTests(_ContainmentProtocolFixture):
         self.assertEqual(self.effect_names().count('StopUnit'), 1)
         self.assertTrue((self.state/'operation-01-return.json').exists())
 
+    def test_restart_policy_drift_after_return_durability_prevents_reply(self):
+        self.queue()
+        reached = []
+        original = self.effects.journal.returned
+        def returned(*args, **kwargs):
+            value = original(*args, **kwargs)
+            reached.append(True)
+            self.effects.row['Restart'] = 'always'
+            return value
+        with patch.object(self.effects.journal, 'returned', side_effect=returned): self.refused()
+        self.assertEqual(reached, [True])
+        self.assertTrue((self.state/'operation-01-return.json').exists())
+        self.assertEqual(self.effect_names().count('StopUnit'), 1)
+
+    def test_activation_hook_after_reply_revokes_ack_without_reissuing_stop(self):
+        self.queue()
+        original = self.peer.peer.reply
+        received = []
+        def reply(*args):
+            original(*args)
+            received.append(json.loads(self.peer.line(self.peer.child)))
+            self.effects.row['OnSuccess'] = ['late.service']
+        with patch.object(self.peer.peer, 'reply', side_effect=reply): self.refused()
+        self.assertEqual(received, [ipc.containment_response(self.value)])
+        self.assertTrue((self.state/'operation-01-return.json').exists())
+        self.assertEqual(self.effect_names().count('StopUnit'), 1)
+        self.assertFalse(received[0]['observation']['start_allowed'])
+
     def test_auxiliary_writer_after_return_durability_prevents_reply(self):
         self.queue()
         reached = []

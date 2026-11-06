@@ -22,6 +22,7 @@ DBUS = "org.freedesktop.DBus"
 DBUS_PATH = "/org/freedesktop/DBus"
 MAX_EVENTS = 256
 EMPTY_COMMAND_LIST = "a(sasbttttuii)"
+EMPTY_EXIT_STATUS = "(aiai)"
 RESULTS = frozenset(("done", "canceled", "timeout", "failed", "dependency", "skipped",
                      "invalid", "assert", "unsupported", "collected", "once"))
 CALLBACK = C.CFUNCTYPE(C.c_int, C.c_void_p, C.c_void_p, C.c_void_p)
@@ -158,11 +159,26 @@ class _Connection:
             raise Rejected("manager-bus-message-signature")
         if signature.startswith("v:"):
             kind = signature[2:]
-            if kind not in ("s", "u", "t", "as", "ay", "(uo)", EMPTY_COMMAND_LIST):
+            if kind not in ("s", "u", "t", "as", "ay", "(uo)", EMPTY_COMMAND_LIST, EMPTY_EXIT_STATUS):
                 raise Rejected("manager-bus-fixed-variant-required")
             if self.lib.sd_bus_message_enter_container(message, b"v", kind.encode()) <= 0:
                 raise Rejected("manager-bus-property-type-required")
-            if kind == EMPTY_COMMAND_LIST:
+            if kind == EMPTY_EXIT_STATUS:
+                # RestartForceExitStatus overrides Restart=no. Initial support
+                # requires both v255 exit-status arrays to be explicitly empty.
+                if self.lib.sd_bus_message_enter_container(message, b"r", b"aiai") <= 0:
+                    raise Rejected("manager-bus-exit-status-struct-required")
+                for _ in range(2):
+                    if self.lib.sd_bus_message_enter_container(message, b"a", b"i") <= 0:
+                        raise Rejected("manager-bus-exit-status-array-required")
+                    if self.lib.sd_bus_message_at_end(message, 0) != 1:
+                        raise Rejected("manager-bus-forced-restart-unsupported")
+                    _ok(self.lib.sd_bus_message_exit_container(message))
+                if self.lib.sd_bus_message_at_end(message, 0) != 1:
+                    raise Rejected("manager-bus-exit-status-trailing-data")
+                _ok(self.lib.sd_bus_message_exit_container(message))
+                values = [[[], []]]
+            elif kind == EMPTY_COMMAND_LIST:
                 # v255 Service Exec* lists use this exact ABI. Only the empty
                 # policy is supported: never parse, expose or execute an argv.
                 if self.lib.sd_bus_message_enter_container(message, b"a", b"(sasbttttuii)") <= 0:

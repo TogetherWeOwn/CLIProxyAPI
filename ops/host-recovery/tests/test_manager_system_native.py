@@ -482,7 +482,10 @@ class SystemManagerTests(unittest.TestCase):
     def test_auxiliary_stop_command_refuses_before_masking_or_stopping(self):
         self.masked_fixture(composed=True, auxiliary=True)
 
-    def masked_fixture(self, *, composed, auxiliary=False):
+    def test_forced_restart_refuses_even_with_restart_no(self):
+        self.masked_fixture(composed=True, forced_restart=True)
+
+    def masked_fixture(self, *, composed, auxiliary=False, forced_restart=False):
         paths = activation_paths()
         mask = Path("/etc/systemd/system") / unit_name("masked")
         self.assertFalse(os.path.lexists(mask))
@@ -493,7 +496,8 @@ class SystemManagerTests(unittest.TestCase):
                 "SendSIGKILL=yes\nTimeoutStopSec=" + ("5s" if composed else "1s")
                 + "\nRuntimeMaxSec=60s\nUser=0\nGroup=0\nLimitCORE=0\n"
                 "ExecStart=" + sys.executable + " -I " + str(ROOT / "tests/manager_system_fixture.py")
-                + " " + str(self.root / "ready.sock") + "\n" + ("ExecStopPost=/usr/bin/true\n" if auxiliary else "")),
+                + " " + str(self.root / "ready.sock") + "\n" + ("ExecStopPost=/usr/bin/true\n" if auxiliary else "")
+                + ("RestartForceExitStatus=1\n" if forced_restart else "")),
             "dependent": ("[Unit]\nRequires=" + unit_name("masked") + "\nAfter=" + unit_name("masked")
                 + "\n[Service]\nType=oneshot\nExecStart=/usr/bin/true\nRemainAfterExit=yes\n")}
         for suffix, path in paths.items():
@@ -546,9 +550,12 @@ class SystemManagerTests(unittest.TestCase):
             before_start = command(self.systemctl, "show", "--property=ExecMainStartTimestampMonotonic",
                                    "--value", "--", binding.unit).strip()
             self.assertRegex(before_start, rb"[1-9][0-9]*\Z")
-            if auxiliary:
-                shown = command(self.systemctl, "show", "--property=ExecStopPost", "--value", "--", binding.unit)
-                self.assertIn(b"/usr/bin/true", shown)
+            if auxiliary or forced_restart:
+                key = 'ExecStopPost' if auxiliary else 'RestartForceExitStatus'
+                shown = command(self.systemctl, "show", "--property=" + key, "--value", "--", binding.unit)
+                self.assertIn(b"/usr/bin/true" if auxiliary else b"1", shown)
+                if forced_restart:
+                    self.assertEqual(command(self.systemctl, 'show', '--property=Restart', '--value', '--', binding.unit).strip(), b'no')
                 with self.assertRaises(Rejected):
                     sequence.stop(operation=operation)
                 self.assertFalse(os.path.lexists(mask))
@@ -560,7 +567,7 @@ class SystemManagerTests(unittest.TestCase):
                     poller = select.poll()
                     poller.register(pids[key], select.POLLIN)
                     self.assertFalse(poller.poll(0), "refused submission stopped a fixture process")
-                print(json.dumps({"auxiliary_stop_command_observed": True, "source_submission_refused": True,
+                print(json.dumps({"unsupported_policy_observed": key, "source_submission_refused": True,
                     "mask_published": False, "stop_submitted": False, "both_pidfds_live": True,
                     "complete_fence_proven": False}), flush=True)
                 return
