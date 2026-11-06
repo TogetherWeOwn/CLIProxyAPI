@@ -146,6 +146,17 @@ as a substitute for the accepted production binaries.
   persistent manager service, installed fence, recovery execution, cross-boot
   continuation, settlement or start grant exists.
   See [restart ownership and limits](SUPERVISOR-RECONCILIATION-v1.md).
+- `host_recovery/result_report.py`: opt-in protected raw worker-evidence readback
+  joins the existing supervisor result-observation path. Exact canonical report
+  bytes, intent/request/claim linkage and non-authorizing report shape are checked
+  around the still-required independent current-state oracle. The file handle is
+  retained through supervisor observation-record publication; final byte/inode/path,
+  live-boundary and deadline checks precede observed status. Visible records after
+  failed trailing checks stay unverified. This is report correspondence, **not**
+  authenticated provisioning, fresh baseline/readiness/fencing facts, measured
+  timing, durable transport or operational recovery/start/settlement authority.
+  New tests are authored, not executed; deny-only runners remain unchanged. See
+  [protected report scope](RESULTS-v1.md#protected-raw-worker-evidence).
 - `host_recovery/outcomes.py` and the supervisor/worker/broker result path: optional
   one-shot report on the same claimed kernel-peer connection. Original request,
   intent, claim and evidence digests are persisted before a result acknowledgment;

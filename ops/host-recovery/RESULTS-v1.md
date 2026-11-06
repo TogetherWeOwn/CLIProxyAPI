@@ -67,6 +67,39 @@ manager/oracle work and persistence share the original request deadline; there i
 no new allowance. Expired or cross-boot journals still require the separately
 reviewed continuation protocol; no new clock origin is manufactured.
 
+## Protected raw worker evidence
+
+`result_report.WorkerEvidenceOracle` is an opt-in report-readback composition for
+that same `oracle` argument, not an implementation of the current-state oracle.
+An independently approved private worker-evidence directory supplies the fixed
+request-digest filename; no worker-provided path is opened. Verifier read access
+must already exist. Missing permission refuses; this source changes no owner,
+mode, ACL or credential.
+
+The reader retains a no-follow, bounded, single-link private regular-file inode,
+checks canonical raw bytes against the result's evidence hash, and checks exact
+intent/request/claim linkage and the worker-report schema. Authorizing flags,
+contradictory success/error/alert fields, partial staging and unsupported shapes
+refuse. A disk alert-receipt failure remains distinct from transport admission.
+Worker stopped-state and timing fields remain historical assertions, not fresh
+oracle inputs or measured/drained/externally delivered proof.
+
+The independently supplied current-state oracle is still mandatory and must
+supply every existing fact. The supervisor retains the reader context through its
+own observation-record publication, then rechecks the original inode/path/bytes,
+live boundary and deadline before marking the result observed. Replacement,
+mutation, read errors, changed callbacks, reentrancy or uncertainty poison the
+reader. An observation file visible before a failed trailing check is not a
+verified result; restart still requires fresh independent verification. Direct
+reader calls check only their own call window, not later caller persistence.
+
+New regressions are authored for Actions, **not yet executed**. They include the
+actual component worker's output, synthetic supervisor/worker report publication,
+read faults, malformed repinned reports and post-publication mutation. Manager,
+complete fence and fresh baseline/readiness oracles remain scripted. The runnable
+supervisor remains fixed-deny and the worker identity-only. Operational recovery,
+reboot/resume, complete fencing, settlement and replay/source-drain are unfinished.
+
 ## IPC and broker composition
 
 `WorkerListener.accept_once(..., result_oracle=...)` keeps the same connection and

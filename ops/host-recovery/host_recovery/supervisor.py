@@ -12,7 +12,7 @@ continuation; never manufacture a fresh 300-second budget on restart. A durable
 request with an absent/lost reply must be reconciled by the manager, not retried.
 """
 import copy
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import math
 import os
 import stat
@@ -659,6 +659,9 @@ class RecoverySupervisor:
         A report, successful exit or old observation receipt is never sufficient.
         On restart a fresh oracle is required; no report is redispatched/replaced.
         """
+        # The protected reader uses the original loader, which imports this owner.
+        from .result_report import WorkerEvidenceOracle
+
         if (self.closed or self.error is not None or self.result_observation_attempted
                 or self.worker_result is None or not callable(oracle)):
             raise Rejected("supervisor-worker-result-unconfirmed")
@@ -690,21 +693,26 @@ class RecoverySupervisor:
                 return job
 
             before = current()
-            receipt = oracle(copy.deepcopy(self.log.intent), copy.deepcopy(report), deadline=end)
-            expected = expected_oracle(self.log.intent, report)
-            if canonical(receipt) != canonical(expected) or canonical(current()) != canonical(before):
-                raise Rejected("supervisor-worker-result-unconfirmed")
-            observed = self._now()
-            if "reconcile-result-observed.json" not in self.initial_entries:
-                value = {"schema": "host-recovery-result-observation-v1", "request_id": self.pending_request["request_id"],
-                         "result_sha256": digest(canonical(report)), "owner": copy.deepcopy(self.owner),
-                         "monotonic": observed, "oracle": expected}
-                self.log._write("reconcile-result-observed.json", value)
-                self.initial_entries.add("reconcile-result-observed.json")
-                self.result_observation = copy.deepcopy(value)
-            if canonical(current()) != canonical(before):
-                raise Rejected("supervisor-worker-result-unconfirmed")
-            Deadline(self._now, end).remaining()
+            with ExitStack() as observations:
+                if isinstance(oracle, WorkerEvidenceOracle):
+                    receipt = observations.enter_context(oracle.observe(
+                        copy.deepcopy(self.log.intent), copy.deepcopy(report), deadline=end))
+                else:
+                    receipt = oracle(copy.deepcopy(self.log.intent), copy.deepcopy(report), deadline=end)
+                expected = expected_oracle(self.log.intent, report)
+                if canonical(receipt) != canonical(expected) or canonical(current()) != canonical(before):
+                    raise Rejected("supervisor-worker-result-unconfirmed")
+                observed = self._now()
+                if "reconcile-result-observed.json" not in self.initial_entries:
+                    value = {"schema": "host-recovery-result-observation-v1", "request_id": self.pending_request["request_id"],
+                             "result_sha256": digest(canonical(report)), "owner": copy.deepcopy(self.owner),
+                             "monotonic": observed, "oracle": expected}
+                    self.log._write("reconcile-result-observed.json", value)
+                    self.initial_entries.add("reconcile-result-observed.json")
+                    self.result_observation = copy.deepcopy(value)
+                if canonical(current()) != canonical(before):
+                    raise Rejected("supervisor-worker-result-unconfirmed")
+                Deadline(self._now, end).remaining()
             self.result_observed = True
             self.state = "recovery_result_observed_unsettled"
         except Exception:
