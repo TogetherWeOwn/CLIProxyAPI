@@ -611,9 +611,10 @@ reproduction, never a CI mirror.
 
 The component job has a 90-minute CI limit. Its ordinary Python process has an
 80-minute limit with TERM followed by KILL after 30 seconds, inside an 82-minute
-step limit. The test runner emits Python stacks (without frame locals) every five
-minutes and cancels that diagnostic timer on completion. Existing always-run
-cleanup and raw-log upload steps remain after the test step; a timeout is a failed
+step limit. Crash diagnostics remain enabled, without periodic watchdog-thread
+stack walks: the first such dump coincided with a runner segmentation fault in
+Actions. Native root cause is not established. Verbose test progress and existing
+always-run cleanup and raw-log upload steps remain; a timeout is a failed
 check, not permission to skip qualification or claim cleanup succeeded. These CI
 limits leave headroom over the observed 59-minute component run; they are not
 recovery phase allocations, downtime measurements or production operating caps.
