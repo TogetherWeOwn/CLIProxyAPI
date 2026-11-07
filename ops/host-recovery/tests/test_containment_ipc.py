@@ -38,7 +38,7 @@ class _ContainmentProtocolFixture(unittest.TestCase):
         if self.runtime:
             fx.units = {role:replace(unit,unit='cpa-'+role+'.service',
                         cgroup='/runtime.slice/cpa-'+role+'.service') for role,unit in fx.units.items()}
-            for role,unit in fx.units.items():fx.rows[role].update(Id=unit.unit,ControlGroup=unit.cgroup)
+            for role,unit in fx.units.items():fx.rows[role].update(Id=unit.unit,Names=[unit.unit],ControlGroup=unit.cgroup)
             fx.masks = PersistentUnitMasks(directory=fx.directory,units=fx.units)
             self.policy = make_policy(self,self.peer,units=fx.units)
         fx.session.close()

@@ -113,11 +113,13 @@ class BindSourceTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), b"changed")
 
     def test_replaced_source_directory_refuses(self):
-        with self.open() as observer:
-            self.fx.paths["config"].rename(self.fx.root / "detached-config")
-            self.fx.paths["config"].mkdir(mode=0o700)
-            with self.assertRaises(durable.Rejected):
-                self.verify(observer)
+        # The retained directory handle also rejects replacement on context exit.
+        with self.assertRaisesRegex(durable.Rejected, "^installation-directory-changed$"):
+            with self.open() as observer:
+                self.fx.paths["config"].rename(self.fx.root / "detached-config")
+                self.fx.paths["config"].mkdir(mode=0o700)
+                with self.assertRaises(durable.Rejected):
+                    self.verify(observer)
 
     def test_reached_file_read_fault_poisoning(self):
         for code in (errno.EIO, errno.ENOSPC):

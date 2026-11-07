@@ -76,8 +76,11 @@ class WriteSetVerifierTests(unittest.TestCase):
                 else:
                     path.unlink()
                     path.symlink_to(self.fx.paths["auth"] / "unrelated.json")
-                with self.open() as observer, self.assertRaises(durable.Rejected):
+                expected = OSError if change == "link" else durable.Rejected
+                with self.open() as observer, self.assertRaises(expected) as failure:
                     observer.capture_files(self.fx.value, self.roles, deadline=1100)
+                if change == "link":
+                    self.assertEqual(failure.exception.errno, errno.ELOOP)
                 if change == "mode":
                     self.assertEqual(path.stat().st_mode & 0o777, 0o640)
                 else:
@@ -145,11 +148,12 @@ class WriteSetVerifierTests(unittest.TestCase):
             observer.verify_files(self.fx.value, deadline=self.fx.time)
 
     def test_root_replacement_and_role_aliases_refuse(self):
-        with self.open() as observer:
-            self.fx.paths["config"].rename(self.fx.root / "detached")
-            self.fx.paths["config"].mkdir(mode=0o700)
-            with self.assertRaises(durable.Rejected):
-                observer.verify_files(self.fx.value, deadline=1100)
+        with self.assertRaisesRegex(durable.Rejected, "^installation-directory-changed$"):
+            with self.open() as observer:
+                self.fx.paths["config"].rename(self.fx.root / "detached")
+                self.fx.paths["config"].mkdir(mode=0o700)
+                with self.assertRaises(durable.Rejected):
+                    observer.verify_files(self.fx.value, deadline=1100)
         self.setUp()
         with self.open() as observer, self.assertRaises(durable.Rejected):
             observer.capture_files(self.fx.value, {"config": self.roles["config"], "alias": self.roles["config"]}, deadline=1100)

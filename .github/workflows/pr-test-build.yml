@@ -354,7 +354,7 @@ jobs:
       - name: Websocket keepalive upload regression at PR head
         shell: bash
         run: |
-          go test -race -count=100 -timeout=180s -run '^TestCodexWebsockets_KeepalivePingDuringUpload_WithSession$' ./internal/runtime/executor 2>&1 | tee "$RUNNER_TEMP/websocket-keepalive-upload.log"
+          go test -race -count=100 -timeout=180s -run '^TestCodexWebsockets_KeepalivePingDuringUpload_(WithSession|Sessionless|NonstreamSessionless)$' ./internal/runtime/executor 2>&1 | tee "$RUNNER_TEMP/websocket-keepalive-upload.log"
       - name: Retain raw race result
         if: always()
         uses: actions/upload-artifact@v4

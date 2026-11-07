@@ -136,6 +136,47 @@ def inspect_object(row, object_id, image_id, slice_name, *, running):
             "Docker object running state mismatch")
 
 
+def task_executable(root, object_id, pid, *, proc=Path("/proc")):
+    # procfs executable link text is relative to the task's mount namespace, not
+    # a host-side storage path. Bind the actual descriptors to Moby v28's VFS
+    # mount-id mapping instead; matching bytes alone cannot prove that placement.
+    require(re.fullmatch(r"[0-9a-f]{64}", object_id), "full Docker object identity required")
+    mount_record = root / "docker/image/vfs/layerdb/mounts" / object_id / "mount-id"
+    mount_id = protected_bytes(mount_record, limit=128)[0].decode("ascii")
+    require(re.fullmatch(r"[0-9a-f]{64}", mount_id), "bounded VFS mount identity required")
+    private_root = root / "docker/vfs/dir" / mount_id
+    process = proc / str(pid)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    private_fd = os.open(private_root, flags)
+    try:
+        # Following these two procfs magic links is intentional. The caller holds
+        # live pidfds and subsequently requires death of this exact process set.
+        process_fd = os.open(process / "root", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            def same(first, second):
+                return (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
+            require(same(os.fstat(private_fd), os.fstat(process_fd)), "task root outside private Docker layer")
+            raw, expected = protected_bytes(private_root / "probe")
+            with (process / "exe").open("rb") as executable:
+                actual = os.fstat(executable.fileno())
+                mounted = os.stat("probe", dir_fd=process_fd, follow_symlinks=False)
+                require(stat.S_ISREG(mounted.st_mode) and same(actual, mounted) and same(actual, expected),
+                        "task executable differs from private mounted probe")
+                require(executable.read(len(raw) + 1) == raw, "task executable bytes changed")
+                require(same(os.fstat(executable.fileno()), os.stat("probe", dir_fd=private_fd,
+                                                                 follow_symlinks=False)),
+                        "private task executable replaced")
+            require(same(private_root.stat(), os.fstat(private_fd))
+                    and same((process / "root").stat(), os.fstat(process_fd))
+                    and protected_bytes(mount_record, limit=128)[0] == mount_id.encode("ascii"),
+                    "task root mapping changed")
+            return raw
+        finally:
+            os.close(process_fd)
+    finally:
+        os.close(private_fd)
+
+
 def rootfs_archive(raw_probe):
     # Only source-built static task bytes; no external image, tar extraction in
     # this process, registry credential, inherited build context or host binding.
@@ -365,8 +406,8 @@ def main(probe):
                 require(not poller.poll(0), "Docker process died before executable observation")
                 path = str(Path("/proc/%d/exe" % member).resolve())
                 if member in members:
-                    require(Path(path).is_relative_to(root / "docker") and Path(path).name == "probe",
-                            "task executable outside private Docker root")
+                    require(task_executable(root, object_id, member) == raw_probe,
+                            "task executable differs from source-built probe")
                     role, expected = "/probe", hashlib.sha256(raw_probe).hexdigest()
                 else:
                     require(path in allowed, "unexpected Docker runtime process")

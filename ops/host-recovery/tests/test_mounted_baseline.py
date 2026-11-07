@@ -91,11 +91,12 @@ class MountedBaselineTests(unittest.TestCase):
         self.assertTrue(view.failed)
 
     def test_destination_replaced_after_yield_refuses_original_open_handles(self):
-        with self.open() as view, self.assertRaises(durable.Rejected):
-            with view.observe(self.fx.value, deadline=1100):
-                path = self.fx.paths["plugin"]
-                path.rename(self.fx.root / "detached-plugin")
-                path.mkdir(mode=0o700)
+        with self.assertRaisesRegex(durable.Rejected, "^installation-directory-changed$"):
+            with self.open() as view, self.assertRaises(durable.Rejected):
+                with view.observe(self.fx.value, deadline=1100):
+                    path = self.fx.paths["plugin"]
+                    path.rename(self.fx.root / "detached-plugin")
+                    path.mkdir(mode=0o700)
         self.assertTrue(view.failed)
 
     def test_independent_approval_and_object_linkage_are_not_learned_from_current_state(self):

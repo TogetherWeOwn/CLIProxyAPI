@@ -2814,12 +2814,21 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 			return nil
 		})
 
+		type uploadResult struct {
+			messageType int
+			payload     []byte
+			err         error
+		}
+		uploadCh := make(chan uploadResult, 1)
+		readerDone := make(chan struct{})
 		go func() {
-			for {
-				if _, _, errRead := conn.ReadMessage(); errRead != nil {
-					return
-				}
-			}
+			defer close(readerDone)
+			messageType, payload, errRead := conn.ReadMessage()
+			uploadCh <- uploadResult{messageType, payload, errRead}
+		}()
+		defer func() {
+			_ = conn.Close()
+			<-readerDone
 		}()
 
 		// Wait until client has entered writeMessage on sessionless path.
@@ -2845,8 +2854,27 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 			return
 		}
 
+		// Pong delivery releases the hook, not the payload write. Do not send a
+		// terminal response or close until the real request has arrived.
+		select {
+		case upload := <-uploadCh:
+			if upload.err != nil {
+				t.Errorf("read uploaded request: %v", upload.err)
+				return
+			}
+			if upload.messageType != websocket.TextMessage || gjson.GetBytes(upload.payload, "type").String() != "response.create" {
+				t.Error("expected uploaded response.create text message")
+				return
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("timed out waiting for payload upload after pong delivery")
+			return
+		}
+
 		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
-		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, respPayload); errWrite != nil {
+			t.Errorf("write terminal response: %v", errWrite)
+		}
 	}))
 	defer server.Close()
 
@@ -2906,12 +2934,21 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 			return nil
 		})
 
+		type uploadResult struct {
+			messageType int
+			payload     []byte
+			err         error
+		}
+		uploadCh := make(chan uploadResult, 1)
+		readerDone := make(chan struct{})
 		go func() {
-			for {
-				if _, _, errRead := conn.ReadMessage(); errRead != nil {
-					return
-				}
-			}
+			defer close(readerDone)
+			messageType, payload, errRead := conn.ReadMessage()
+			uploadCh <- uploadResult{messageType, payload, errRead}
+		}()
+		defer func() {
+			_ = conn.Close()
+			<-readerDone
 		}()
 
 		// Wait until client has entered writeMessage on nonstream path.
@@ -2937,8 +2974,25 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 			return
 		}
 
+		select {
+		case upload := <-uploadCh:
+			if upload.err != nil {
+				t.Errorf("read uploaded request: %v", upload.err)
+				return
+			}
+			if upload.messageType != websocket.TextMessage || gjson.GetBytes(upload.payload, "type").String() != "response.create" {
+				t.Error("expected uploaded response.create text message")
+				return
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("timed out waiting for payload upload after pong delivery")
+			return
+		}
+
 		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
-		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, respPayload); errWrite != nil {
+			t.Errorf("write terminal response: %v", errWrite)
+		}
 	}))
 	defer server.Close()
 

@@ -3,6 +3,7 @@ import io
 from pathlib import Path
 import sys
 import tarfile
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -116,6 +117,61 @@ class DockerRuntimeFixtureTests(unittest.TestCase):
             changed[field] = value
             with self.subTest(field=field), self.assertRaises(AssertionError):
                 self.inspect(changed)
+
+    def task_files(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        mount_id = "c" * 64
+        record = root / "docker/image/vfs/layerdb/mounts" / self.object_id / "mount-id"
+        record.parent.mkdir(parents=True)
+        record.write_text(mount_id)
+        private = root / "docker/vfs/dir" / mount_id
+        private.mkdir(parents=True)
+        (private / "probe").write_bytes(b"synthetic-task")
+        process = root / "proc/123"
+        process.mkdir(parents=True)
+        (process / "root").symlink_to(private, target_is_directory=True)
+        (process / "exe").symlink_to(private / "probe")
+        return root, private, record, process
+
+    def test_task_executable_uses_private_root_and_inode_not_link_text(self):
+        root, _, _, _ = self.task_files()
+        self.assertEqual(fixture.task_executable(root, self.object_id, 123, proc=root / "proc"), b"synthetic-task")
+
+    def test_identical_executable_bytes_in_other_root_refuse(self):
+        root, _, _, process = self.task_files()
+        other = root / "other"
+        other.mkdir()
+        (other / "probe").write_bytes(b"synthetic-task")
+        (process / "root").unlink()
+        (process / "root").symlink_to(other, target_is_directory=True)
+        (process / "exe").unlink()
+        (process / "exe").symlink_to(other / "probe")
+        with self.assertRaisesRegex(AssertionError, "root outside private"):
+            fixture.task_executable(root, self.object_id, 123, proc=root / "proc")
+
+    def test_identical_executable_copy_in_correct_root_refuses(self):
+        root, private, _, process = self.task_files()
+        (private / "copy").write_bytes(b"synthetic-task")
+        (process / "exe").unlink()
+        (process / "exe").symlink_to(private / "copy")
+        with self.assertRaisesRegex(AssertionError, "differs from private mounted"):
+            fixture.task_executable(root, self.object_id, 123, proc=root / "proc")
+
+    def test_ambiguous_vfs_mount_id_refuses(self):
+        root, _, record, _ = self.task_files()
+        for value in ("", "../outside", "c" * 63, "c" * 64 + "\n", "d" * 129):
+            record.write_text(value)
+            with self.subTest(value=value), self.assertRaises(AssertionError):
+                fixture.task_executable(root, self.object_id, 123, proc=root / "proc")
+
+    def test_private_probe_symlink_refuses(self):
+        root, private, _, _ = self.task_files()
+        (private / "probe").rename(private / "real")
+        (private / "probe").symlink_to(private / "real")
+        with self.assertRaises(OSError):
+            fixture.task_executable(root, self.object_id, 123, proc=root / "proc")
 
     def test_tar_contains_only_source_probe_and_empty_mountpoints(self):
         raw = b"synthetic-probe-bytes-not-an-executable"
