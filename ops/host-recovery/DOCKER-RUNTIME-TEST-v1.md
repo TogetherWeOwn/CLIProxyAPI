@@ -65,8 +65,10 @@ source-reference correspondence, not a binary attestation.
    the fixture services. No host daemon is queried or stopped.
 3. Import a tar made solely from the exact-head static inert probe and empty
    mountpoint directories. No Dockerfile, external base image, registry access,
-   host bind, privileged task, process capability or exec API is used. The task
-   has network `none`, no-new-privileges and bounded PIDs.
+   non-fixture host bind, privileged task, process capability or exec API is used.
+   Three read-only binds expose only freshly constructed synthetic auth/config/
+   empty-plugin roots, never repository, host configuration, credentials or sockets.
+   The task has network `none`, no-new-privileges and bounded PIDs.
 4. Create without starting. Observe the full container/image ID and exact
    restart `no`/zero-retry, non-auto-remove isolation settings **before start**.
    This is observed fixture metadata, **not durable host registration**.
@@ -165,7 +167,41 @@ observation-record publication. Approved `RW=false` metadata, read-only descript
 access and matching file bytes cannot substitute for the kernel mount flag.
 Synthetic unit fixtures explicitly script this VFS result; same-inode remount and
 VFS-error negatives do not claim an actual remount drill. The native positive
-control is `/sys`, not a complete baseline/auth/config integration.
+control is `/sys`. The separate complete synthetic-baseline integration below
+requires its own exact-head Actions result; the primitive check alone is not it.
+
+## Complete synthetic mounted-baseline integration
+
+The same original five-process witness and exact full object/PID now feed
+`open_mounted_baseline` and a fresh `WriteSetVerifier`, with no patched procfs,
+VFS flag, file reader or manager mapping. `docker_baseline_fixture.py` exclusively
+creates one run-scoped 0700 directory directly under `/` on the disposable hosted
+runner. This avoids trusting `/tmp`; no existing ancestor permission or ACL is
+changed. Its exact runtime-root ownership marker is required for cleanup. Both
+cleanup paths remove this directory only after the owned runtime domain has been
+terminated/removed and mounted paths in the cleanup namespace have been refused.
+Uncertain cleanup fails rather than adopting another directory or unmounting it.
+
+Only its three synthetic source directories are bound into `/baseline/{auth,
+config,plugin}` with read-only default-private binds. Docker's complete mount
+projection and exact bind arguments are independently compared before start,
+while running and after cold startup; arbitrary or extra bindings refuse. The
+baseline contains nine synthetic Meta records (seven disabled/two enabled), an
+unrelated provider, nested unrelated binary bytes/mode, config/Compose bytes and
+an empty plugin root. The aggregate and per-root baselines are saved by the actual
+source inventory/durability code. The observation reads all roots through the
+captured task's procfs root, compares complete bytes/metadata/inventories, and
+requires actual kernel readonly flags before and after scanning and after yield.
+
+A second observation reaches its yield, then changes the nested unrelated file
+through the fixture's writable host alias. Its trailing scan must reject. This is
+an actual byte-drift counterexample, not a mount/remount drill or proof of writer
+exclusion. The fixture does not repair that synthetic drift or start another task.
+Successful synthetic correspondence must retain `start_authorized=false` and
+`plugin_readiness_verified=false`. The original intent/approvals/authority remain
+diagnostic inputs: no installed supervisor lock, registered-object authority,
+semantic/image/plugin/readiness oracle or integrated recovery is supplied. All
+new assertions remain unverified until exact-head Actions finishes.
 
 This is a mount-local point observation. It does not prove that nested mounts,
 other writable aliases, future remounts or privileged writers are excluded. The

@@ -1,7 +1,7 @@
 """Hosted Actions only: fresh private Docker/runtime containment and cold restart.
 
 Diagnostic byte pins are not release provenance. No default daemon, image pull,
-production metadata, host bind mount or operational recovery authority is used.
+production metadata, non-fixture host binding or operational recovery authority is used.
 """
 from contextlib import ExitStack
 import hashlib
@@ -29,6 +29,7 @@ from host_recovery.durable import Rejected
 from host_recovery.mounted_baseline import require_readonly_mount
 from host_recovery.process_mounts import open_peer_mount_view
 from host_recovery.runtime_processes import RuntimeProcessWitness
+import docker_baseline_fixture as baseline_fixture
 
 # Independently observed in the complete Actions 42129659342 inventory. Refuse
 # drift; never repin from a runner, install tools or discover an ambient socket.
@@ -144,13 +145,20 @@ def private_info(root, pid, current, deadline, *, unit, invocation):
         connection.close()
 
 
-def inspect_object(row, object_id, image_id, slice_name, *, running):
+def inspect_object(row, object_id, image_id, slice_name, *, running, mounts=None):
     require(row["Id"] == object_id and row["Image"] == image_id and row["Path"] == "/probe"
             and row["Args"] == [] and row["RestartCount"] == 0, "Docker object identity changed")
     host = row["HostConfig"]
+    expected = [] if mounts is None else mounts
+    fields = {"Type", "Source", "Destination", "Mode", "RW", "Propagation"}
+    require(type(row["Mounts"]) is list and all(type(mount) is dict and set(mount) == fields
+            for mount in row["Mounts"]), "Docker fixture mount schema changed")
+    binds = [mount["Source"] + ":" + mount["Destination"] + ":ro" for mount in expected]
+    require(sorted(row["Mounts"], key=lambda mount: mount["Destination"])
+            == sorted(expected, key=lambda mount: mount["Destination"]), "Docker fixture mounts changed")
     require(host["RestartPolicy"] == {"Name": "no", "MaximumRetryCount": 0}
             and host["AutoRemove"] is False and host["Privileged"] is False
-            and not host["Binds"] and not row["Mounts"] and host["NetworkMode"] == "none"
+            and sorted(host["Binds"] or []) == sorted(binds) and host["NetworkMode"] == "none"
             and host["CgroupParent"] == slice_name and host["Runtime"] == "cpa"
             and host["CapDrop"] == ["ALL"] and host["SecurityOpt"] == ["no-new-privileges"],
             "Docker object isolation/policy mismatch")
@@ -268,6 +276,7 @@ def cleanup():
     all_units = [unit for epoch in units.values() for unit in epoch.values()]
     group = Path("/sys/fs/cgroup/system.slice", slice_name)
     if not os.path.lexists(root):
+        require(not os.path.lexists(baseline_fixture.baseline_root(root)), "orphan baseline fixture remains")
         require(not group.exists() and all(show(unit, "LoadState") == "not-found" for unit in all_units),
                 "Docker root absent but fixture resources remain")
         emit(docker_cleanup="already-absent")
@@ -293,6 +302,7 @@ def cleanup():
     require(not group.exists(), "Docker fixture domain remains")
     require(str(root) not in Path("/proc/self/mountinfo").read_text(), "Docker fixture mount remains; preserve evidence")
     owned(root, units, slice_name)
+    baseline_fixture.cleanup(root)
     shutil.rmtree(root)
     require(not os.path.lexists(root), "Docker fixture root remains")
     emit(docker_cleanup="removed", cgroup_removed=True)
@@ -302,7 +312,8 @@ def main(probe):
     root, units, slice_name = identity()
     pins()
     require(Path("/proc/1/comm").read_text().strip() == "systemd", "real system manager required")
-    require(not os.path.lexists(root) and not Path("/sys/fs/cgroup/system.slice", slice_name).exists()
+    require(not os.path.lexists(root) and not os.path.lexists(baseline_fixture.baseline_root(root))
+            and not Path("/sys/fs/cgroup/system.slice", slice_name).exists()
             and all(show(unit, "LoadState") == "not-found" for epoch in units.values() for unit in epoch.values()),
             "fresh Docker resources required")
     raw_probe, _ = protected_bytes(Path(probe), limit=16 * 1024 * 1024)
@@ -318,6 +329,7 @@ def main(probe):
     (root / "owner.json").chmod(0o600)
     fds, domain_fd, witness = [], None, None
     try:
+        baseline = baseline_fixture.prepare(root)
         (root / "client").mkdir(mode=0o700)
         containerd = config_bytes(root) + ('[plugins."io.containerd.shim.v1.manager"]\nsocket_dir = '
                                          + json.dumps(str(root / "s")) + '\n').encode()
@@ -345,7 +357,7 @@ def main(probe):
         def observe(object_id, image_id, running):
             row = json.loads(docker_cmd("container", "inspect", object_id).stdout)
             require(type(row) is list and len(row) == 1, "one exact Docker object required")
-            inspect_object(row[0], object_id, image_id, slice_name, running=running)
+            inspect_object(row[0], object_id, image_id, slice_name, running=running, mounts=baseline["mounts"])
             require(docker_cmd("container", "ls", "--all", "--no-trunc", "--format={{.ID}}").stdout
                     == (object_id + "\n").encode(), "whole Docker inventory changed")
             current()
@@ -389,9 +401,12 @@ def main(probe):
         require(docker_cmd("container", "ls", "--all", "--quiet").stdout == b"", "fresh Docker daemon contains objects")
         image_id = docker_cmd("image", "import", "--change=ENTRYPOINT [\"/probe\"]", str(root / "rootfs.tar")).stdout.decode().strip()
         require(re.fullmatch(r"sha256:[0-9a-f]{64}", image_id), "imported source image identity required")
+        volumes = ["--volume=" + mount["Source"] + ":" + mount["Destination"] + ":ro"
+                   for mount in baseline["mounts"]]
         object_id = docker_cmd("container", "create", "--name=cpa-inert", "--restart=no", "--network=none",
                                "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=64",
-                               "--cgroup-parent=" + slice_name, "--runtime=cpa", "--log-driver=none", image_id).stdout.decode().strip()
+                               "--cgroup-parent=" + slice_name, "--runtime=cpa", "--log-driver=none",
+                               *volumes, image_id).stdout.decode().strip()
         require(re.fullmatch(r"[0-9a-f]{64}", object_id), "full created object identity required")
         observe(object_id, image_id, False)
         emit(full_object_id=object_id, image_id=image_id, policy_observed_before_start=True,
@@ -463,6 +478,28 @@ def main(probe):
                 pass
         emit(captured_task_pidfd_mapping_verified=True, wrong_object_and_daemon_pid_rejected=True,
              complete_baseline_verified=False, start_allowed=False)
+        with baseline_fixture.observe(baseline, object_id=object_id, pid=pid, witness=witness,
+                                      check=task_authority, deadline=deadline) as receipt:
+            require(receipt["mounted_files_verified"] is True and receipt["process_root_observed"] is True
+                    and receipt["roots"] == 3 and receipt["start_authorized"] is False
+                    and receipt["plugin_readiness_verified"] is False, "complete mounted baseline receipt invalid")
+            emit(synthetic_mounted_baseline=receipt)
+        # A read-only task mount does NOT exclude writes through its host alias.
+        # Reach the post-yield scan with real bytes changed, and require refusal.
+        reached = False
+        try:
+            with baseline_fixture.observe(baseline, object_id=object_id, pid=pid, witness=witness,
+                                          check=task_authority, deadline=deadline):
+                reached = True
+                baseline_fixture.put(baseline["paths"]["auth"] / "nested/unrelated.bin",
+                                     b"synthetic-host-alias-drift", mode=0o640)
+        except Rejected as err:
+            require(reached and str(err) == "mounted-baseline-observation-unconfirmed",
+                    "baseline drift did not reach trailing mounted observation")
+        else:
+            raise AssertionError("readonly task mount hid host-alias byte drift")
+        emit(complete_synthetic_mounted_baseline_verified=True, host_alias_drift_rejected_after_yield=True,
+             continuous_writer_exclusion=False, operational_recovery_accepted=False, start_allowed=False)
         # Independently pin all original runtime process executables/membership.
         # The source witness retains pidfds; these numeric reads cannot survive a
         # death unnoticed because require_dead must subsequently cover that set.

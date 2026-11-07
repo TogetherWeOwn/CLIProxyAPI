@@ -26,6 +26,54 @@ class DockerRuntimeFixtureTests(unittest.TestCase):
     def inspect(self, row, running=False):
         inspect_object(row, self.object_id, self.image_id, self.slice, running=running)
 
+    def test_baseline_root_is_separate_protected_and_exact_runtime_scoped(self):
+        root = fixture.baseline_fixture.baseline_root(self.root)
+        self.assertEqual(root.parent, Path("/"))
+        self.assertNotEqual(root, fixture.baseline_fixture.baseline_root(fixture_names("123456789", "2")[0]))
+        for path in (Path("/tmp/anything"), Path("/"), Path(str(self.root) + "/child")):
+            with self.subTest(path=path), self.assertRaises(fixture.Rejected):
+                fixture.baseline_fixture.baseline_root(path)
+
+    def test_diagnostic_intent_binds_actual_object_and_baseline_without_start(self):
+        value = fixture.baseline_fixture.intent("c" * 64, self.object_id)
+        self.assertEqual(value["old_object_id"], self.object_id)
+        self.assertEqual(value["baseline_sha256"], "c" * 64)
+        self.assertEqual(value["budget"]["total_seconds"], 300)
+        with self.assertRaises(fixture.Rejected):
+            fixture.baseline_fixture.intent("c" * 64, "short-id")
+
+    def mounted_row(self):
+        mounts = [{"Type": "bind", "Source": "/synthetic-private/auth", "Destination": "/baseline/auth",
+                   "Mode": "ro", "RW": False, "Propagation": "rprivate"}]
+        row = copy.deepcopy(self.row)
+        row["HostConfig"]["Binds"] = ["/synthetic-private/auth:/baseline/auth:ro"]
+        row["Mounts"] = copy.deepcopy(mounts)
+        return row, mounts
+
+    def test_only_exact_expected_mount_projection_and_bind_argv_are_accepted(self):
+        row, mounts = self.mounted_row()
+        inspect_object(row, self.object_id, self.image_id, self.slice, running=False, mounts=mounts)
+        for field, value in (("Source", "/"), ("Destination", "/host"), ("Mode", "rw"),
+                             ("RW", True), ("Propagation", "shared")):
+            changed = copy.deepcopy(row)
+            changed["Mounts"][0][field] = value
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                inspect_object(changed, self.object_id, self.image_id, self.slice, running=False, mounts=mounts)
+
+    def test_bind_argv_cannot_differ_from_matching_inspect_mounts(self):
+        row, mounts = self.mounted_row()
+        for binds in (None, [], ["/:/baseline/auth:ro"], ["/synthetic-private/auth:/baseline/auth:rw"]):
+            changed = copy.deepcopy(row)
+            changed["HostConfig"]["Binds"] = binds
+            with self.subTest(binds=binds), self.assertRaises(AssertionError):
+                inspect_object(changed, self.object_id, self.image_id, self.slice, running=False, mounts=mounts)
+
+    def test_unexpected_additional_bind_is_not_ignored(self):
+        row, mounts = self.mounted_row()
+        row["Mounts"].append({**mounts[0], "Source": "/run/docker.sock", "Destination": "/socket"})
+        with self.assertRaises(AssertionError):
+            inspect_object(row, self.object_id, self.image_id, self.slice, running=False, mounts=mounts)
+
     def test_short_private_root_and_distinct_epoch_units(self):
         root, units, _ = fixture_names("9" * 20, "8" * 20)
         self.assertLessEqual(len(str(root / "s")), 42)
