@@ -10,6 +10,7 @@ import os
 import stat
 
 from .budget import Budget, positive
+from .continuation import ContinuationBudget, validate_continuation
 from .durable import Rejected, canonical, decode, digest, notify, read_file, signature
 from .journal import OBJECT_ID, validate_intent
 
@@ -120,8 +121,14 @@ class AttemptCoordinator:
         if canonical(self.journal.intent) != canonical(decode(self.resume_records["intent.json"][0])):
             raise Rejected("resume-original-intent-changed")
 
-    def resume(self):
-        """Recover a reopened same-boot intent; never resume candidate promotion.
+    def resume(self, *, continuation=None, continuation_sha256=None):
+        """Recover a reopened intent; never resume candidate promotion.
+
+        Without a continuation, only the original same-boot reserve is available.
+        Reboot/expired recovery needs separately approved bytes and an independent
+        authorize_continuation boundary authenticating the current recovery owner.
+        This consumes a durable one-shot request before recovery effects. A late
+        completion remains unresolved against the original target, never settled.
 
         The caller retains the installation lock and supplies the independently
         authenticated recovery owner/boundary. This subset refuses prior dispatch,
@@ -169,11 +176,29 @@ class AttemptCoordinator:
                 raise Rejected("resume-original-arm-schema")
             self.resume_records = records
             self._resume_current()
-            self.meter = Budget(intent["budget"], arm, self.clock, self.boot_id)
-            # Unknown failure time is not zero detection overhead. Charge from t0,
-            # including the detection cap; a late restart may already be too late.
-            self.meter.trigger_recovery(arm["monotonic"])
-            self.meter.events[-1]["failure_time_basis"] = "original_arm_lower_bound"
+            if continuation is None and continuation_sha256 is None:
+                self.meter = Budget(intent["budget"], arm, self.clock, self.boot_id)
+                # Unknown failure time is not zero detection overhead. Charge from
+                # t0, including detection; a late restart may already be too late.
+                self.meter.trigger_recovery(arm["monotonic"])
+                self.meter.events[-1]["failure_time_basis"] = "original_arm_lower_bound"
+            else:
+                approved = copy.deepcopy(continuation)
+                validate_continuation(approved, approval_sha256=continuation_sha256,
+                    intent=intent, arm=arm, boot_id=self.boot_id(), now=self.clock())
+                self.meter = ContinuationBudget(intent["budget"], arm, approved, self.clock, self.boot_id)
+                self._confirmed(self._call("recovery", "detection", "authorize_continuation", intent, approved))
+                if canonical(continuation) != canonical(approved):
+                    raise Rejected("continuation-approval-changed")
+                self._resume_current()
+                self.journal._write("continuation-request.json", approved)
+                self.resume_entries.add("continuation-request.json")
+                raw, info = read_file(self.journal.fd, "continuation-request.json", limit=65536)
+                if raw != canonical(approved):
+                    raise Rejected("continuation-publication-unconfirmed")
+                self.resume_records["continuation-request.json"] = raw, signature(info)
+                self._resume_current()
+                self.meter.check(self.meter.phase_ends[("recovery", "detection")])
             self._confirmed(self._call("recovery", "detection", "recovery_preflight", intent))
         except Exception:
             self.recovery_attempted = True
@@ -279,12 +304,31 @@ class AttemptCoordinator:
             self.active_phase = "persistence"
             deadline = self.meter.phase_deadline("recovery", "persistence")
             self._resume_current()
-            self.journal.finish("baseline_restored", receipt)
-            if self.resume_entries is not None:
-                self.resume_entries.add("recovery-outcome.json")
-            self._resume_current()
-            self.meter.check(deadline)
-            self.result = {"outcome": "baseline_restored", "production_acceptance": False}
+            if isinstance(self.meter, ContinuationBudget):
+                outcome = {"schema": "host-recovery-continuation-outcome-v1",
+                           "continuation_sha256": digest(self.resume_records["continuation-request.json"][0]),
+                           "intent_sha256": digest(canonical(intent)), "receipt": receipt,
+                           "baseline_restored": True, "original_target_met": False,
+                           "installation_settled": False}
+                self.journal._write("continuation-outcome.json", outcome)
+                self.resume_entries.add("continuation-outcome.json")
+                raw, info = read_file(self.journal.fd, "continuation-outcome.json", limit=65536)
+                if raw != canonical(outcome):
+                    raise Rejected("continuation-outcome-unconfirmed")
+                self.resume_records["continuation-outcome.json"] = raw, signature(info)
+                self._resume_current()
+                self.meter.check(deadline)
+                # This is a late recovery receipt, not an on-time terminal or a
+                # settled installation. The original latch and records survive.
+                self.result = {"outcome": "recovery_unresolved", "continuation_baseline_restored": True,
+                               "original_target_met": False, "production_acceptance": False}
+            else:
+                self.journal.finish("baseline_restored", receipt)
+                if self.resume_entries is not None:
+                    self.resume_entries.add("recovery-outcome.json")
+                self._resume_current()
+                self.meter.check(deadline)
+                self.result = {"outcome": "baseline_restored", "production_acceptance": False}
         except Exception:
             self.recovery_error = "recovery-" + self.active_phase + "-failed"
             self.result = {"outcome": "recovery_unresolved", "production_acceptance": False}

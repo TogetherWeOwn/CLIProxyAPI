@@ -437,11 +437,15 @@ as a substitute for the accepted production binaries.
   from that event, not from delayed detection. `resume()` now connects a reopened
   original journal to that same recovery sequence with its original arm and
   conservative detection cap, recovery-only preflight and repeated original-input
-  checks. Prior dispatch/claims/staging, expired/cross-boot state and uncertainty
-  refuse; terminal-looking files cannot skip recovery. Real synthetic restoration
-  and SIGKILL tests still use scripted host/oracle boundaries. See
-  [resume subset and limits](RESUME-v1.md). No blocking-call watchdog, persistent
-  supervisor loop, reboot/expired continuation, actual manager or executable
+  checks. Prior dispatch/claims/staging and uncertainty refuse; terminal-looking
+  files cannot skip recovery. Reboot/expired recovery additionally requires a
+  separately pinned continuation and independent current-owner authorization,
+  durable one-shot consumption and a distinct bounded recovery-only reserve.
+  Original arm/intent survive; even a completed late restoration stays unresolved
+  against the original target, never settled. Real synthetic restoration and
+  SIGKILL tests still use scripted host/oracle boundaries. See
+  [resume subset and limits](RESUME-v1.md). No blocking-call watchdog, operational
+  supervisor/reboot-continuation wiring, actual manager or executable
   post-check implementation exists here yet. The local alert inbox
   described below is separate and is not wired into operational admission. Mock acknowledgments
   are **not** complete host/package/start-fence evidence.

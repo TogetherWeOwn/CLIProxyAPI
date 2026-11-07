@@ -1,7 +1,7 @@
 # Original-arm coordinator resume v1 — component boundary
 
 **Not an installed supervisor, executable host recovery adapter, complete fence,
-reboot continuation or acceptance result.** This source changes no host service,
+operational reboot continuation or acceptance result.** This source changes no host service,
 daemon configuration, privilege, credential, live input or release pin.
 
 ## Implemented path
@@ -57,9 +57,9 @@ fail; transport validation/admission is not human notification or external deliv
 
 Cross-boot, missing/regressed clock, expired original budget or detection cap,
 pending dispatch/claim, staging and changed inputs return unresolved without
-restoration/start. This path does **not** implement a new bounded expired/reboot
-continuation, terminal settlement, latch retirement, new admission or safe adoption
-of a prior worker. The same object cannot retry; any later owner must reacquire the
+restoration/start unless the separate continuation protocol below is supplied.
+Neither path implements terminal settlement, latch retirement, new admission or
+safe adoption of a prior worker. The same object cannot retry; any later owner must reacquire the
 installation lock and revalidate the original state and budget from scratch.
 
 The recovery/start oracle and host boundaries remain injected and externally
@@ -69,6 +69,53 @@ true and `production_acceptance` false. Concrete persistent service/broker/fence
 all-root semantic/render/schema/dual-hash integration and the full approved
 systemd/cgroup/daemon matrix remain due. The read-only `status.py` / `observe.py`
 entrypoints do not call this path and still grant no execution.
+
+## Separately approved recovery continuation
+
+`resume(continuation=..., continuation_sha256=...)` accepts a closed
+`host-recovery-continuation-v1` object containing `continuation_id`, the original
+canonical intent/arm digests, a new recovery `owner`, and explicit `started_at` /
+`deadline` monotonic values. The owner must retain the original installation and
+attempt, name the current boot and use a different manager invocation. The caller
+supplies the separately approved digest; the journal cannot approve itself.
+
+The independent `authorize_continuation(intent, continuation, deadline=...)`
+boundary must authenticate that approval and current recovery owner under the
+retained installation lock. Missing/false/non-boolean/late authorization refuses.
+No production implementation or CLI flag supplies this authority yet. The strict
+recovery preflight, fence, quiescence and stopped-baseline/start/readiness oracle
+remain mandatory; a matching digest or a successful worker claim cannot replace
+any of them.
+
+Before recovery preflight/effects, the coordinator durably publishes
+`continuation-request.json` with the original journal's publication primitives.
+Original inputs and this consumed request are checked around every operation.
+Any write/fsync/rename/readback uncertainty refuses before recovery; an existing
+request or stage refuses after reopen, without replay or an automatic second
+continuation. Reconciliation of a consumed/ambiguous request remains separate.
+
+`ContinuationBudget` retains the **original arm** and policy while metering the
+new boot/invocation separately. The new deadline cannot exceed 180 seconds from
+its explicitly approved start; the original positive recovery phase caps and
+safety margin still apply, including authorization/publication/detection overhead.
+It has no forward deadline or renewable recovery trigger. An original same-boot
+resume whose conservative detection cap remains available cannot request a fresh
+reserve instead. Clock regression or another boot refuses. Cross-boot elapsed
+availability is unknown (`null`), never a monotonic subtraction across boots.
+
+Completion writes a distinct `continuation-outcome.json`, not an original
+`recovery-outcome.json` terminal. It links the consumed request and full baseline
+receipt. Even after restored-baseline/start/readiness callbacks succeed, status
+remains `recovery_unresolved`, with `continuation_baseline_restored: true` and
+`original_target_met: false`; the installation latch stays fenced and unsettled.
+Persistence/notification failure never turns into completion. This supplies a
+component continuation path, **not executable service wiring, operational start
+approval, a cleared original deadline miss or full recovery acceptance**.
+
+The continuation tests use real synthetic journals and file restoration with
+scripted authorization/manager/fence/start/readiness callbacks. The new methods
+are unverified until their exact-head Actions job passes; no native reboot,
+service, daemon or production timing result is implied.
 
 ## Tests and evidence limits
 
