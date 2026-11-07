@@ -56,6 +56,7 @@ jobs:
 
   recovery-components:
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -113,8 +114,11 @@ jobs:
           PY
           } 2>&1 | tee "$RUNNER_TEMP/recovery-environment.log"
       - name: Python recovery components at PR head
+        timeout-minutes: 82
         shell: bash
-        run: python3 -I ops/host-recovery/tests/run.py 2>&1 | tee "$RUNNER_TEMP/recovery-components.log"
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=30s 80m python3 -I -X faulthandler ops/host-recovery/tests/run.py 2>&1 | tee "$RUNNER_TEMP/recovery-components.log"
       - name: Native recovery manager transport on disposable private bus
         shell: bash
         run: |

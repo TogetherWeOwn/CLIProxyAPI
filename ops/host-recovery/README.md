@@ -609,6 +609,15 @@ Use exact-head Actions run/job links as CI evidence; do not substitute local
 full-suite/build transcripts. Local execution is limited to a permitted focused
 reproduction, never a CI mirror.
 
+The component job has a 90-minute CI limit. Its ordinary Python process has an
+80-minute limit with TERM followed by KILL after 30 seconds, inside an 82-minute
+step limit. The test runner emits Python stacks (without frame locals) every five
+minutes and cancels that diagnostic timer on completion. Existing always-run
+cleanup and raw-log upload steps remain after the test step; a timeout is a failed
+check, not permission to skip qualification or claim cleanup succeeded. These CI
+limits leave headroom over the observed 59-minute component run; they are not
+recovery phase allocations, downtime measurements or production operating caps.
+
 A separate read-only Actions runtime inventory records hosted Docker/containerd/runc
 and tool versions/hashes without daemon contact, installation or service mutation.
 Missing/changed tools fail that inventory, but success is not source-provenance,
