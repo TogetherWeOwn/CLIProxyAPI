@@ -441,6 +441,11 @@ as a substitute for the accepted production binaries.
   files cannot skip recovery. Reboot/expired recovery additionally requires a
   separately pinned continuation and independent current-owner authorization,
   durable one-shot consumption and a distinct bounded recovery-only reserve.
+  Consumed requests cannot replay: an explicitly approved successor pins the prior
+  request, independently reconciles all prior owners/effects and consumes a fresh
+  append-only slot before recovery. Canonical/private/contiguous history and all
+  prior bytes/inodes stay bound; staged history refuses and no prior outcome can
+  skip current recovery/oracles. This does not implement the retirement boundary.
   Original arm/intent survive; even a completed late restoration stays unresolved
   against the original target, never settled. Real synthetic restoration and
   SIGKILL tests still use scripted host/oracle boundaries. See

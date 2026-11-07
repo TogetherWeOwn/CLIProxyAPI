@@ -90,9 +90,10 @@ any of them.
 Before recovery preflight/effects, the coordinator durably publishes
 `continuation-request.json` with the original journal's publication primitives.
 Original inputs and this consumed request are checked around every operation.
-Any write/fsync/rename/readback uncertainty refuses before recovery; an existing
-request or stage refuses after reopen, without replay or an automatic second
-continuation. Reconciliation of a consumed/ambiguous request remains separate.
+Any write/fsync/rename/readback uncertainty refuses before recovery. An existing
+request cannot replay after reopen; staged/unknown state still refuses. A consumed
+canonical request can only be superseded by the separately approved, append-only
+successor protocol below, never by retrying or overwriting it.
 
 `ContinuationBudget` retains the **original arm** and policy while metering the
 new boot/invocation separately. The new deadline cannot exceed 180 seconds from
@@ -116,6 +117,52 @@ The continuation tests use real synthetic journals and file restoration with
 scripted authorization/manager/fence/start/readiness callbacks. The new methods
 are unverified until their exact-head Actions job passes; no native reboot,
 service, daemon or production timing result is implied.
+
+## Consumed-request succession
+
+A recovery owner can die after consuming its request or after partially restoring
+files. Replaying that request is still forbidden. An explicit successor uses
+`host-recovery-continuation-v2`: the same fields as v1 plus `previous_sha256`,
+which pins the canonical immediately preceding consumed request. The first request
+must remain v1. Approval must name a fresh continuation ID and manager invocation,
+not any original or previously used invocation. Same-boot start points cannot go
+backwards; no monotonic ordering is invented between different boots.
+
+Under the retained installation lock, resume reads the consecutive private,
+canonical history, rejects gaps/orphan outcomes/unknown records/staging, and
+retains every request/outcome byte and inode through all later operations. The
+supplied digest binds a new independent approval, not self-approval from history.
+After `authorize_continuation`, a separate
+`reconcile_continuation(intent, history, successor, deadline=...)` boundary must
+independently prove **all** prior recovery invocations and their pending effects
+retired/quiescent and prevent their reactivation. Lock reacquisition, request or
+outcome visibility, missing jobs, a worker exit or an elapsed deadline cannot
+supply this acknowledgment. Missing/false/non-boolean/late/failed reconciliation
+refuses before consuming a successor or calling recovery preflight. This remains
+an injected operational prerequisite; no CLI/start grant is added.
+
+The successor is then durably consumed as `continuation-request-02.json`, etc.,
+before any recovery effects. Its optional outcome uses the matching suffix and
+links only that request. Original intent/arm, prior requests and outcomes are never
+overwritten, removed or adopted as verification. A full current recovery sequence
+and fresh stopped-baseline/start/readiness oracle remain mandatory, even when the
+prior outcome looks complete. Completed successors still report the original
+target unmet and the installation unsettled/fenced.
+
+There are at most eight explicitly approved requests per retained history. This is
+a fail-closed input/resource bound, not a retry policy or permission to schedule
+successors. A full chain, malformed/staged history or unprovable retirement needs
+separate deliberate reconciliation, not pruning, a new counter or automatic
+approval. Each successor's authorization/publication/retirement consumes its own
+approved detection allocation; the original target is never renewed.
+
+New succession tests are authored for failed retirement, stale approval/tip/owner,
+history drift, all twelve reached EIO/ENOSPC publication combinations, chain bounds
+and a separate-process SIGKILL after request consumption. Filesystem/lock/process
+operations are real synthetic components; authorization, prior-owner retirement,
+manager, fence, start and readiness are scripted. They are **not yet verified**
+until exact-head Actions passes. No actual reboot, operational fencing, daemon
+reconciliation or full recovery/timing acceptance is implied.
 
 ## Tests and evidence limits
 

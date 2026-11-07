@@ -10,7 +10,8 @@ import os
 import stat
 
 from .budget import Budget, positive
-from .continuation import ContinuationBudget, validate_continuation
+from .continuation import (MAX_CONTINUATIONS, ContinuationBudget, continuation_history,
+                           continuation_names, validate_continuation)
 from .durable import Rejected, canonical, decode, digest, notify, read_file, signature
 from .journal import OBJECT_ID, validate_intent
 
@@ -150,6 +151,8 @@ class AttemptCoordinator:
                 raise Rejected("resume-reopen-after-uncertainty-required")
             self.resume_entries = set(os.listdir(self.journal.fd))
             allowed = {"intent.json", "arm.json", "outcome.json", "recovery-outcome.json"}
+            allowed.update(name for index in range(1, MAX_CONTINUATIONS + 1)
+                           for name in continuation_names(index))
             for name in self.resume_entries - allowed:
                 if not (name.startswith("object-") and name.endswith(".json")
                         and OBJECT_ID.fullmatch(name[7:-5])):
@@ -174,9 +177,13 @@ class AttemptCoordinator:
             if (type(arm) is not dict or set(arm) != {"boot_id", "monotonic"}
                     or arm["boot_id"] != intent["owner"]["boot_id"] or not positive(arm["monotonic"])):
                 raise Rejected("resume-original-arm-schema")
+            history, retained = continuation_history(self.journal.fd, self.resume_entries, intent=intent, arm=arm)
+            records.update(retained)
             self.resume_records = records
             self._resume_current()
             if continuation is None and continuation_sha256 is None:
+                if history:
+                    raise Rejected("continuation-consumed-request-requires-successor")
                 self.meter = Budget(intent["budget"], arm, self.clock, self.boot_id)
                 # Unknown failure time is not zero detection overhead. Charge from
                 # t0, including detection; a late restart may already be too late.
@@ -184,19 +191,32 @@ class AttemptCoordinator:
                 self.meter.events[-1]["failure_time_basis"] = "original_arm_lower_bound"
             else:
                 approved = copy.deepcopy(continuation)
+                if len(history) >= MAX_CONTINUATIONS:
+                    raise Rejected("continuation-history-limit")
                 validate_continuation(approved, approval_sha256=continuation_sha256,
-                    intent=intent, arm=arm, boot_id=self.boot_id(), now=self.clock())
+                    intent=intent, arm=arm, boot_id=self.boot_id(), now=self.clock(),
+                    previous=history[-1] if history else None)
+                if any(approved["continuation_id"] == old["continuation_id"]
+                       or approved["owner"]["invocation_id"] == old["owner"]["invocation_id"] for old in history):
+                    raise Rejected("continuation-history-owner-reused")
                 self.meter = ContinuationBudget(intent["budget"], arm, approved, self.clock, self.boot_id)
                 self._confirmed(self._call("recovery", "detection", "authorize_continuation", intent, approved))
+                if history:
+                    # The lock and a prior receipt cannot prove a worker dead.
+                    # Independently fence/retire every earlier invocation before
+                    # consuming a new request; never adopt or redispatch one.
+                    self._confirmed(self._call("recovery", "detection", "reconcile_continuation",
+                                               intent, history, approved))
                 if canonical(continuation) != canonical(approved):
                     raise Rejected("continuation-approval-changed")
                 self._resume_current()
-                self.journal._write("continuation-request.json", approved)
-                self.resume_entries.add("continuation-request.json")
-                raw, info = read_file(self.journal.fd, "continuation-request.json", limit=65536)
+                self.continuation_request, self.continuation_outcome = continuation_names(len(history) + 1)
+                self.journal._write(self.continuation_request, approved)
+                self.resume_entries.add(self.continuation_request)
+                raw, info = read_file(self.journal.fd, self.continuation_request, limit=65536)
                 if raw != canonical(approved):
                     raise Rejected("continuation-publication-unconfirmed")
-                self.resume_records["continuation-request.json"] = raw, signature(info)
+                self.resume_records[self.continuation_request] = raw, signature(info)
                 self._resume_current()
                 self.meter.check(self.meter.phase_ends[("recovery", "detection")])
             self._confirmed(self._call("recovery", "detection", "recovery_preflight", intent))
@@ -306,16 +326,16 @@ class AttemptCoordinator:
             self._resume_current()
             if isinstance(self.meter, ContinuationBudget):
                 outcome = {"schema": "host-recovery-continuation-outcome-v1",
-                           "continuation_sha256": digest(self.resume_records["continuation-request.json"][0]),
+                           "continuation_sha256": digest(self.resume_records[self.continuation_request][0]),
                            "intent_sha256": digest(canonical(intent)), "receipt": receipt,
                            "baseline_restored": True, "original_target_met": False,
                            "installation_settled": False}
-                self.journal._write("continuation-outcome.json", outcome)
-                self.resume_entries.add("continuation-outcome.json")
-                raw, info = read_file(self.journal.fd, "continuation-outcome.json", limit=65536)
+                self.journal._write(self.continuation_outcome, outcome)
+                self.resume_entries.add(self.continuation_outcome)
+                raw, info = read_file(self.journal.fd, self.continuation_outcome, limit=65536)
                 if raw != canonical(outcome):
                     raise Rejected("continuation-outcome-unconfirmed")
-                self.resume_records["continuation-outcome.json"] = raw, signature(info)
+                self.resume_records[self.continuation_outcome] = raw, signature(info)
                 self._resume_current()
                 self.meter.check(deadline)
                 # This is a late recovery receipt, not an on-time terminal or a
