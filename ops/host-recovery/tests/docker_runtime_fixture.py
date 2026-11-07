@@ -390,12 +390,13 @@ def main(probe, *, recover=False):
     (root / "owner.json").chmod(0o600)
     fds, domain_fd, witness, task_http = [], None, None, None
     recovery_context = ExitStack()
+    deadline = time.monotonic() + 90
+    lock_owner = None
     try:
         baseline = baseline_fixture.prepare(root)
         if recover:
-            from host_recovery.durable import installation_lock
-            owner = baseline_fixture.intent(baseline["pin"], "0" * 64)["owner"]
-            recovery_context.enter_context(installation_lock(str(baseline["root"]), owner))
+            lock_owner = recovery_context.enter_context(
+                baseline_fixture.original_lock_owner(baseline, deadline=deadline))
         (root / "client").mkdir(mode=0o700)
         containerd = config_bytes(root) + ('[plugins."io.containerd.shim.v1.manager"]\nsocket_dir = '
                                          + json.dumps(str(root / "s")) + '\n').encode()
@@ -408,10 +409,11 @@ def main(probe, *, recover=False):
              rootfs_sha256=hashlib.sha256(archive).hexdigest(), docker_config=docker)
         command("/usr/bin/systemctl", "start", "--", slice_name)
         domain_fd, domain = open_domain(slice_name)
-        deadline = time.monotonic() + 90
         def current():
             owned(root, units, slice_name)
             require(time.monotonic() < deadline, "Docker fixture deadline exceeded")
+            if lock_owner is not None and not lock_owner.retired:
+                lock_owner.check()
             domain.current()
         def docker_cmd(*args, check=True):
             current()
@@ -476,7 +478,7 @@ def main(probe, *, recover=False):
         require(re.fullmatch(r"[0-9a-f]{64}", object_id), "full created object identity required")
         observe(object_id, image_id, False)
         if recover:
-            baseline_fixture.prepare_resume(baseline, object_id=object_id)
+            lock_owner.prepare(object_id, deadline=deadline)
         emit(full_object_id=object_id, image_id=image_id, policy_observed_before_start=True,
              durable_host_registration_implemented=False)
         docker_cmd("container", "start", object_id)
@@ -634,6 +636,12 @@ def main(probe, *, recover=False):
                 require(domain.populated() is False, "recovery restoration domain is not empty")
                 require(not task_path.exists(), "recovery restoration task scope remains")
                 return True
+            stopped_domain(deadline=deadline)
+            lock_owner.retire(deadline=deadline)
+            ownership = recovery_context.enter_context(lock_owner.recovery_lock(deadline=deadline))
+            stopped_domain(deadline=deadline)
+            emit(fixture_lock_owner_death=ownership, recovery_contender_pid=os.getpid(),
+                 original_processes_dead_before_owner_transfer=True, operational_recovery_accepted=False)
             faults = baseline_fixture.rehearse_restore_faults(baseline, object_id=object_id,
                 check=stopped_domain, deadline=deadline)
             require(len(faults) == 12, "complete restoration storage-fault matrix required")

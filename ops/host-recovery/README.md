@@ -21,13 +21,20 @@ as a substitute for the accepted production binaries.
   surviving fixture lock owner requires pidfd death, reaping, an actually repaired
   first file and a still-corrupt later root; a fresh verifier must reject that
   partial baseline before coordinator recovery retries the complete write set.
-  The helper has no start callback. This tests recovery-helper death, not transfer
-  of lock ownership or supervisor death.
-  **Diagnostic fixture callbacks only:** no authenticated operational approval,
-  supervisor process death/reboot, complete host writer/start fence, external
-  alert delivery or application readiness is proved. Installed service routes
-  remain deny-only. The new helper-death path and five component methods require
+  The helper has no start callback. That helper-death path and its five methods
+  passed on `51147ae1` (Actions 42385359851, all eight jobs green).
+  The next drill forks the original fixture lock owner **before** flock acquisition;
+  the child arms the original journal and excludes the parent while alive. After
+  actual runtime death/empty-domain checks, observed owner SIGKILL and reaping
+  precede one fresh parent lock on the same directory inode. Exact original
+  intent/arm bytes are checked before full recovery under that retained lock.
+  The 90-second enclosing deadline now also covers owner setup, without renewal.
+  Seven new component methods and this owner-transfer orchestration require new
   exact-head Actions verification; authoring them is not a PASS.
+  **Diagnostic fixture callbacks only:** this is same-boot flock/process-death
+  evidence, not manager-authenticated supervisor restart, reboot or operational
+  authority. No complete host writer/start fence, external alert delivery or
+  application readiness is proved. Installed service routes remain deny-only.
 
 - `host_recovery/topology.py`: closed dedicated-runtime expectation validation and
   root-content/external-pin/source/installation snapshot binding. Shared/unknown

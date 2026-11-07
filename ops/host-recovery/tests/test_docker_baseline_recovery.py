@@ -1,6 +1,8 @@
 """Real synthetic root restoration; task/daemon boundary is scripted here."""
 from contextlib import contextmanager
 import errno
+import select
+import signal
 import time
 import unittest
 from unittest.mock import patch
@@ -212,6 +214,101 @@ class DockerBaselineRecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(durable.Rejected, "partial-baseline-accepted"):
                 self.worker_death()
         self.assertEqual(len(calls), 2)
+
+    def test_dead_original_owner_releases_only_same_directory_lock_for_fresh_restoration(self):
+        deadline = time.monotonic() + 60
+        with fixture.original_lock_owner(self.inputs(), deadline=deadline) as owner:
+            owner.prepare("a" * 64, deadline=deadline)
+            original = dict(owner.originals)
+            self.mutate()
+            owner.retire(deadline=deadline)
+            with owner.recovery_lock(deadline=deadline) as receipt:
+                self.assertTrue(all(receipt[key] is True for key in (
+                    "original_owner_sigkill_observed", "original_owner_reaped",
+                    "live_owner_excluded_contender", "same_directory_lock_reacquired",
+                    "original_intent_arm_unchanged")))
+                self.assertIs(receipt["boot_changed"], False)
+                self.assertIs(receipt["operational_supervisor_recovery"], False)
+                with self.assertRaises(BlockingIOError):
+                    with durable.installation_lock(str(self.root), owner.owner):
+                        self.fail("second recovery owner overlapped")
+                with self.restore():
+                    self.assert_baseline()
+                self.assertEqual(original, {name: (self.root / "journal" / name).read_bytes() for name in original})
+            with self.assertRaisesRegex(durable.Rejected, "owner-retirement-required"):
+                with owner.recovery_lock(deadline=deadline):
+                    self.fail("recovery lock reused")
+        with durable.installation_lock(str(self.root), owner.owner):
+            pass
+
+    def test_owner_transfer_rejects_replacement_installation_directory(self):
+        deadline = time.monotonic() + 60
+        with fixture.original_lock_owner(self.inputs(), deadline=deadline) as owner:
+            owner.prepare("a" * 64, deadline=deadline)
+            owner.retire(deadline=deadline)
+            saved = self.root.with_name(self.root.name + ".saved")
+            self.root.rename(saved)
+            try:
+                self.root.mkdir(mode=0o700)
+                with self.assertRaisesRegex(durable.Rejected, "lock-directory-changed"):
+                    with owner.recovery_lock(deadline=deadline):
+                        self.fail("replacement directory yielded recovery")
+            finally:
+                self.root.rmdir()
+                saved.rename(self.root)
+
+    def test_live_original_owner_never_grants_a_recovery_lock(self):
+        deadline = time.monotonic() + 60
+        with fixture.original_lock_owner(self.inputs(), deadline=deadline) as owner:
+            owner.prepare("a" * 64, deadline=deadline)
+            with self.assertRaisesRegex(durable.Rejected, "owner-retirement-required"):
+                with owner.recovery_lock(deadline=deadline):
+                    self.fail("live original owner yielded recovery")
+            owner.excluded()
+
+    def test_original_owner_normal_signal_exit_is_not_a_sigkill_transfer(self):
+        deadline = time.monotonic() + 60
+        with fixture.original_lock_owner(self.inputs(), deadline=deadline) as owner:
+            owner.prepare("a" * 64, deadline=deadline)
+            signal.pidfd_send_signal(owner.pidfd, signal.SIGTERM)
+            poller = select.poll()
+            poller.register(owner.pidfd, select.POLLIN)
+            self.assertTrue(poller.poll(1000))
+            with self.assertRaisesRegex(durable.Rejected, "lock-owner-lost"):
+                owner.retire(deadline=deadline)
+            with self.assertRaisesRegex(durable.Rejected, "owner-retirement-required"):
+                with owner.recovery_lock(deadline=deadline):
+                    self.fail("unconfirmed original owner death yielded recovery")
+
+    def test_owner_transfer_rejects_changed_original_journal_before_restoration(self):
+        deadline = time.monotonic() + 60
+        with fixture.original_lock_owner(self.inputs(), deadline=deadline) as owner:
+            owner.prepare("a" * 64, deadline=deadline)
+            owner.retire(deadline=deadline)
+            self.put(self.root / "journal/arm.json", b"changed original arm")
+            with self.assertRaisesRegex(durable.Rejected, "owner-journal-changed"):
+                with owner.recovery_lock(deadline=deadline):
+                    self.fail("changed original arm yielded recovery")
+
+    def test_expired_owner_transfer_refuses_before_kill_and_keeps_exclusion(self):
+        deadline = time.monotonic() + 60
+        with fixture.original_lock_owner(self.inputs(), deadline=deadline) as owner:
+            owner.prepare("a" * 64, deadline=deadline)
+            with self.assertRaisesRegex(durable.Rejected, "original-arm-required"):
+                owner.retire(deadline=time.monotonic() - 1)
+            owner.check()
+            owner.excluded()
+            self.assertFalse(owner.retired)
+
+    def test_original_owner_cannot_rearm_journal_or_reuse_retirement(self):
+        deadline = time.monotonic() + 60
+        with fixture.original_lock_owner(self.inputs(), deadline=deadline) as owner:
+            owner.prepare("a" * 64, deadline=deadline)
+            with self.assertRaisesRegex(durable.Rejected, "arm-once-only"):
+                owner.prepare("b" * 64, deadline=deadline)
+            owner.retire(deadline=deadline)
+            with self.assertRaisesRegex(durable.Rejected, "lock-owner-lost"):
+                owner.retire(deadline=deadline)
 
     def test_actual_restore_and_fresh_observer_cover_all_roots_without_start_grant(self):
         self.mutate()

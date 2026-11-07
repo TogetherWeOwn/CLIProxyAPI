@@ -11,6 +11,7 @@ import re
 import select
 import shutil
 import signal
+import socket
 import stat
 import time
 
@@ -143,6 +144,145 @@ def prepare_resume(fixture, *, object_id):
         original = journal.Journal(fd)
         original.prepare(value)
         original.arm({"boot_id": kernel_boot_id(), "monotonic": time.monotonic()})
+
+
+class FixtureLockOwner:
+    """Disposable same-boot owner, not a manager-authenticated supervisor.
+
+    Fork before acquiring the lock: the contender must never inherit its open
+    file description. The child only arms the journal and holds the directory;
+    no restore, daemon or service-start callback is available to it.
+    """
+    def __init__(self, fixture):
+        self.fixture = fixture
+        self.owner = intent(fixture["pin"], "0" * 64)["owner"]
+        info = fixture["root"].lstat()
+        self.identity = info.st_dev, info.st_ino
+        self.pid = self.pidfd = self.channel = None
+        self.retired = self.reaped = self.recovery_attempted = False
+        self.originals = None
+
+    def check(self):
+        poller = select.poll()
+        poller.register(self.pidfd, select.POLLIN)
+        if self.retired or poller.poll(0):
+            raise durable.Rejected("fixture-original-lock-owner-lost")
+
+    def receive(self, expected, *, deadline):
+        self.check()
+        poller = select.poll()
+        poller.register(self.channel, select.POLLIN | select.POLLHUP | select.POLLERR)
+        if (time.monotonic() >= deadline
+                or not poller.poll(max(0, int(min(10, deadline - time.monotonic()) * 1000)))
+                or self.channel.recv(128) != expected):
+            raise durable.Rejected("fixture-lock-owner-reply-unconfirmed")
+        self.check()
+
+    def excluded(self):
+        try:
+            with durable.installation_lock(str(self.fixture["root"]), self.owner):
+                pass
+        except BlockingIOError:
+            return
+        raise durable.Rejected("fixture-live-owner-did-not-exclude-contender")
+
+    def prepare(self, object_id, *, deadline):
+        if self.originals is not None or not re.fullmatch(r"[0-9a-f]{64}", object_id):
+            raise durable.Rejected("fixture-owner-arm-once-only")
+        self.check()
+        self.excluded()
+        self.channel.sendall(object_id.encode())
+        self.receive(b"armed", deadline=deadline)
+        path = self.fixture["root"] / "journal"
+        self.originals = {name: (path / name).read_bytes() for name in ("intent.json", "arm.json")}
+        if durable.decode(self.originals["intent.json"]) != {**intent(self.fixture["pin"], object_id),
+                "owner": {**self.owner, "boot_id": kernel_boot_id()}}:
+            raise durable.Rejected("fixture-owner-original-intent-mismatch")
+        self.excluded()
+
+    def retire(self, *, deadline):
+        self.check()
+        self.excluded()
+        if self.originals is None or time.monotonic() >= deadline:
+            raise durable.Rejected("fixture-owner-original-arm-required")
+        signal.pidfd_send_signal(self.pidfd, signal.SIGKILL)
+        poller = select.poll()
+        poller.register(self.pidfd, select.POLLIN)
+        if not poller.poll(max(0, int(min(10, deadline - time.monotonic()) * 1000))):
+            raise durable.Rejected("fixture-lock-owner-death-unconfirmed")
+        waited, status = os.waitpid(self.pid, os.WNOHANG)
+        self.reaped = waited == self.pid
+        if not self.reaped or not os.WIFSIGNALED(status) or os.WTERMSIG(status) != signal.SIGKILL:
+            raise durable.Rejected("fixture-lock-owner-sigkill-unconfirmed")
+        self.retired = True
+
+    @contextmanager
+    def recovery_lock(self, *, deadline):
+        if (not self.retired or not self.reaped or self.originals is None
+                or self.recovery_attempted or time.monotonic() >= deadline):
+            raise durable.Rejected("fixture-original-owner-retirement-required")
+        self.recovery_attempted = True
+        with durable.installation_lock(str(self.fixture["root"]), self.owner) as (fd, owner):
+            info = os.fstat(fd)
+            if (info.st_dev, info.st_ino) != self.identity:
+                raise durable.Rejected("fixture-recovery-lock-directory-changed")
+            with durable.directory(str(self.fixture["root"] / "journal"), private=True) as journal_fd:
+                if set(os.listdir(journal_fd)) != set(self.originals):
+                    raise durable.Rejected("fixture-owner-journal-changed")
+                for name, raw in self.originals.items():
+                    if durable.read_file(journal_fd, name)[0] != raw:
+                        raise durable.Rejected("fixture-owner-journal-changed")
+            if time.monotonic() >= deadline:
+                raise durable.Rejected("fixture-owner-recovery-deadline")
+            yield {"original_owner_sigkill_observed": True, "original_owner_reaped": True,
+                   "live_owner_excluded_contender": True, "same_directory_lock_reacquired": True,
+                   "original_intent_arm_unchanged": True, "boot_changed": False,
+                   "operational_supervisor_recovery": False}
+
+
+@contextmanager
+def original_lock_owner(fixture, *, deadline):
+    owner = FixtureLockOwner(fixture)
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET | socket.SOCK_CLOEXEC)
+    try:
+        owner.pid = os.fork()
+        if owner.pid == 0:
+            parent.close()
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            try:
+                with durable.installation_lock(str(fixture["root"]), owner.owner):
+                    child.sendall(b"locked")
+                    raw = child.recv(128)
+                    if not re.fullmatch(rb"[0-9a-f]{64}", raw):
+                        os._exit(2)
+                    prepare_resume(fixture, object_id=raw.decode())
+                    child.sendall(b"armed")
+                    # Any further command or parent loss terminates unresolved;
+                    # only the parent's observed SIGKILL counts as this drill.
+                    child.recv(1)
+            except BaseException:
+                pass
+            os._exit(2)
+        child.close()
+        owner.channel = parent
+        owner.pidfd = os.pidfd_open(owner.pid)
+        owner.receive(b"locked", deadline=deadline)
+        owner.excluded()
+        yield owner
+    finally:
+        if owner.pid is not None and owner.pid > 0 and not owner.reaped:
+            if owner.pidfd is None:
+                owner.pidfd = os.pidfd_open(owner.pid)
+            signal.pidfd_send_signal(owner.pidfd, signal.SIGKILL)
+            poller = select.poll()
+            poller.register(owner.pidfd, select.POLLIN)
+            if not poller.poll(1000) or os.waitpid(owner.pid, os.WNOHANG)[0] != owner.pid:
+                raise durable.Rejected("fixture-lock-owner-cleanup-unconfirmed")
+        parent.close()
+        child.close()
+        if owner.pidfd is not None:
+            os.close(owner.pidfd)
 
 
 def resume_stopped(fixture, *, object_id, check, verify_stopped, start_old, old_ready, deadline):

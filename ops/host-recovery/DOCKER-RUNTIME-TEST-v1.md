@@ -98,12 +98,31 @@ Each invocation keeps its original 90-second deadline; no recovery operation
 renews it. Both use the same exact ownership/cleanup checks, and neither leaves
 an idle environment. The new path is authored, pending exact-head Actions.
 
-The recovery invocation retains a real flock on its private baseline directory.
-Its owner fields are synthetic fixture inputs, not authenticated manager authority.
-After all five original processes are dead and the runtime domain is empty, it
-restores the deliberately damaged roots with the actual `WriteSetRecovery`.
-Fresh independently opened verifier handles compare every root and metadata,
-including unrelated providers, config/Compose and plugin inventory.
+The original fixture lock owner is now a separate child forked **before** it
+acquires the private baseline-directory flock; the parent never inherits that
+open file description. The child alone persists original intent/arm before the
+first task start. Acknowledged liveness and actual parent contention are required.
+It has no restoration/daemon/start callback. After all five original runtime
+processes are dead and the domain is empty, the parent observes the owner's
+SIGKILL using a live pidfd and reaps that exact child. Only then may it acquire a
+fresh flock on the same directory inode and compare the exact original journal
+bytes. This recovery lock is retained through fault drills, full restoration,
+coordinator resume, old-object restart and mounted-baseline verification. No
+rearm or repeated transfer is allowed. The enclosing 90-second bound also covers
+owner setup and never resets. Error cleanup kills/reaps only this owned child.
+
+Seven new component methods cover exclusion/transfer, directory replacement,
+refusal while alive, unconfirmed signal exit, journal drift, expired transfer
+and rearm/retirement/recovery-lock reuse. They and the new native owner-transfer orchestration are authored, not yet
+verified by exact-head Actions. Same-boot process/flock evidence is **not**
+manager-authenticated supervisor restart, cross-boot recovery, old-job retirement
+or operational approval. Owner fields remain synthetic fixture inputs.
+
+The recovery invocation restores deliberately damaged roots with the actual
+`WriteSetRecovery`. Fresh independently opened verifier handles compare every
+root and metadata, including unrelated providers, config/Compose and plugin
+inventory. Actual task/domain death must still be checked separately: a released
+lock never proves daemon quiescence or supplies permission to restore/start.
 
 Before relaunch, the recovery invocation now runs twelve restoration faults:
 EIO and ENOSPC at each create, write, file-fsync, rename, directory-fsync and
