@@ -103,9 +103,28 @@ Its owner fields are synthetic fixture inputs, not authenticated manager authori
 After all five original processes are dead and the runtime domain is empty, it
 restores the deliberately damaged roots with the actual `WriteSetRecovery`.
 Fresh independently opened verifier handles compare every root and metadata,
-including unrelated providers, config/Compose and plugin inventory. Storage-fault
-unit methods require the injected failure to be reached before the restoration
-context can yield; a new context must recover the partial files on retry.
+including unrelated providers, config/Compose and plugin inventory.
+
+Before relaunch, the recovery invocation now runs twelve restoration faults:
+EIO and ENOSPC at each create, write, file-fsync, rename, directory-fsync and
+readback hook. Every case damages a synthetic unrelated-provider file, requires
+exactly its intended hook and errno, and rejects any yielded restoration receipt.
+A new restoration context then retries and a separately opened full verifier
+must confirm all three roots. The original pidfds remain dead, the original
+runtime domain empty and the task scope absent before/after every fault and
+retry; boundary loss prevents the next retry. No task or daemon is launched by
+the fault helper. The normal final restore, cold-start assertions and fresh
+pre-start check still follow, within the unchanged original deadline.
+
+These are injected exceptions at real filesystem publication hooks while actual
+runtime-death observations are held, not induced kernel/device faults, process
+crashes during restoration, terminal-journal faults or continuous writer exclusion.
+Five component methods cover exact matrix completion, pre-mutation boundary loss,
+early same-errno errors, skipped injection and loss before retry. They and the
+extended native matrix require new exact-head Actions evidence before PASS is
+claimed. The preceding restoration/restart drill passed on
+[`3f619b63` Actions 42361044303](https://github.com/TogetherWeOwn/CLIProxyAPI/actions/runs/42361044303);
+that result does not verify these new assertions.
 
 After the original cold-start assertions prove that the same object remains
 stopped, a fresh complete filesystem observation precedes an explicit start of

@@ -632,6 +632,11 @@ def main(probe, *, recover=False):
                 require(domain.populated() is False, "recovery restoration domain is not empty")
                 require(not task_path.exists(), "recovery restoration task scope remains")
                 return True
+            faults = baseline_fixture.rehearse_restore_faults(baseline, object_id=object_id,
+                check=stopped_domain, deadline=deadline)
+            require(len(faults) == 12, "complete restoration storage-fault matrix required")
+            emit(restoration_storage_faults=faults, original_processes_dead_through_faults=True,
+                 injected_exceptions_only=True, operational_recovery_accepted=False)
             with baseline_fixture.restore_stopped(baseline, object_id=object_id,
                     check=stopped_domain, deadline=deadline) as restored:
                 require(restored["filesystem_verified"] is True and restored["roots"] == 3

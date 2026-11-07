@@ -4,6 +4,7 @@ Approvals and the original intent are diagnostic fixture inputs, not installed
 supervisor authority. No real auth/config/plugin bytes are read or restored.
 """
 from contextlib import ExitStack, contextmanager
+import errno
 import os
 from pathlib import Path
 import re
@@ -126,6 +127,45 @@ def restore_stopped(fixture, *, object_id, check, deadline, fault=None):
             receipt = verifier.verify_files(value, deadline=deadline)
             yield receipt
             verifier.verify_files(value, deadline=deadline)
+
+
+def rehearse_restore_faults(fixture, *, object_id, check, deadline):
+    """Reached storage faults while the caller proves the original task is dead.
+
+    Faults are injected exceptions at the real filesystem publication hooks, not
+    a kernel/storage-device failure. Each fresh retry must verify every root.
+    No daemon launch, task start or operational authority is available here.
+    """
+    results = []
+    def stopped():
+        if time.monotonic() >= deadline or check(deadline=deadline) is not True:
+            raise durable.Rejected("baseline-fixture-stopped-boundary-required")
+    for code in (errno.EIO, errno.ENOSPC):
+        for point in ("create", "write", "file-fsync", "rename", "directory-fsync", "readback"):
+            stopped()
+            put(fixture["paths"]["auth"] / "nested/unrelated.bin", b"synthetic-partial-restore", mode=0o640)
+            reached = []
+            def fault(stage):
+                if stage == point:
+                    reached.append(stage)
+                    raise OSError(code, "synthetic restoration storage failure")
+            try:
+                with restore_stopped(fixture, object_id=object_id, check=check, deadline=deadline, fault=fault):
+                    raise AssertionError("failed restoration yielded a usable receipt")
+            except OSError as err:
+                if err.errno != code or reached != [point]:
+                    raise AssertionError("restoration fault did not reach its exact storage hook") from err
+            else:
+                raise AssertionError("restoration storage fault was swallowed")
+            stopped()
+            with restore_stopped(fixture, object_id=object_id, check=check, deadline=deadline) as receipt:
+                if (receipt["filesystem_verified"] is not True or receipt["roots"] != 3
+                        or receipt["start_permission"] is not False):
+                    raise AssertionError("fresh restoration retry was not independently verified")
+            stopped()
+            results.append({"errno": code, "hook": point, "reached": True,
+                            "failed_restore_yielded": False, "fresh_retry_verified": True})
+    return results
 
 
 def cleanup(runtime_root):
