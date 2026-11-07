@@ -781,7 +781,7 @@ func TestHandleAuthUpdates_ModelRegistrationDoesNotHoldAuthUpdateLock(t *testing
 	started := make(chan struct{})
 	block := make(chan struct{})
 	var first atomic.Bool
-	modelRegistrationTaskHook = func() {
+	modelRegistrationTaskHook = func(_ string) {
 		if first.CompareAndSwap(false, true) {
 			close(started)
 			<-block
@@ -947,7 +947,7 @@ func TestHandleAuthUpdates_StaleDisableRegistrationDoesNotDropNewerEnable(t *tes
 	started := make(chan struct{})
 	block := make(chan struct{})
 	var first atomic.Bool
-	modelRegistrationTaskHook = func() {
+	modelRegistrationTaskHook = func(_ string) {
 		if first.CompareAndSwap(false, true) {
 			close(started)
 			<-block
@@ -1046,20 +1046,27 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 
 	bStarted := make(chan struct{})
 	bBlock := make(chan struct{})
-	var started atomic.Int32
-	modelRegistrationTaskHook = func() {
-		if started.Add(1) == 2 {
+	finishedBatch := make(chan struct{})
+	var doneA chan struct{}
+	modelRegistrationTaskHook = func(authID string) {
+		if authID == authBID {
 			close(bStarted)
 			<-bBlock
 		}
 	}
 	t.Cleanup(func() {
-		modelRegistrationTaskHook = nil
 		select {
 		case <-bBlock:
 		default:
 			close(bBlock)
 		}
+		// Drain both callers before clearing the hook or unregistering clients,
+		// including when a timeout assertion above exits the test early.
+		<-finishedBatch
+		if doneA != nil {
+			<-doneA
+		}
+		modelRegistrationTaskHook = nil
 	})
 
 	updateA := watcher.AuthUpdate{Action: watcher.AuthUpdateActionModify, ID: authAID, Auth: authA}
@@ -1067,7 +1074,6 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 	updateB := watcher.AuthUpdate{Action: watcher.AuthUpdateActionModify, ID: authBID, Auth: authB}
 	updateB.SetRevision(1)
 
-	finishedBatch := make(chan struct{})
 	go func() {
 		defer close(finishedBatch)
 		service.handleAuthUpdates(context.Background(), []watcher.AuthUpdate{updateA, updateB})
@@ -1079,7 +1085,7 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 		t.Fatal("second auth registration in batch did not start")
 	}
 
-	doneA := make(chan struct{})
+	doneA = make(chan struct{})
 	go func() {
 		service.handleAuthUpdate(context.Background(), updateA)
 		close(doneA)

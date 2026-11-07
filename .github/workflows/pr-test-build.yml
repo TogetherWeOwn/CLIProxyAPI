@@ -12,6 +12,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -23,3 +26,362 @@ jobs:
         run: |
           go build -o test-output ./cmd/server
           rm -f test-output
+
+  go-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vet Go packages at PR head
+        shell: bash
+        run: go vet ./... 2>&1 | tee "$RUNNER_TEMP/go-vet.log"
+      - name: Full Go suite at PR head
+        shell: bash
+        run: go test -count=1 ./... 2>&1 | tee "$RUNNER_TEMP/go-tests.log"
+      - name: Retain raw Go result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-tests-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/go-vet.log
+            ${{ runner.temp }}/go-tests.log
+          if-no-files-found: error
+
+  recovery-components:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Prepare protected component fixture home
+        shell: bash
+        run: |
+          # This job runs only on a disposable GitHub-hosted runner. Create a
+          # fresh short path outside /home (which can carry inherited metadata).
+          fixture_root="$(sudo mktemp -d /cpa-recovery-fixtures.XXXXXX)"
+          sudo chown "$(id -u):$(id -g)" "$fixture_root"
+          export CPA_RECOVERY_TEST_ROOT="$fixture_root"
+          printf 'CPA_RECOVERY_TEST_ROOT=%s\n' "$fixture_root" >> "$GITHUB_ENV"
+          {
+            git rev-parse HEAD
+            python3 --version
+            uname -sr
+            systemd-analyze --version
+            go version
+            python3 -I - <<'PY'
+          import os
+          from pathlib import Path
+          import stat
+          import sys
+
+          sys.path.insert(0, str(Path.cwd() / "ops/host-recovery"))
+          from host_recovery.installation import FLAGS, protected
+
+          # Validate the fresh fixture root using the unchanged production guard.
+          # Do not alter /home, ancestor permissions, ACLs or extended metadata.
+          uid = os.geteuid()
+          home = Path(os.environ["CPA_RECOVERY_TEST_ROOT"])
+          if home.stat().st_uid != uid:
+              raise RuntimeError("component fixture root is not runner-owned")
+
+          fd = os.open("/", FLAGS)
+          try:
+              info = os.fstat(fd)
+              print(f"fixture ancestor uid={info.st_uid} mode={stat.S_IMODE(info.st_mode):04o} xattrs={os.listxattr(fd)!r}", flush=True)
+              protected(fd, uid)
+              for part in home.parts[1:]:
+                  child = os.open(part, FLAGS, dir_fd=fd)
+                  os.close(fd)
+                  fd = child
+                  info = os.fstat(fd)
+                  print(f"fixture ancestor uid={info.st_uid} mode={stat.S_IMODE(info.st_mode):04o} xattrs={os.listxattr(fd)!r}", flush=True)
+                  protected(fd, uid)
+          finally:
+              os.close(fd)
+          PY
+          } 2>&1 | tee "$RUNNER_TEMP/recovery-environment.log"
+      - name: Python recovery components at PR head
+        timeout-minutes: 82
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=30s 80m python3 -I -X faulthandler ops/host-recovery/tests/run.py 2>&1 | tee "$RUNNER_TEMP/recovery-components.log"
+      - name: Native recovery manager transport on disposable private bus
+        shell: bash
+        run: |
+          # No host/system bus or real systemd service is used by this matrix.
+          command -v dbus-run-session
+          timeout 120s dbus-run-session -- env CPA_RECOVERY_PRIVATE_BUS_TEST=1 python3 -I ops/host-recovery/tests/test_manager_bus_native.py 2>&1 | tee "$RUNNER_TEMP/recovery-private-bus.log"
+      - name: Remove empty fixture root
+        if: always() && env.CPA_RECOVERY_TEST_ROOT != ''
+        shell: bash
+        # Only remove the exact empty directory created above. Removing an entry
+        # from / needs privilege even when that entry is owned by the runner.
+        run: sudo rmdir -- "$CPA_RECOVERY_TEST_ROOT"
+      - name: Retain raw component result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-components-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/recovery-environment.log
+            ${{ runner.temp }}/recovery-components.log
+            ${{ runner.temp }}/recovery-private-bus.log
+          if-no-files-found: error
+
+  recovery-system-manager:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Real manager completion and whole-unit termination
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            git rev-parse HEAD
+            # Only eight exact inert run-scoped fixtures on this disposable hosted
+            # runner are touched: two transient units, six /run fragments and two
+            # /etc masks. No runtime daemon, deployment or shared-host installation.
+            sudo env -i PATH=/usr/bin:/bin LANG=C CPA_RECOVERY_SYSTEM_MANAGER_TEST=1 \
+              GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+              GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+              /usr/bin/timeout 120s /usr/bin/python3 -I ops/host-recovery/tests/test_manager_system_native.py
+          } 2>&1 | tee "$RUNNER_TEMP/recovery-system-manager.log"
+      - name: Collect only owned manager fixtures
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo env -i PATH=/usr/bin:/bin LANG=C CPA_RECOVERY_SYSTEM_MANAGER_TEST=1 \
+            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            /usr/bin/timeout 45s /usr/bin/python3 -I ops/host-recovery/tests/test_manager_system_native.py --cleanup \
+            2>&1 | tee "$RUNNER_TEMP/recovery-system-manager-cleanup.log"
+      - name: Retain raw real-manager result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-system-manager-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/recovery-system-manager.log
+            ${{ runner.temp }}/recovery-system-manager-cleanup.log
+          if-no-files-found: error
+
+  recovery-runtime-inventory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Inventory runtime prerequisites without daemon contact
+        shell: bash
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse HEAD)"
+          go_reader="$(command -v go)"
+          env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C GITHUB_ACTIONS=true \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            timeout 90s bash ops/host-recovery/tests/inventory_runtime.sh "$head_sha" "$go_reader" \
+            2>&1 | tee "$RUNNER_TEMP/recovery-runtime-inventory.log"
+      - name: Expand only the pinned offline containerd config
+        shell: bash
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse HEAD)"
+          # Non-root config dump only; never invoke the daemon or a runtime client.
+          env -i PATH=/usr/bin:/bin LANG=C GITHUB_ACTIONS=true \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            timeout 30s python3 -I ops/host-recovery/tests/offline_containerd_config.py "$head_sha" \
+            2>&1 | tee "$RUNNER_TEMP/recovery-offline-containerd-config.log"
+      - name: Retain raw runtime prerequisite inventory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-runtime-inventory-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/recovery-runtime-inventory.log
+            ${{ runner.temp }}/recovery-offline-containerd-config.log
+          if-no-files-found: error
+
+  recovery-runtime-task:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build inert static runtime probe from this head
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/recovery-runtime-probe" ./ops/host-recovery/tests/fixtures/runtime-probe
+          sha256sum "$RUNNER_TEMP/recovery-runtime-probe"
+      - name: Dedicated runtime and actual shim task cgroup witnesses
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            git rev-parse HEAD
+            sudo env -i PATH=/usr/bin:/bin LANG=C CPA_RECOVERY_RUNTIME_TASK_TEST=1 \
+              GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+              GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+              /usr/bin/timeout 120s /usr/bin/python3 -I ops/host-recovery/tests/runtime_task_fixture.py "$RUNNER_TEMP/recovery-runtime-probe"
+          } 2>&1 | tee "$RUNNER_TEMP/recovery-runtime-task.log"
+      - name: Collect only the exact owned runtime fixture
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo env -i PATH=/usr/bin:/bin LANG=C CPA_RECOVERY_RUNTIME_TASK_TEST=1 \
+            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            /usr/bin/timeout 45s /usr/bin/python3 -I ops/host-recovery/tests/runtime_task_fixture.py --cleanup \
+            2>&1 | tee "$RUNNER_TEMP/recovery-runtime-task-cleanup.log"
+      - name: Retain raw actual runtime result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-runtime-task-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/recovery-runtime-task.log
+            ${{ runner.temp }}/recovery-runtime-task-cleanup.log
+          if-no-files-found: error
+
+  recovery-docker-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build source-only inert Docker task
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/recovery-docker-probe" ./ops/host-recovery/tests/fixtures/runtime-probe
+          sha256sum "$RUNNER_TEMP/recovery-docker-probe"
+      - name: Fresh private Docker cold-runtime witness
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            git rev-parse HEAD
+            sudo env -i PATH=/usr/bin:/bin LANG=C CPA_RECOVERY_DOCKER_RUNTIME_TEST=1 \
+              GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+              GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+              /usr/bin/timeout 150s /usr/bin/python3 -I ops/host-recovery/tests/docker_runtime_fixture.py "$RUNNER_TEMP/recovery-docker-probe"
+          } 2>&1 | tee "$RUNNER_TEMP/recovery-docker-runtime.log"
+      - name: Restore synthetic baseline and restart the exact old Docker task
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            git rev-parse HEAD
+            sudo env -i PATH=/usr/bin:/bin LANG=C CPA_RECOVERY_DOCKER_RUNTIME_TEST=1 \
+              GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+              GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+              /usr/bin/timeout 150s /usr/bin/python3 -I ops/host-recovery/tests/docker_runtime_fixture.py --recover "$RUNNER_TEMP/recovery-docker-probe"
+          } 2>&1 | tee "$RUNNER_TEMP/recovery-docker-restoration.log"
+      - name: Collect only exact owned Docker fixture
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo env -i PATH=/usr/bin:/bin LANG=C CPA_RECOVERY_DOCKER_RUNTIME_TEST=1 \
+            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            /usr/bin/timeout 60s /usr/bin/python3 -I ops/host-recovery/tests/docker_runtime_fixture.py --cleanup \
+            2>&1 | tee "$RUNNER_TEMP/recovery-docker-runtime-cleanup.log"
+      - name: Retain raw Docker qualification result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-docker-runtime-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/recovery-docker-runtime.log
+            ${{ runner.temp }}/recovery-docker-restoration.log
+            ${{ runner.temp }}/recovery-docker-runtime-cleanup.log
+          if-no-files-found: error
+
+  recovery-race:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Affected Go race suites at PR head
+        shell: bash
+        run: |
+          go test -race -count=1 ./internal/recoverycorrelation ./internal/api/middleware ./internal/config ./internal/pluginhost ./internal/client/codex/live ./sdk/api/handlers ./sdk/api/handlers/openai ./ops/host-recovery/inputguard 2>&1 | tee "$RUNNER_TEMP/recovery-race.log"
+      - name: Stream cancellation ordering regressions at PR head
+        shell: bash
+        run: |
+          go test -race -count=100 -timeout=180s -run '^TestForwardStream(CancellationPrecedesReadyUpstream|CancellationAfterPartialFlush|DeliveredOutcomeSurvivesFlushCancellation)$' ./sdk/api/handlers 2>&1 | tee "$RUNNER_TEMP/stream-cancellation-ordering.log"
+          go test -race -count=100 -timeout=180s -run '^TestIssue6332AntigravityResponsesDelivery$' ./sdk/api/handlers/openai 2>&1 | tee "$RUNNER_TEMP/responses-delivery.log"
+      - name: Heartbeat failover regression at PR head
+        shell: bash
+        run: |
+          go test -race -count=25 -timeout=180s -run '^TestServiceHeartbeatFailoverDoesNotDrainBlockingScope$' ./sdk/cliproxy 2>&1 | tee "$RUNNER_TEMP/heartbeat-failover.log"
+      - name: Auth registration synchronization regressions at PR head
+        shell: bash
+        run: |
+          go test -race -count=100 -timeout=180s -run '^TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch$' ./sdk/cliproxy 2>&1 | tee "$RUNNER_TEMP/auth-registration-wait.log"
+          go test -race -count=25 -timeout=180s -run '^TestEndToEndAuthFile(Replacement|Patch)_RestoresModelsInV1ModelsWithoutRestart$' ./sdk/cliproxy 2>&1 | tee "$RUNNER_TEMP/auth-file-restoration.log"
+      - name: Websocket keepalive upload regression at PR head
+        shell: bash
+        run: |
+          go test -race -count=100 -timeout=180s -run '^TestCodexWebsockets_KeepalivePingDuringUpload_(WithSession|Sessionless|NonstreamSessionless)$' ./internal/runtime/executor 2>&1 | tee "$RUNNER_TEMP/websocket-keepalive-upload.log"
+      - name: Retain raw race result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-race-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/recovery-race.log
+            ${{ runner.temp }}/stream-cancellation-ordering.log
+            ${{ runner.temp }}/responses-delivery.log
+            ${{ runner.temp }}/heartbeat-failover.log
+            ${{ runner.temp }}/auth-registration-wait.log
+            ${{ runner.temp }}/auth-file-restoration.log
+            ${{ runner.temp }}/websocket-keepalive-upload.log
+          if-no-files-found: error
