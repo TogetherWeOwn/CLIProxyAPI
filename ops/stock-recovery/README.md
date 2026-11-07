@@ -1,0 +1,167 @@
+# Stock journal-aware recovery source packet
+
+**PARTIAL / HOLD — source binding only. Not an installer, recovery approval, or
+permission to execute the retained scripts.** No runnable replacement wrapper is
+provided in this checkpoint. The legacy wrapper is retained only as inert review
+material. Adaptation and functional qualification remain mandatory before this
+packet can progress beyond draft.
+
+## Lineage and limitations
+
+This output reuses the operator-delivered detached `auto.sh`, `probe.py`, and
+`authcount.py` lineage observed on 2026-11-07. The observed originals have these
+SHA-256 hashes (not proof of the historically executed bytes):
+
+| Original | Bytes | SHA-256 |
+| --- | ---: | --- |
+| auto.sh | 9955 | 77857c9507f9c89cdffe3b4a418ed1fdd3054b38827dfe5ce0a1dc2cae0524e5 |
+| probe.py | 4210 | e8a54f696ee48a453e2c6f4e9c68f800c85bc2f46ca7ed01342665967d569f03 |
+| authcount.py | 414 | 49400aa3a26b4b8cf159fd4002f177bf3d2ed7d95918c7ff17a36ad1f0d5b3e2 |
+
+`retained/*.source.txt` are **inert, redacted review copies**, not the byte-identical
+originals or executable candidates. Redactions replace the original host stack
+path with `/path/to/stack`, replace the loopback probe URL with
+`http://example.invalid`, and remove the internal tracker reference from the probe
+docstring. `lineage.json` records the original identity, exact substitutions, and
+review-copy identity separately. No named authorship is established or reassigned;
+credit remains with the retained operator-delivered lineage. Do not invoke these
+files with Bash or Python, rename them to executable extensions, or copy their
+launch/manual recovery instructions into a production runbook.
+
+This is separate from any custom producer/replay controller. The retained custom
+producer's evidence failure is not repaired or accepted here. No core/SDK change,
+custom auth conversion, replay migration, or upstream publication is included.
+
+## Typed candidate artifact
+
+The official registry's v8.0.60 index was inspected read-only. The reported digest
+is the **index**, not Docker's local `.Id`:
+
+| Role | Frozen value |
+| --- | --- |
+| Registry | docker.io/eceasy/cli-proxy-api |
+| OCI index | sha256:873ec3df3b673a82f7d956d4636c7736b0c961dc6ee28f9fb403238b2898dc0d |
+| Selected test platform | linux/amd64 |
+| Platform manifest | sha256:8472aae0903a964412b8e73dd11d95d7a9932d8645789f77e8e162daa401474a |
+| Config / expected Docker image ID | sha256:f47991389017dd92a46f5d28fbb822bbce55392a70eb570231714ab2de5c0098 |
+| Reported upstream source reference | 91e0dee827abf476f9f86246f68c500a112f7155 |
+
+`oci/` contains the exact public registry index, selected manifest and config bytes,
+individually digest-bound in `manifest.json`. The registry index also lists arm64;
+that is not this frozen test platform. **The actual host platform remains unknown.**
+The image config has no source labels; their absence is neither source/binary
+attestation nor evidence that this image was installed. The reported source
+reference is context, not a verified binary/source binding.
+
+The legacy script compares the index digest above to `docker image inspect .Id`.
+That check conflates different identities. A future wrapper must compare each
+artifact using its correct role, including the observed running config ID and
+selected manifest, without accepting a mutable tag as identity.
+
+Known-served stock .60 is only a recovery candidate. Restarting the same image with
+the complete current credential/journal state is **service recovery**, not rollback
+of an uncertain grant, and cannot cure a defective binary. No .58/.51 fallback is
+allowed after a journal-aware runtime can have touched state.
+
+## Offline source inspection in GitHub Actions
+
+The standard-library-only source inspector reads the packet and hashes the bounded
+regular-file inputs. It does not execute the archived source, access Docker,
+read a credential store, use sudo, contact a provider, or grant deployment authority.
+
+Actions runs:
+
+```sh
+python3 -I ops/stock-recovery/test_packet.py -v
+python3 -I ops/stock-recovery/packet.py ops/stock-recovery/manifest.json
+```
+
+The inspector's success means **source_binding=BOUND**, while its report always
+retains **qualification=HOLD**, **service_recovery=NOT_TESTED**, and
+**execution_authorized=false**. Removing an unresolved gate is a packet error,
+not a way to qualify execution. A future reviewed receipt verifier must establish
+acceptance; a list of asserted booleans is not evidence. The packet digest and
+GitHub Actions head/run/job identities bind this source-only checkpoint. Do not
+interpret the workflow's green status as functional recovery proof.
+
+No dependencies are installed for this inspector. Tests execute only in Actions;
+no local full suite or CI mirror is part of this runbook.
+
+## Required wrapper adaptation — NOT IMPLEMENTED
+
+Continue within this single detached, self-testing wrapper lineage, not a second
+installer, scheduler, daemon, journal, or state authority:
+
+1. Prevalidate all source/helper/runbook/parameter, OCI, Compose/config, six provider
+   artifact and policy identities without secrets. Unknown host-only values are
+   gates. No optional health-check bypass or production default is acceptable.
+2. Hold one effective ownership boundary for forward, watchdog and manual recovery.
+   Before any recovery write, prove old workers and descendants are terminal and
+   queued daemon effects cannot land later. Killing a client process, a fixed
+   sleep, or a recovery-only lock is insufficient. A usable native containment and
+   daemon-reconciliation mechanism remains unproved.
+3. Persist an attempt/package-bound watchdog **ARMED** acknowledgement before stop.
+   Launching a watchdog alone is not readiness. Recovery must be independent of
+   inference and remain observable if its terminal write fails.
+4. Preserve current credentials, the complete latest authoritative journal and
+   other required current state as one unit. Never replay an old backup, move away
+   `kv.db`, delete claims, or restore only a journal or credentials. Confirm actual
+   backend/canonical mount and durability; do not assume a file-store mirror is
+   authoritative.
+5. Use the exact qualified journal-aware target against current state. Every
+   post-stop exit must produce verified adequate service recovery or explicit
+   functional failure. Failure to recover is never converted to success by a
+   model list, listening port, readiness log, silence, or process restart.
+6. Persist a durable package/attempt-bound terminal result with independently
+   observable failure if persistence is unavailable. Do not reuse the legacy
+   mutable `verified`/`rolledback` string as a receipt.
+
+## Required synthetic qualification matrix — NOT RUN
+
+Generated fake credentials/provider and disposable state only, in Actions. No
+production credentials, grants, credential copies, management APIs, default daemon,
+second refresh instance, live faults, production backups/restores, install,
+host/config/pin changes, or new spend.
+
+| Boundary | Required oracle |
+| --- | --- |
+| Claim before exchange | Restart never resubmits a claimed grant; provider-call count bounded |
+| Exchange before receipt | Uncertainty remains denied; never infer exchange did not occur |
+| Receipt before adoption | Valid durable owner receipt adopted without another exchange |
+| Later rotation | Latest receipt chain followed; no stale credential/journal replay |
+| Pending/expired/malformed/cyclic receipt | Fail closed, no extra provider call |
+| Write/sync/rename/durable-binding failure | No exchange before durable claim; no unsafe fallback |
+| Competing owners / manual recovery | Common ownership, no concurrent mutation |
+| Hang/timeout/SIGKILL/descendant/late daemon effect | Terminal quiescence before recovery writes |
+| Missing watchdog readiness | Abort before stop |
+| Watchdog/readiness/terminal persistence fault | Adequate verified recovery or independently observable explicit failure |
+| Nonstreaming, streaming, tool continuation | Validate useful response content, completed stream, correlated tool result and final continuation, not HTTP 200 alone |
+| Disabled providers, cloak, quota resets | Disabled remains disabled; cloak OFF and quota-auto-reset OFF unchanged |
+| Codex and local SIWC, where applicable | Actual stock journal behavior, not a duplicate mock algorithm |
+| Required service blocked by uncertain grant / defective target | Functional FAIL; route a compatible alternative target decision, never call restart rollback |
+
+Source-inspector unit tests are **not** any of these runtime or journal tests.
+Process-kill tests cannot claim power-loss durability. The frozen .60 runtime and
+released protocol must be exercised rather than silently substituting the older
+repository baseline or a private core backport.
+
+## Release and operations boundary
+
+Source merge is not install acceptance. Exact-artifact Release Manager acceptance
+and separately authorized detached host execution remain independent gates. Native
+Security then QA/council, exact-head Actions, required checks, Devin, CodeQL,
+rulesets, and fresh-context review remain required before source merge. If a merge
+has an automatic production path it additionally requires exact-head production
+merge approval.
+
+Staging/preview tests must run on demand or scale to zero. Any future environment
+must inventory all runtimes, use pipeline-owned startup/readiness bound to the
+SHA/environment and a bounded active window, and retain native cleanup/expiry
+on success, failure and cancellation. No keep-alive, alarm, schedule, or database
+compute may sustain idle recurring runtime cost without a dated explicit spending
+exception. This packet provisions no runtime and changes no production resource.
+
+Unproved evidence means HOLD, not permission to repeat an old host drill. If useful
+service cannot recover, return functional FAIL and the concrete alternative-target
+choice for Engineering through the existing package owner; never select a stale
+state or journal-unaware target to meet a deadline.

@@ -1,0 +1,49 @@
+{
+  "schema": "stock-recovery-source/v1",
+  "qualification_scope": "SOURCE_BINDING_ONLY",
+  "candidate": {
+    "repository": "docker.io/eceasy/cli-proxy-api",
+    "reported_upstream_source": "91e0dee827abf476f9f86246f68c500a112f7155",
+    "source_attestation": "NOT_ESTABLISHED",
+    "platform": {
+      "architecture": "amd64",
+      "os": "linux"
+    },
+    "index_file": "oci/index.json",
+    "index_digest": "sha256:873ec3df3b673a82f7d956d4636c7736b0c961dc6ee28f9fb403238b2898dc0d",
+    "manifest_file": "oci/manifest-linux-amd64.json",
+    "manifest_digest": "sha256:8472aae0903a964412b8e73dd11d95d7a9932d8645789f77e8e162daa401474a",
+    "config_file": "oci/config-linux-amd64.json",
+    "config_digest": "sha256:f47991389017dd92a46f5d28fbb822bbce55392a70eb570231714ab2de5c0098",
+    "docker_image_id": "sha256:f47991389017dd92a46f5d28fbb822bbce55392a70eb570231714ab2de5c0098",
+    "recovery_manifest_digest": "sha256:8472aae0903a964412b8e73dd11d95d7a9932d8645789f77e8e162daa401474a"
+  },
+  "files": {
+    "README.md": "sha256:7c744001510af32fc1b0fdf2d0a32500b0ed48d4a2eee0074cc8f9b37e85463f",
+    "packet.py": "sha256:b7016d1ec38b8f887b0e244f813d7c87945245e1f0183b51d502bddc205217f1",
+    "test_packet.py": "sha256:51b994a34a448b06daf54a8315b066a4094745bcee966f66aa99cb16ad1a1501",
+    "lineage.json": "sha256:59e6117e9ba99f5fd16a2bf0ca7a6215d3743213b36396ddc987c39b3acf79bf",
+    "retained/auto.sh.source.txt": "sha256:ce6c50e2a8b52dca6d0260627cefc7b3b6c572040bc8164eb925999e9d39c068",
+    "retained/probe.py.source.txt": "sha256:664b1da362546facc57cd6dcaf0fcd93c152d5a51c6a10d90f93e3e1eea09e08",
+    "retained/authcount.py.source.txt": "sha256:49400aa3a26b4b8cf159fd4002f177bf3d2ed7d95918c7ff17a36ad1f0d5b3e2",
+    "oci/index.json": "sha256:873ec3df3b673a82f7d956d4636c7736b0c961dc6ee28f9fb403238b2898dc0d",
+    "oci/manifest-linux-amd64.json": "sha256:8472aae0903a964412b8e73dd11d95d7a9932d8645789f77e8e162daa401474a",
+    "oci/config-linux-amd64.json": "sha256:f47991389017dd92a46f5d28fbb822bbce55392a70eb570231714ab2de5c0098"
+  },
+  "unresolved_bindings": [
+    "binary_source_attestation",
+    "host_platform",
+    "compose_config",
+    "provider_artifacts",
+    "authoritative_store",
+    "quiescence_mechanism",
+    "watchdog_armed",
+    "terminal_persistence",
+    "journal_fault_matrix",
+    "functional_recovery",
+    "security_review",
+    "qa_review",
+    "release_acceptance",
+    "operator_execution_authorization"
+  ]
+}

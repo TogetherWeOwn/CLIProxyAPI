@@ -1,0 +1,13 @@
+"""Count auth files and how many are disabled. Prints counts only, never contents."""
+import json, os, sys
+d = sys.argv[1]; tot = dis = 0
+for f in sorted(os.listdir(d)):
+    if not f.endswith('.json'):
+        continue
+    try:
+        j = json.load(open(os.path.join(d, f)))
+    except Exception:
+        continue
+    tot += 1
+    dis += 1 if j.get('disabled') is True else 0
+print(f'total={tot} disabled={dis}')

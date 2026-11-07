@@ -1,0 +1,51 @@
+name: stock-recovery-source
+
+on:
+  pull_request:
+    paths:
+      - 'ops/stock-recovery/**'
+      - '.github/workflows/stock-recovery-source.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  source-packet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Test offline source binding, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_packet.py -v
+      - name: Record source-only HOLD report
+        run: |
+          mkdir -p qualification-evidence
+          python3 -I ops/stock-recovery/packet.py ops/stock-recovery/manifest.json > qualification-evidence/source-binding.json
+          python3 -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          identity = {
+              "head_sha": os.environ["HEAD_SHA"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "job": os.environ["GITHUB_JOB"],
+              "qualification": "HOLD",
+              "service_recovery": "NOT_TESTED",
+          }
+          Path("qualification-evidence/actions-identity.json").write_text(json.dumps(identity, sort_keys=True) + "\n")
+          PY
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      - name: Retain source checkpoint evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stock-recovery-source-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          path: qualification-evidence/
+          if-no-files-found: error
+          retention-days: 14

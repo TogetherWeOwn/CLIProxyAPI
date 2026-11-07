@@ -1,0 +1,43 @@
+{
+  "observed_at": "2026-11-07",
+  "historical_execution_binding": "NOT_ESTABLISHED",
+  "authorship": "Retained operator-delivered lineage; named authorship not established",
+  "substitutions": [
+    [
+      "/home/ubuntu/stacks/cliproxy",
+      "/path/to/stack"
+    ],
+    [
+      "http://127.0.0.1:$PORT",
+      "http://example.invalid"
+    ],
+    [
+      "http://127.0.0.1:8317",
+      "http://example.invalid"
+    ],
+    [
+      "Read-only CLIProxy probes for TWO-1799",
+      "Retained read-only CLIProxy probes"
+    ]
+  ],
+  "files": {
+    "auto.sh": {
+      "observed_original_sha256": "77857c9507f9c89cdffe3b4a418ed1fdd3054b38827dfe5ce0a1dc2cae0524e5",
+      "observed_original_bytes": 9955,
+      "review_copy": "retained/auto.sh.source.txt",
+      "review_copy_sha256": "ce6c50e2a8b52dca6d0260627cefc7b3b6c572040bc8164eb925999e9d39c068"
+    },
+    "probe.py": {
+      "observed_original_sha256": "e8a54f696ee48a453e2c6f4e9c68f800c85bc2f46ca7ed01342665967d569f03",
+      "observed_original_bytes": 4210,
+      "review_copy": "retained/probe.py.source.txt",
+      "review_copy_sha256": "664b1da362546facc57cd6dcaf0fcd93c152d5a51c6a10d90f93e3e1eea09e08"
+    },
+    "authcount.py": {
+      "observed_original_sha256": "49400aa3a26b4b8cf159fd4002f177bf3d2ed7d95918c7ff17a36ad1f0d5b3e2",
+      "observed_original_bytes": 414,
+      "review_copy": "retained/authcount.py.source.txt",
+      "review_copy_sha256": "49400aa3a26b4b8cf159fd4002f177bf3d2ed7d95918c7ff17a36ad1f0d5b3e2"
+    }
+  }
+}
