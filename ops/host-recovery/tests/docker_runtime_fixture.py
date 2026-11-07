@@ -639,8 +639,15 @@ def main(probe, *, recover=False):
             require(len(faults) == 12, "complete restoration storage-fault matrix required")
             emit(restoration_storage_faults=faults, original_processes_dead_through_faults=True,
                  injected_exceptions_only=True, operational_recovery_accepted=False)
-            # Force this coordinator invocation, not the fault rehearsal's last
-            # retry, to perform a real restoration before the only old start.
+            death = baseline_fixture.rehearse_worker_death(baseline, object_id=object_id,
+                check=stopped_domain, deadline=deadline)
+            require(death["sigkill_observed"] is True and death["worker_reaped"] is True
+                    and death["partial_baseline_rejected"] is True, "restoration worker death not verified")
+            emit(restoration_worker_death=death, fixture_supervisor_lock_retained=True,
+                 original_processes_still_dead=True, operational_recovery_accepted=False)
+            # The helper died after one rename, leaving a different root corrupt.
+            # This coordinator, not the fault rehearsal, must restore every root
+            # before the only old start; no dead helper's progress is adopted.
             baseline_fixture.put(baseline["paths"]["auth"] / "nested/unrelated.bin",
                                  b"synthetic-coordinator-restore-required", mode=0o640)
 

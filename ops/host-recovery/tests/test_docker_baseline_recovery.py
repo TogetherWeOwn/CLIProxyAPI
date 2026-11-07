@@ -150,6 +150,69 @@ class DockerBaselineRecoveryTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual((self.paths["config"] / "config.yaml").read_bytes(), b"partial-candidate-config")
 
+    def worker_death(self):
+        value = fixture.intent(self.pin, "a" * 64)
+        with durable.installation_lock(str(self.root), value["owner"]):
+            return fixture.rehearse_worker_death(self.inputs(), object_id="a" * 64,
+                check=lambda **_: self.fenced, deadline=time.monotonic() + 60)
+
+    def test_recovery_helper_sigkill_leaves_rejected_partial_state_until_fresh_retry(self):
+        row = self.worker_death()
+        self.assertEqual(row, {"hook": "directory-fsync", "sigkill_observed": True, "worker_reaped": True,
+            "partial_rename_observed": True, "partial_baseline_rejected": True,
+            "start_allowed": False, "supervisor_death_tested": False})
+        self.assertEqual((self.paths["auth"] / "nested/unrelated.bin").read_bytes(), b"unrelated-provider\0bytes")
+        self.assertEqual((self.paths["config"] / "config.yaml").read_bytes(), b"synthetic-worker-partial-config")
+        with self.restore():
+            self.assert_baseline()
+
+    def test_reopened_coordinator_restores_after_real_recovery_helper_death(self):
+        calls, arguments = self.prepared_resume(continued=True)
+        originals = {path.name: path.read_bytes() for path in (self.root / "journal").iterdir()}
+        with self.restore():
+            pass
+        self.worker_death()
+        self.assertEqual({path.name: path.read_bytes() for path in (self.root / "journal").iterdir()}, originals)
+        self.assertEqual(calls, [])
+        result = self.resume(arguments)
+        self.assertEqual(calls, ["verified", "start", "ready"])
+        for name, raw in originals.items():
+            self.assertEqual((self.root / "journal" / name).read_bytes(), raw)
+        self.assertIs(result["continuation_baseline_restored"], True)
+        self.assertIs(result["original_target_met"], False)
+        self.assertIs(result["start_fenced"], True)
+        self.assert_baseline()
+
+    def test_recovery_helper_death_refuses_before_mutation_without_stopped_boundary(self):
+        before = (self.paths["config"] / "config.yaml").read_bytes()
+        self.fenced = False
+        with patch.object(fixture.os, "fork") as fork:
+            with self.assertRaisesRegex(durable.Rejected, "stopped-boundary-required"):
+                self.worker_death()
+        fork.assert_not_called()
+        self.assertEqual((self.paths["config"] / "config.yaml").read_bytes(), before)
+
+    def test_recovery_helper_normal_exit_is_not_counted_as_reached_sigkill(self):
+        @contextmanager
+        def no_hook(*args, **kwargs):
+            yield {}
+        with patch.object(fixture, "restore_stopped", side_effect=no_hook):
+            with self.assertRaisesRegex(durable.Rejected, "death-hook-unconfirmed"):
+                self.worker_death()
+
+    def test_recovery_helper_death_requires_fresh_partial_baseline_rejection(self):
+        original = fixture.write_set.WriteSetVerifier.verify_files
+        calls = []
+        def accept_partial(reader, value, *, deadline):
+            calls.append(True)
+            if len(calls) == 1:
+                return original(reader, value, deadline=deadline)
+            return {"filesystem_verified": True}
+        with patch.object(fixture.write_set.WriteSetVerifier, "verify_files", new=accept_partial):
+            with self.assertRaisesRegex(durable.Rejected, "partial-baseline-accepted"):
+                self.worker_death()
+        self.assertEqual(len(calls), 2)
+
     def test_actual_restore_and_fresh_observer_cover_all_roots_without_start_grant(self):
         self.mutate()
         with self.restore() as receipt:

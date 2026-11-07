@@ -8,7 +8,9 @@ import errno
 import os
 from pathlib import Path
 import re
+import select
 import shutil
+import signal
 import stat
 import time
 
@@ -229,6 +231,88 @@ def resume_stopped(fixture, *, object_id, check, verify_stopped, start_old, old_
         if durable.read_file(fd, "intent.json")[0] != original or durable.read_file(fd, "arm.json")[0] != arm_raw:
             raise durable.Rejected("fixture-original-journal-changed")
         return result
+
+
+def rehearse_worker_death(fixture, *, object_id, check, deadline):
+    """Kill a restoration helper at a reached rename; leave partial state to resume.
+
+    The surviving fixture supervisor retains its installation lock. The fork is a
+    disposable helper, not a new lock owner or a manager-owned recovery service.
+    It has no start callback. pidfd death plus waitpid reaping is mandatory before
+    inspecting partial files; neither a pipe marker nor helper exit is an oracle.
+    """
+    value = intent(fixture["pin"], object_id)
+    arguments = {"baseline": fixture["backup"], "roots": fixture["roots"],
+                 "baseline_sha256": fixture["pin"], "check": check, "clock": time.monotonic}
+    def stopped():
+        if time.monotonic() >= deadline or check(deadline=deadline) is not True:
+            raise durable.Rejected("fixture-worker-death-stopped-boundary-required")
+    stopped()
+    with write_set.open_write_set_verifier(**arguments) as verifier:
+        verifier.verify_files(value, deadline=deadline)
+    first = fixture["paths"]["auth"] / "nested/unrelated.bin"
+    later = fixture["paths"]["config"] / "config.yaml"
+    original_first = first.read_bytes()
+    put(first, b"synthetic-worker-partial-auth", mode=0o640)
+    put(later, b"synthetic-worker-partial-config")
+    stopped()
+    read_fd, write_fd = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+    pid, pidfd, reaped = None, None, False
+    try:
+        pid = os.fork()
+        if pid == 0:
+            os.close(read_fd)
+            try:
+                def fault(stage):
+                    if stage == "directory-fsync":
+                        # atomic_write has performed rename but not acknowledged
+                        # directory durability or complete multi-root restoration.
+                        os.write(write_fd, b"renamed")
+                        os.kill(os.getpid(), signal.SIGKILL)
+                with restore_stopped(fixture, object_id=object_id, check=check, deadline=deadline, fault=fault):
+                    pass
+            except BaseException:
+                pass
+            os._exit(2)  # No normal result or exception is a successful kill drill.
+        os.close(write_fd)
+        write_fd = None
+        pidfd = os.pidfd_open(pid)
+        poller = select.poll()
+        poller.register(pidfd, select.POLLIN)
+        if not poller.poll(max(0, int(min(10, deadline - time.monotonic()) * 1000))):
+            raise durable.Rejected("fixture-worker-death-unconfirmed")
+        waited, status = os.waitpid(pid, os.WNOHANG)
+        reaped = waited == pid
+        if (not reaped or not os.WIFSIGNALED(status) or os.WTERMSIG(status) != signal.SIGKILL
+                or os.read(read_fd, 32) != b"renamed"):
+            raise durable.Rejected("fixture-worker-death-hook-unconfirmed")
+        stopped()
+        if first.read_bytes() != original_first or later.read_bytes() != b"synthetic-worker-partial-config":
+            raise durable.Rejected("fixture-worker-death-partial-state-unconfirmed")
+        try:
+            with write_set.open_write_set_verifier(**arguments) as verifier:
+                verifier.verify_files(value, deadline=deadline)
+        except durable.Rejected as err:
+            if str(err) != "write-set-final-inventory-mismatch":
+                raise
+        else:
+            raise durable.Rejected("fixture-worker-death-partial-baseline-accepted")
+        stopped()
+        return {"hook": "directory-fsync", "sigkill_observed": True, "worker_reaped": True,
+                "partial_rename_observed": True, "partial_baseline_rejected": True,
+                "start_allowed": False, "supervisor_death_tested": False}
+    finally:
+        if pid is not None and pid > 0 and not reaped:
+            if pidfd is None:
+                pidfd = os.pidfd_open(pid)
+            signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+            poller = select.poll()
+            poller.register(pidfd, select.POLLIN)
+            if not poller.poll(1000) or os.waitpid(pid, os.WNOHANG)[0] != pid:
+                raise durable.Rejected("fixture-worker-death-cleanup-unconfirmed")
+        for fd in (read_fd, write_fd, pidfd):
+            if fd is not None:
+                os.close(fd)
 
 
 def rehearse_restore_faults(fixture, *, object_id, check, deadline):

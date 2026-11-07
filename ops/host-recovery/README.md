@@ -16,11 +16,17 @@ as a substitute for the accepted production binaries.
   start. The new task must report its inert readiness marker and pass mounted
   baseline verification. Late execution consumes explicit fixture continuation
   bytes and remains original-target-missed/unsettled. The original 90-second
-  enclosing deadline and all cleanup assertions remain unchanged.
+  enclosing deadline and all cleanup assertions remain unchanged. A restoration
+  helper is now SIGKILLed at a reached post-rename/pre-directory-fsync hook. The
+  surviving fixture lock owner requires pidfd death, reaping, an actually repaired
+  first file and a still-corrupt later root; a fresh verifier must reject that
+  partial baseline before coordinator recovery retries the complete write set.
+  The helper has no start callback. This tests recovery-helper death, not transfer
+  of lock ownership or supervisor death.
   **Diagnostic fixture callbacks only:** no authenticated operational approval,
   supervisor process death/reboot, complete host writer/start fence, external
   alert delivery or application readiness is proved. Installed service routes
-  remain deny-only. The new native path and eight component methods require
+  remain deny-only. The new helper-death path and five component methods require
   exact-head Actions verification; authoring them is not a PASS.
 
 - `host_recovery/topology.py`: closed dedicated-runtime expectation validation and
