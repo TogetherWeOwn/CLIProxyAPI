@@ -145,6 +145,46 @@ def private_info(root, pid, current, deadline, *, unit, invocation):
         connection.close()
 
 
+class TaskInspection(http.client.HTTPConnection):
+    """Fixed read-only fixture query; avoid spawning the CLI at every file barrier."""
+    def __init__(self, root, *, peer, unit, invocation, current, deadline):
+        super().__init__("private-fixture")
+        self.root, self.peer, self.unit, self.invocation = root, peer, unit, invocation
+        self.current, self.deadline = current, deadline
+
+    def bound(self):
+        self.current()
+        require(show(self.unit, "MainPID") == str(self.peer[0])
+                and show(self.unit, "InvocationID") == self.invocation
+                and show(self.unit, "ActiveState") == "active", "task inspection daemon changed")
+
+    def connect(self):
+        self.bound()
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(min(3, max(0.001, self.deadline - time.monotonic())))
+        self.sock.connect(str(self.root / "docker.sock"))
+        self.require_peer()
+        self.bound()
+
+    def require_peer(self):
+        require(struct.unpack("3i", self.sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)) == self.peer,
+                "task inspection socket peer changed")
+
+    def inspect(self, object_id):
+        require(re.fullmatch(r"[0-9a-f]{64}", object_id), "full task inspection object required")
+        self.bound()
+        if self.sock is not None:
+            self.require_peer()
+        self.request("GET", "/v1.48/containers/" + object_id + "/json")
+        response = self.getresponse()
+        raw = response.read(1024 * 1024 + 1)
+        require(response.status == 200 and len(raw) <= 1024 * 1024, "task inspection response invalid")
+        if self.sock is not None:
+            self.require_peer()
+        self.bound()
+        return json.loads(raw)
+
+
 def inspect_object(row, object_id, image_id, slice_name, *, running, mounts=None):
     require(row["Id"] == object_id and row["Image"] == image_id and row["Path"] == "/probe"
             and row["Args"] == [] and row["RestartCount"] == 0, "Docker object identity changed")
@@ -327,7 +367,7 @@ def main(probe):
     root.mkdir(mode=0o700)
     (root / "owner.json").write_text(json.dumps(marker(units, slice_name)))
     (root / "owner.json").chmod(0o600)
-    fds, domain_fd, witness = [], None, None
+    fds, domain_fd, witness, task_http = [], None, None, None
     try:
         baseline = baseline_fixture.prepare(root)
         (root / "client").mkdir(mode=0o700)
@@ -430,8 +470,13 @@ def main(probe):
                     "Docker task is not a sibling of both daemon services")
         witness = RuntimeProcessWitness.capture(domain=domain, check=current)
         require(witness.count == 5, "dockerd/containerd/shim/task/child inventory required")
+        task_http = TaskInspection(root, peer=(int(show(units[1]["dockerd"], "MainPID")), 0, 0),
+            unit=units[1]["dockerd"], invocation=show(units[1]["dockerd"], "InvocationID"),
+            current=current, deadline=deadline)
         def task_authority(*, deadline):
-            return observe(object_id, image_id, True)["State"]["Pid"] == pid
+            inspected = task_http.inspect(object_id)
+            inspect_object(inspected, object_id, image_id, slice_name, running=True, mounts=baseline["mounts"])
+            return inspected["State"]["Pid"] == pid
         with witness.docker_task_mount_view(object_id=object_id, pid=pid, check=task_authority,
                                            clock=time.monotonic) as task_view:
             task_view._current(deadline)
@@ -478,6 +523,7 @@ def main(probe):
                 pass
         emit(captured_task_pidfd_mapping_verified=True, wrong_object_and_daemon_pid_rejected=True,
              complete_baseline_verified=False, start_allowed=False)
+        observe(object_id, image_id, True)
         with baseline_fixture.observe(baseline, object_id=object_id, pid=pid, witness=witness,
                                       check=task_authority, deadline=deadline) as receipt:
             require(receipt["mounted_files_verified"] is True and receipt["process_root_observed"] is True
@@ -498,6 +544,8 @@ def main(probe):
                     "baseline drift did not reach trailing mounted observation")
         else:
             raise AssertionError("readonly task mount hid host-alias byte drift")
+        observe(object_id, image_id, True)
+        task_http.close()
         emit(complete_synthetic_mounted_baseline_verified=True, host_alias_drift_rejected_after_yield=True,
              continuous_writer_exclusion=False, operational_recovery_accepted=False, start_allowed=False)
         # Independently pin all original runtime process executables/membership.
@@ -571,6 +619,8 @@ def main(probe):
                 command("/usr/bin/journalctl", "--no-pager", "--boot", "--lines=100", "--unit=" + unit, check=False)
         raise
     finally:
+        if task_http is not None:
+            task_http.close()
         if witness is not None:
             witness.close()
         for fd in fds:

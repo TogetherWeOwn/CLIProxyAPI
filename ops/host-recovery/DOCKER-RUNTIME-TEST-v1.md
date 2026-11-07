@@ -201,7 +201,26 @@ Successful synthetic correspondence must retain `start_authorized=false` and
 `plugin_readiness_verified=false`. The original intent/approvals/authority remain
 diagnostic inputs: no installed supervisor lock, registered-object authority,
 semantic/image/plugin/readiness oracle or integrated recovery is supplied. All
-new assertions remain unverified until exact-head Actions finishes.
+new assertions require completed exact-head Actions before claiming qualification.
+
+Initial `0a5a61b159ed2eaa319e85eff9c3f5deb8b50f96`,
+[Docker job](https://github.com/TogetherWeOwn/CLIProxyAPI/actions/runs/42344325112/job/128318661358),
+reached both the positive complete mounted-baseline receipt and the post-yield
+host-alias drift refusal, but **FAILED** the original 90-second fixture deadline
+before its final recursive kill. Both cleanup paths passed. This is not a native
+job PASS or recovery result. The complete raw failure is retained.
+
+The correction replaces repeated per-file Docker CLI launches with fixed read-only
+`/v1.48/containers/{full-id}/json` requests over the explicit private Unix endpoint.
+Every observation retains kernel peer PID/UID/GID and original manager unit/PID/
+invocation/active-state checks before and after the bounded response. Reconnection
+repeats the same peer/manager checks; no ambient endpoint is allowed. Complete
+object/image/restart/mount policy and task PID are still checked at every barrier;
+whole-daemon CLI inventory checks surround the composed baseline observations.
+The connection is closed before the kill and on every exit. The original 90-second
+deadline, all baseline/death/cold-start/cleanup assertions and operational denies
+are unchanged. Four additional scripted protocol/binding methods are authored,
+not locally run; corrected exact-head Actions must still verify this change.
 
 This is a mount-local point observation. It does not prove that nested mounts,
 other writable aliases, future remounts or privileged writers are excluded. The

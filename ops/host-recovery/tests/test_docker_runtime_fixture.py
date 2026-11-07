@@ -5,7 +5,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import docker_runtime_fixture as fixture
@@ -25,6 +25,54 @@ class DockerRuntimeFixtureTests(unittest.TestCase):
 
     def inspect(self, row, running=False):
         inspect_object(row, self.object_id, self.image_id, self.slice, running=running)
+
+    def task_http(self):
+        return fixture.TaskInspection(self.root, peer=(123, 0, 0), unit=self.units[1]["dockerd"],
+            invocation="a" * 32, current=Mock(), deadline=1000)
+
+    def test_fixed_inspection_uses_only_full_object_read_and_trailing_binding(self):
+        client = self.task_http()
+        response = Mock(status=200)
+        response.read.return_value = b'{"synthetic":true}'
+        with patch.object(client, "bound") as bound, patch.object(client, "request") as request, \
+                patch.object(client, "getresponse", return_value=response):
+            self.assertEqual(client.inspect(self.object_id), {"synthetic": True})
+        request.assert_called_once_with("GET", "/v1.48/containers/" + self.object_id + "/json")
+        self.assertEqual(bound.call_count, 2)
+        response.read.assert_called_once_with(1024 * 1024 + 1)
+        with patch.object(client, "request") as request, self.assertRaises(AssertionError):
+            client.inspect("../unapproved")
+        request.assert_not_called()
+
+    def test_fixed_inspection_refuses_error_and_overflow_without_healthy_result(self):
+        for status, raw in ((500, b'{}'), (200, b"x" * (1024 * 1024 + 1))):
+            client = self.task_http()
+            response = Mock(status=status)
+            response.read.return_value = raw
+            with self.subTest(status=status), patch.object(client, "bound"), patch.object(client, "request"), \
+                    patch.object(client, "getresponse", return_value=response), self.assertRaises(AssertionError):
+                client.inspect(self.object_id)
+
+    def test_fixed_inspection_rejects_each_original_manager_binding_change(self):
+        good = {"MainPID": "123", "InvocationID": "a" * 32, "ActiveState": "active"}
+        for name, value in (("MainPID", "124"), ("InvocationID", "b" * 32), ("ActiveState", "inactive")):
+            client = self.task_http()
+            fields = {**good, name: value}
+            with self.subTest(name=name), patch.object(fixture, "show", side_effect=lambda unit, key: fields[key]), \
+                    self.assertRaises(AssertionError):
+                client.bound()
+            client.current.assert_called_once_with()
+
+    def test_fixed_inspection_rejects_socket_peer_drift(self):
+        client = self.task_http()
+        client.sock = Mock()
+        for peer in ((124, 0, 0), (123, 1, 0), (123, 0, 1)):
+            client.sock.getsockopt.return_value = fixture.struct.pack("3i", *peer)
+            with self.subTest(peer=peer), self.assertRaises(AssertionError):
+                client.require_peer()
+        client.sock.getsockopt.return_value = fixture.struct.pack("3i", 123, 0, 0)
+        client.require_peer()
+        client.close()
 
     def test_baseline_root_is_separate_protected_and_exact_runtime_scoped(self):
         root = fixture.baseline_fixture.baseline_root(self.root)
