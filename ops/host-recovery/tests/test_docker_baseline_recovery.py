@@ -18,11 +18,137 @@ class DockerBaselineRecoveryTests(unittest.TestCase):
     assert_baseline = write_set_tests.WriteSetTests.assert_baseline
 
     def inputs(self):
-        return {"backup": approve(self.backup), "roots": self.approvals, "paths": self.paths, "pin": self.pin}
+        return {"root": self.root, "backup": approve(self.backup), "roots": self.approvals,
+                "paths": self.paths, "pin": self.pin}
 
     def restore(self, **kwargs):
         return fixture.restore_stopped(self.inputs(), object_id="a" * 64,
             check=lambda **_: self.fenced, deadline=time.monotonic() + 60, **kwargs)
+
+    def prepared_resume(self, *, continued=False):
+        now = [1000.0]
+        clock_patch = patch.object(fixture.time, "monotonic", side_effect=lambda: now[0])
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
+        value = fixture.intent(self.pin, "a" * 64)
+        with durable.installation_lock(str(self.root), value["owner"]):
+            fixture.prepare_resume(self.inputs(), object_id="a" * 64)
+        now[0] += 30 if continued else 1
+        self.mutate()
+        calls = []
+        def verified(value, *, deadline):
+            self.assert_baseline()
+            calls.append("verified")
+            return {"baseline_sha256": self.pin, "object_id": "a" * 64,
+                    "original_image": True, "original_replay": True, "new_plugin_absent": True,
+                    "complete_write_set": True, "metadata_verified": True, "all_writers_stopped": True}
+        def start(value, receipt, *, deadline):
+            self.assert_baseline()
+            self.assertEqual(calls, ["verified"])
+            calls.append("start")
+            return True
+        def ready(value, *, deadline):
+            self.assertEqual(calls, ["verified", "start"])
+            calls.append("ready")
+            return True
+        return calls, dict(object_id="a" * 64, check=lambda **_: self.fenced,
+                           verify_stopped=verified, start_old=start, old_ready=ready, deadline=1100)
+
+    def resume(self, arguments):
+        value = fixture.intent(self.pin, "a" * 64)
+        with durable.installation_lock(str(self.root), value["owner"]):
+            return fixture.resume_stopped(self.inputs(), **arguments)
+
+    def test_coordinator_reopens_original_journal_and_restores_before_start(self):
+        calls, arguments = self.prepared_resume()
+        originals = [(self.root / "journal" / name).read_bytes() for name in ("intent.json", "arm.json")]
+        result = self.resume(arguments)
+        self.assertEqual(calls, ["verified", "start", "ready"])
+        self.assertEqual(result["outcome"], "baseline_restored")
+        self.assertIs(result["start_fenced"], True)
+        self.assertIs(result["production_acceptance"], False)
+        self.assertEqual(originals, [(self.root / "journal" / name).read_bytes() for name in ("intent.json", "arm.json")])
+        with self.assertRaisesRegex(durable.Rejected, "fresh-original-journal"):
+            self.resume(arguments)
+        self.assertEqual(calls.count("start"), 1)
+
+    def test_late_coordinator_consumes_continuation_without_renewing_original_target(self):
+        calls, arguments = self.prepared_resume(continued=True)
+        result = self.resume(arguments)
+        self.assertEqual(calls, ["verified", "start", "ready"])
+        self.assertEqual(result["outcome"], "recovery_unresolved")
+        self.assertIs(result["continuation_baseline_restored"], True)
+        self.assertIs(result["original_target_met"], False)
+        saved = durable.decode((self.root / "journal/continuation-outcome.json").read_bytes())
+        self.assertIs(saved["installation_settled"], False)
+        with self.assertRaises(durable.Rejected):
+            self.resume(arguments)
+        self.assertEqual(calls.count("start"), 1)
+
+    def test_coordinator_never_starts_after_incomplete_stopped_oracle(self):
+        calls, arguments = self.prepared_resume()
+        arguments["verify_stopped"] = lambda *_, **__: {"filesystem_verified": True}
+        with self.assertRaisesRegex(durable.Rejected, "coordinator-recovery-unconfirmed"):
+            self.resume(arguments)
+        self.assertEqual(calls, [])
+
+    def test_coordinator_never_starts_after_verifier_callback_changes_restored_bytes(self):
+        calls, arguments = self.prepared_resume()
+        original = arguments["verify_stopped"]
+        def mutate(value, **kwargs):
+            receipt = original(value, **kwargs)
+            self.put(self.paths["config"] / "config.yaml", b"changed after verification")
+            return receipt
+        arguments["verify_stopped"] = mutate
+        with self.assertRaisesRegex(durable.Rejected, "coordinator-recovery-unconfirmed"):
+            self.resume(arguments)
+        self.assertEqual(calls, ["verified"])
+
+    def test_coordinator_lost_stopped_boundary_never_restores_or_starts(self):
+        calls, arguments = self.prepared_resume()
+        before = (self.paths["config"] / "config.yaml").read_bytes()
+        self.fenced = False
+        with self.assertRaisesRegex(durable.Rejected, "coordinator-recovery-unconfirmed"):
+            self.resume(arguments)
+        self.assertEqual(calls, [])
+        self.assertEqual((self.paths["config"] / "config.yaml").read_bytes(), before)
+
+    def test_coordinator_refuses_original_object_mismatch_before_effects(self):
+        calls, arguments = self.prepared_resume()
+        arguments["object_id"] = "b" * 64
+        with self.assertRaisesRegex(durable.Rejected, "fresh-original-journal"):
+            self.resume(arguments)
+        self.assertEqual(calls, [])
+
+    def test_coordinator_readiness_failure_never_publishes_success(self):
+        calls, arguments = self.prepared_resume(continued=True)
+        arguments["old_ready"] = lambda *_, **__: False
+        with self.assertRaisesRegex(durable.Rejected, "coordinator-recovery-unconfirmed"):
+            self.resume(arguments)
+        self.assertEqual(calls, ["verified", "start"])
+        self.assertFalse((self.root / "journal/continuation-outcome.json").exists())
+        self.assertTrue((self.root / "journal/intent.json").exists())
+        self.assertTrue((self.root / "journal/continuation-request.json").exists())
+
+    def test_coordinator_continuation_publication_failure_prevents_effects(self):
+        calls, arguments = self.prepared_resume(continued=True)
+        original = fixture.journal.Journal._write
+        reached = []
+        def fail(log, name, value):
+            if name != "continuation-request.json":
+                return original(log, name, value)
+            def fault(stage):
+                if stage == "rename":
+                    reached.append(stage)
+                    raise OSError(errno.ENOSPC, "synthetic consumption failure")
+            log.fault = fault
+            return original(log, name, value)
+        with patch.object(fixture.journal.Journal, "_write", new=fail):
+            with self.assertRaisesRegex(durable.Rejected, "coordinator-recovery-unconfirmed"):
+                self.resume(arguments)
+        self.assertEqual(reached, ["rename"])
+        self.assertEqual(calls, [])
+        self.assertEqual((self.paths["config"] / "config.yaml").read_bytes(), b"partial-candidate-config")
 
     def test_actual_restore_and_fresh_observer_cover_all_roots_without_start_grant(self):
         self.mutate()

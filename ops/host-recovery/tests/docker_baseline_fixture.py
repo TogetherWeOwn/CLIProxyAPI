@@ -13,6 +13,8 @@ import stat
 import time
 
 from host_recovery import budget, durable, inventory, journal, mounted_baseline, write_set
+from host_recovery.bootstrap import kernel_boot_id
+from host_recovery.coordinator import AttemptCoordinator, validate_baseline_receipt
 from host_recovery.installation import DirectoryApproval
 
 
@@ -127,6 +129,106 @@ def restore_stopped(fixture, *, object_id, check, deadline, fault=None):
             receipt = verifier.verify_files(value, deadline=deadline)
             yield receipt
             verifier.verify_files(value, deadline=deadline)
+
+
+def prepare_resume(fixture, *, object_id):
+    """Persist the fixture's original intent/arm before mutation under its lock."""
+    path = fixture["root"] / "journal"
+    path.mkdir(mode=0o700)
+    value = intent(fixture["pin"], object_id)
+    value["owner"]["boot_id"] = kernel_boot_id()
+    with durable.directory(str(path), private=True) as fd:
+        original = journal.Journal(fd)
+        original.prepare(value)
+        original.arm({"boot_id": kernel_boot_id(), "monotonic": time.monotonic()})
+
+
+def resume_stopped(fixture, *, object_id, check, verify_stopped, start_old, old_ready, deadline):
+    """Drive the real coordinator from reopened fixture intent through old start.
+
+    Caller retains the one fixture lock. Dead-process/domain, image/semantic and
+    started-task checks are explicit fixture callbacks, not installed authority.
+    No reboot, independent supervisor death or production readiness is simulated
+    as a PASS. A consumed request is not retried or automatically succeeded.
+    """
+    with durable.directory(str(fixture["root"] / "journal"), private=True) as fd:
+        reopened = journal.Journal(fd)
+        if (set(os.listdir(fd)) != {"intent.json", "arm.json"}
+                or reopened.intent["old_object_id"] != object_id
+                or reopened.intent["baseline_sha256"] != fixture["pin"]):
+            raise durable.Rejected("fixture-fresh-original-journal-required")
+        original = durable.canonical(reopened.intent)
+        arm_raw, _ = durable.read_file(fd, "arm.json")
+        arm = durable.decode(arm_raw)["arm"]
+        now = time.monotonic()
+        continuation = {"schema": "host-recovery-continuation-v1", "continuation_id": "fixture-recovery",
+            "intent_sha256": durable.digest(original), "arm_sha256": durable.digest(durable.canonical(arm)),
+            "owner": {**reopened.intent["owner"], "invocation_id": "fixture-recovery"},
+            "started_at": now, "deadline": min(deadline, now + 180)}
+
+        class Boundary:
+            def stopped(self, value, *, deadline):
+                if (durable.canonical(value) != original or time.monotonic() >= deadline
+                        or check(deadline=deadline) is not True):
+                    raise durable.Rejected("fixture-original-stopped-boundary-required")
+                return True
+
+            def authorize_continuation(self, value, approved, *, deadline):
+                if durable.canonical(approved) != durable.canonical(continuation):
+                    raise durable.Rejected("fixture-continuation-changed")
+                return self.stopped(value, deadline=deadline)
+
+            def recovery_preflight(self, value, *, deadline):
+                self.stopped(value, deadline=deadline)
+                with write_set.open_write_set(baseline=fixture["backup"], roots=fixture["roots"],
+                        baseline_sha256=fixture["pin"], check=check, clock=time.monotonic) as recovery:
+                    recovery.validate_recovery(value, deadline=deadline)
+                return self.stopped(value, deadline=deadline)
+
+            fence = quiesce = validate_recovery = stopped
+
+            def restore_complete(self, value, *, deadline):
+                self.stopped(value, deadline=deadline)
+                with restore_stopped(fixture, object_id=object_id, check=check, deadline=deadline):
+                    pass
+                return self.stopped(value, deadline=deadline)
+
+            def verify_baseline_stopped(self, value, *, deadline):
+                self.stopped(value, deadline=deadline)
+                with write_set.open_write_set_verifier(baseline=fixture["backup"], roots=fixture["roots"],
+                        baseline_sha256=fixture["pin"], check=check, clock=time.monotonic) as verifier:
+                    verifier.verify_files(value, deadline=deadline)
+                    receipt = verify_stopped(value, deadline=deadline)
+                    validate_baseline_receipt(value, receipt)
+                    verifier.verify_files(value, deadline=deadline)
+                self.stopped(value, deadline=deadline)
+                return receipt
+
+            def start_old(self, value, receipt, *, deadline):
+                self.stopped(value, deadline=deadline)
+                validate_baseline_receipt(value, receipt)
+                return start_old(value, receipt, deadline=deadline)
+
+            def old_ready(self, value, *, deadline):
+                return old_ready(value, deadline=deadline)
+
+        notices = []
+        coordinator = AttemptCoordinator(reopened, Boundary(), time.monotonic, kernel_boot_id,
+            notices.append, lambda notice: True)
+        # Same-boot recovery uses the original conservative reserve when still
+        # available. A later recovery consumes separate explicit fixture bytes;
+        # this is not authenticated operational approval or a renewed target.
+        if now < arm["monotonic"] + reopened.intent["budget"]["recovery"]["caps"]["detection"]:
+            result = coordinator.resume()
+        else:
+            result = coordinator.resume(continuation=continuation,
+                continuation_sha256=durable.digest(durable.canonical(continuation)))
+        restored = result.get("outcome") == "baseline_restored" or result.get("continuation_baseline_restored") is True
+        if not restored or result.get("recovery_error") is not None:
+            raise durable.Rejected("fixture-coordinator-recovery-unconfirmed")
+        if durable.read_file(fd, "intent.json")[0] != original or durable.read_file(fd, "arm.json")[0] != arm_raw:
+            raise durable.Rejected("fixture-original-journal-changed")
+        return result
 
 
 def rehearse_restore_faults(fixture, *, object_id, check, deadline):

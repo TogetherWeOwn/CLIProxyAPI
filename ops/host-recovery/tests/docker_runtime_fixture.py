@@ -475,6 +475,8 @@ def main(probe, *, recover=False):
                                *volumes, image_id).stdout.decode().strip()
         require(re.fullmatch(r"[0-9a-f]{64}", object_id), "full created object identity required")
         observe(object_id, image_id, False)
+        if recover:
+            baseline_fixture.prepare_resume(baseline, object_id=object_id)
         emit(full_object_id=object_id, image_id=image_id, policy_observed_before_start=True,
              durable_host_registration_implemented=False)
         docker_cmd("container", "start", object_id)
@@ -637,61 +639,89 @@ def main(probe, *, recover=False):
             require(len(faults) == 12, "complete restoration storage-fault matrix required")
             emit(restoration_storage_faults=faults, original_processes_dead_through_faults=True,
                  injected_exceptions_only=True, operational_recovery_accepted=False)
-            with baseline_fixture.restore_stopped(baseline, object_id=object_id,
-                    check=stopped_domain, deadline=deadline) as restored:
-                require(restored["filesystem_verified"] is True and restored["roots"] == 3
-                        and restored["start_permission"] is False, "fresh recovery file observation missing")
-                emit(actual_synthetic_baseline_restored=restored, original_processes_dead_before_restore=True,
-                     complete_fence_proven=False, operational_recovery_accepted=False)
-        launch(2)
-        first = observe(object_id, image_id, False)
-        require(ctr("--namespace=cpa-docker", "tasks", "list", "--quiet").stdout == b"", "task resurrected during cold startup")
-        # Two reads are explicitly only point observations, not a drain or
-        # continuous no-launch proof. The old source pidfds must remain dead.
-        require_same_cold_object(first, observe(object_id, image_id, False))
-        witness.require_dead(check=current)
-        require(not Path("/sys/fs/cgroup" + task_group).exists(), "old Docker task scope reappeared")
+            # Force this coordinator invocation, not the fault rehearsal's last
+            # retry, to perform a real restoration before the only old start.
+            baseline_fixture.put(baseline["paths"]["auth"] / "nested/unrelated.bin",
+                                 b"synthetic-coordinator-restore-required", mode=0o640)
+
+        def cold_start():
+            launch(2)
+            first = observe(object_id, image_id, False)
+            require(ctr("--namespace=cpa-docker", "tasks", "list", "--quiet").stdout == b"", "task resurrected during cold startup")
+            # Point observations only, not a drain or continuous no-launch proof.
+            require_same_cold_object(first, observe(object_id, image_id, False))
+            witness.require_dead(check=current)
+            require(not Path("/sys/fs/cgroup" + task_group).exists(), "old Docker task scope reappeared")
+
         if recover:
+            def verified_stopped(value, *, deadline):
+                stopped_domain(deadline=deadline)
+                saved = json.loads(protected_bytes(metadata / "config.v2.json", limit=1024 * 1024)[0])
+                require(saved["Image"] == image_id, "original stored image changed before recovery")
+                require((baseline["paths"]["config"] / "config.yaml").read_bytes() == b"replay: true\nplugins: {}\n"
+                        and not list(baseline["paths"]["plugin"].iterdir()), "synthetic original replay/plugin state missing")
+                return {"baseline_sha256": baseline["pin"], "object_id": object_id,
+                        "original_image": True, "original_replay": True, "new_plugin_absent": True,
+                        "complete_write_set": True, "metadata_verified": True, "all_writers_stopped": True}
+
             def stopped_task(*, deadline):
                 current()
                 witness.require_dead(check=current)
                 require(not task_path.exists(), "old task started before baseline verification")
                 return True
-            with baseline_fixture.write_set.open_write_set_verifier(baseline=baseline["backup"],
-                    roots=baseline["roots"], baseline_sha256=baseline["pin"], check=stopped_task,
-                    clock=time.monotonic) as verifier:
-                verified = verifier.verify_files(baseline_fixture.intent(baseline["pin"], object_id), deadline=deadline)
-                require(verified["filesystem_verified"] is True, "pre-start baseline observation missing")
-                observe(object_id, image_id, False)
-                stopped_task(deadline=deadline)
-                # Only this explicitly hosted fixture starts its exact original
-                # inert object. This is not an operational service-start handler.
-                docker_cmd("container", "start", object_id)
-            row = observe(object_id, image_id, True)
-            pid = row["State"]["Pid"]
-            while True:
-                current()
-                members = [int(value) for value in task_path.read_text().splitlines()] if task_path.exists() else []
-                if len(members) == 2 and pid in members:
-                    break
-                select.select([], [], [], 0.02)
-            recovered = RuntimeProcessWitness.capture(domain=domain, check=current)
-            try:
-                require(recovered.count == 5, "recovered runtime process inventory changed")
-                require(task_executable(root, object_id, pid) == raw_probe, "recovered task executable changed")
-                task_http = TaskInspection(root, peer=(int(show(units[2]["dockerd"], "MainPID")), 0, 0),
-                    unit=units[2]["dockerd"], invocation=show(units[2]["dockerd"], "InvocationID"),
-                    current=current, deadline=deadline)
-                with baseline_fixture.observe(baseline, object_id=object_id, pid=pid, witness=recovered,
-                        check=task_authority, deadline=deadline) as mounted:
-                    require(mounted["mounted_files_verified"] is True and mounted["roots"] == 3,
-                            "recovered task did not mount complete original baseline")
-                witness.require_dead(check=current)
-                emit(actual_old_object_restarted=True, restored_task_mounted_baseline=mounted,
-                     original_image_unchanged=True, operational_readiness_verified=False,
-                     executable_resume_implemented=False, operational_recovery_accepted=False)
-            finally:
-                recovered.close()
+            def start_original(value, receipt, *, deadline):
+                cold_start()
+                with baseline_fixture.write_set.open_write_set_verifier(baseline=baseline["backup"],
+                        roots=baseline["roots"], baseline_sha256=baseline["pin"], check=stopped_task,
+                        clock=time.monotonic) as verifier:
+                    verified = verifier.verify_files(value, deadline=deadline)
+                    require(verified["filesystem_verified"] is True, "pre-start baseline observation missing")
+                    observe(object_id, image_id, False)
+                    stopped_task(deadline=deadline)
+                    # Hosted inert object only, never operational start authority.
+                    docker_cmd("container", "start", object_id)
+                return True
+
+            def ready_original(value, *, deadline):
+                nonlocal pid, task_http
+                row = observe(object_id, image_id, True)
+                pid = row["State"]["Pid"]
+                while True:
+                    current()
+                    require(time.monotonic() < deadline, "coordinator readiness phase expired")
+                    members = [int(value) for value in task_path.read_text().splitlines()] if task_path.exists() else []
+                    if (len(members) == 2 and pid in members
+                            and Path("/proc/%d/root/ready" % pid).exists()
+                            and Path("/proc/%d/root/ready" % pid).read_bytes() == b"parent-and-child-ready\n"):
+                        break
+                    select.select([], [], [], 0.02)
+                recovered = RuntimeProcessWitness.capture(domain=domain, check=current)
+                try:
+                    require(recovered.count == 5, "recovered runtime process inventory changed")
+                    require(task_executable(root, object_id, pid) == raw_probe, "recovered task executable changed")
+                    task_http = TaskInspection(root, peer=(int(show(units[2]["dockerd"], "MainPID")), 0, 0),
+                        unit=units[2]["dockerd"], invocation=show(units[2]["dockerd"], "InvocationID"),
+                        current=current, deadline=deadline)
+                    with baseline_fixture.observe(baseline, object_id=object_id, pid=pid, witness=recovered,
+                            check=task_authority, deadline=deadline) as mounted:
+                        require(mounted["mounted_files_verified"] is True and mounted["roots"] == 3,
+                                "recovered task did not mount complete original baseline")
+                    witness.require_dead(check=current)
+                    emit(actual_old_object_restarted=True, restored_task_mounted_baseline=mounted,
+                         original_image_unchanged=True, operational_readiness_verified=False,
+                         executable_resume_implemented=False, operational_recovery_accepted=False)
+                    return True
+                finally:
+                    recovered.close()
+
+            resumed = baseline_fixture.resume_stopped(baseline, object_id=object_id, check=stopped_domain,
+                verify_stopped=verified_stopped, start_old=start_original, old_ready=ready_original, deadline=deadline)
+            require(resumed["start_fenced"] is True and resumed["production_acceptance"] is False,
+                    "coordinator fixture improperly cleared acceptance fence")
+            emit(reopened_original_journal_coordinator=resumed, fixture_callbacks_only=True,
+                 operational_recovery_accepted=False)
+        else:
+            cold_start()
         pins()
         require((root / "input.toml").read_bytes() == containerd and json.loads((root / "docker.json").read_bytes()) == docker,
                 "Docker fixture configuration changed")

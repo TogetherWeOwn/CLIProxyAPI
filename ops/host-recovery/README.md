@@ -8,6 +8,21 @@ as a substitute for the accepted production binaries.
 
 ## Implemented so far
 
+- The hosted Docker restoration drill now persists original intent/arm before
+  mutation and drives `AttemptCoordinator.resume` from that reopened journal,
+  rather than manually chaining restoration and old start. Actual fixture
+  pidfd/domain death checks bracket full-root restoration; fresh files plus
+  synthetic replay/no-plugin and stored-image checks precede the only old-object
+  start. The new task must report its inert readiness marker and pass mounted
+  baseline verification. Late execution consumes explicit fixture continuation
+  bytes and remains original-target-missed/unsettled. The original 90-second
+  enclosing deadline and all cleanup assertions remain unchanged.
+  **Diagnostic fixture callbacks only:** no authenticated operational approval,
+  supervisor process death/reboot, complete host writer/start fence, external
+  alert delivery or application readiness is proved. Installed service routes
+  remain deny-only. The new native path and eight component methods require
+  exact-head Actions verification; authoring them is not a PASS.
+
 - `host_recovery/topology.py`: closed dedicated-runtime expectation validation and
   root-content/external-pin/source/installation snapshot binding. Shared/unknown
   runtimes, autonomous restart/activation, overlapping resources and unsupported
