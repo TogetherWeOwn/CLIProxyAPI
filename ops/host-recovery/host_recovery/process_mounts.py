@@ -1,14 +1,18 @@
 """Linux point observation of one authenticated process's path-resolution view.
 
 The caller supplies a pidfd from its independently authenticated daemon boundary,
-not pidfd_open of a guessed PID. The check callback must retain that transport,
+or acquires one from an approved connected Unix peer, never a guessed PID. The
+check callback must retain that transport,
 manager identity and complete fence. Equal views are not continuous exclusion,
 container-mounted byte verification, approval provisioning or start authority.
 """
 from contextlib import ExitStack, contextmanager
 import fcntl
 import os
+import select
+import socket
 import stat
+import struct
 
 from .commands import Deadline
 from .durable import Rejected, canonical, digest
@@ -67,6 +71,54 @@ def open_process_mount_view(*, pid, pidfd, check, clock):
         proc = os.open(f"/proc/{pid}", os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         stack.callback(os.close, proc)
         view = ProcessMountView(pid, owned, proc, check, clock, stack)
+        try:
+            yield view
+        finally:
+            view.closed = True
+
+
+@contextmanager
+def open_peer_mount_view(*, sock, expected_peer, check, clock):
+    """Acquire the pidfd from a connected Unix peer, never a numeric PID lookup.
+
+    expected_peer is the independently approved (pid, uid, gid), not a value
+    learned from the socket. check retains the manager invocation, endpoint and
+    installation authority. The kernel connection proves only process linkage;
+    it cannot provision those approvals or bind a daemon to a container's PID.
+    No request is sent and the caller's socket remains borrowed and unmodified.
+    """
+    if (type(expected_peer) is not tuple or len(expected_peer) != 3
+            or any(type(value) is not int for value in expected_peer)
+            or not 1 <= expected_peer[0] <= 2147483647
+            or any(not 0 <= value <= 2147483647 for value in expected_peer[1:])
+            or not callable(check) or not callable(clock)):
+        raise Rejected("process-mount-approved-peer-required")
+    with ExitStack() as stack:
+        try:
+            if (sock.family != socket.AF_UNIX or sock.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE)
+                    not in (socket.SOCK_STREAM, socket.SOCK_SEQPACKET)):
+                raise Rejected("process-mount-connected-unix-peer-required")
+            retained = stack.enter_context(sock.dup())
+            os.set_inheritable(retained.fileno(), False)
+            signature = object_identity(retained.fileno())
+            if struct.unpack("3i", retained.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)) != expected_peer:
+                raise Rejected("process-mount-peer-mismatch")
+            # Linux SO_PEERPIDFD: refuse unsupported kernels, with no pidfd_open
+            # fallback that could bind a recycled numeric PID to an older socket.
+            pidfd = struct.unpack("i", retained.getsockopt(socket.SOL_SOCKET, 77, 4))[0]
+            stack.callback(os.close, pidfd)
+            os.set_inheritable(pidfd, False)
+            pid = expected_peer[0]
+            if (os.readlink(f"/proc/self/fd/{pidfd}") != "anon_inode:[pidfd]"
+                    or fdinfo_number(pidfd, b"Pid") != pid or wait_for_cancellation(pidfd, 0)):
+                raise Rejected("process-mount-peer-pidfd-unconfirmed")
+            proc = os.open(f"/proc/{pid}", os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            stack.callback(os.close, proc)
+            view = PeerMountView(pid, pidfd, proc, check, clock, stack,
+                                 (sock, retained, signature, expected_peer))
+            view._bound()
+        except Exception:
+            raise Rejected("process-mount-peer-acquisition-unconfirmed") from None
         try:
             yield view
         finally:
@@ -159,3 +211,22 @@ class ProcessMountView:
             raise Rejected("process-mount-observation-unconfirmed") from None
         finally:
             self._active = False
+
+
+class PeerMountView(ProcessMountView):
+    """Revoke mount observations on peer death, disconnect or socket replacement."""
+    def __init__(self, pid, pidfd, proc, check, clock, stack, connection):
+        super().__init__(pid, pidfd, proc, check, clock, stack)
+        self._connection = connection
+
+    def _bound(self):
+        super()._bound()
+        original, retained, signature, expected = self._connection
+        if (object_identity(original.fileno()) != signature or object_identity(retained.fileno()) != signature
+                or struct.unpack("3i", retained.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)) != expected):
+            raise Rejected("process-mount-peer-connection-changed")
+        poller = select.poll()
+        poller.register(retained.fileno(), select.POLLIN | select.POLLRDHUP)
+        if any(mask & (select.POLLERR | select.POLLHUP | select.POLLNVAL | select.POLLRDHUP)
+               for _, mask in poller.poll(0)):
+            raise Rejected("process-mount-peer-disconnected")

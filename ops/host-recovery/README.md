@@ -102,6 +102,18 @@ as a substitute for the accepted production binaries.
   mounted-byte/runtime-plugin/readiness verification and authenticated provisioning
   remain due; success has `start_authorized: false`. See
   [deployment guard and limits](DEPLOYMENT-GUARD-v1.md).
+- `host_recovery/process_mounts.py:open_peer_mount_view`: acquire a live pidfd
+  directly from a connected Unix stream/seqpacket socket using Linux
+  `SO_PEERPIDFD`, matching every independently supplied PID/UID/GID field. Retain
+  the original socket and duplicate; disconnect, half-close, descriptor change or
+  authority loss revokes observations. No numeric-PID fallback, protocol read,
+  socket-mode change or start grant. The result composes with the existing
+  deployment guard, but still needs independently approved endpoint/manager
+  invocation and installation authority; a daemon socket does not authenticate a
+  container task. The disposable Docker fixture exercises real root-daemon
+  connection linkage and requires rejection of its different mount namespace,
+  not an invented same-view success. Full container-mounted-byte/plugin/readiness
+  verification and the operational recovery runner remain separate prerequisites.
 - `host_recovery/durable.py`: no-follow fd-relative filesystem access, one
   installation-directory lock, bounded regular-file reads, restricted atomic
   writes with file fsync → rename → directory fsync → readback acknowledgment.

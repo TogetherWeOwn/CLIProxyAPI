@@ -2,6 +2,8 @@
 from contextlib import ExitStack
 import errno
 import os
+import socket
+import struct
 import subprocess
 import sys
 import unittest
@@ -177,6 +179,149 @@ class ProcessMountTests(unittest.TestCase):
                 process_mounts.fdinfo_number(self.pidfd, b"Pid")
 
 
+class PeerMountTests(unittest.TestCase):
+    def setUp(self):
+        self.stack = self.enterContext(ExitStack())
+        self.client, self.server = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(self.client.close)
+        self.addCleanup(self.server.close)
+        self.expected = (os.getpid(), os.geteuid(), os.getegid())
+        self.time, self.fenced = 1, True
+
+    def check(self, *, deadline):
+        return self.fenced
+
+    def open(self, **overrides):
+        args = dict(sock=self.client, expected_peer=self.expected, check=self.check, clock=lambda: self.time)
+        args.update(overrides)
+        return self.stack.enter_context(process_mounts.open_peer_mount_view(**args))
+
+    def test_kernel_connection_pidfd_drives_non_authorizing_mount_observation(self):
+        view = self.open()
+        with patch.object(os, "pidfd_open", side_effect=AssertionError("numeric lookup forbidden")):
+            receipt = view.observe(deadline=50)
+        self.assertEqual(process_mounts.fdinfo_number(view.pidfd, b"Pid"), self.expected[0])
+        self.assertIs(receipt["source_namespace_matches"], True)
+        self.assertIs(receipt["start_authorized"], False)
+        self.assertIs(receipt["container_namespace_verified"], False)
+        self.assertEqual(receipt, view.observe(deadline=50))
+
+    def test_seqpacket_peer_is_supported_without_changing_socket_or_consuming_payload(self):
+        client, server = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        with client, server:
+            server.sendall(b"synthetic-protocol-record")
+            view = self.open(sock=client)
+            view.observe(deadline=50)
+            self.assertTrue(client.getblocking())
+            self.assertEqual(client.recv(128), b"synthetic-protocol-record")
+
+    def test_peer_tuple_must_match_all_three_independently_supplied_fields(self):
+        for index in range(3):
+            expected = list(self.expected)
+            expected[index] += 1
+            with self.subTest(index=index), self.assertRaises(durable.Rejected):
+                self.open(expected_peer=tuple(expected))
+
+    def test_malformed_approval_and_nonconnection_sockets_refuse(self):
+        for expected in (None, list(self.expected), (True, 0, 0), (0, 0, 0), (1, -1, 0)):
+            with self.subTest(expected=expected), self.assertRaises(durable.Rejected):
+                self.open(expected_peer=expected)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as datagram, self.assertRaises(durable.Rejected):
+            self.open(sock=datagram)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as unconnected, self.assertRaises(durable.Rejected):
+            self.open(sock=unconnected)
+
+    def test_missing_peerpidfd_support_refuses_without_numeric_fallback_or_leak(self):
+        original = socket.socket.getsockopt
+        reached = []
+        def unsupported(sock, level, option, *args):
+            if level == socket.SOL_SOCKET and option == 77:
+                reached.append(option)
+                raise OSError(errno.ENOPROTOOPT, "synthetic-old-kernel")
+            return original(sock, level, option, *args)
+        before = set(os.listdir("/proc/self/fd"))
+        with patch.object(socket.socket, "getsockopt", unsupported), patch.object(os, "pidfd_open") as lookup:
+            with self.assertRaises(durable.Rejected):
+                self.open()
+        lookup.assert_not_called()
+        self.assertEqual(reached, [77])
+        self.assertEqual(set(os.listdir("/proc/self/fd")), before)
+
+    def test_wrong_peerpidfd_is_not_replaced_by_a_matching_numeric_lookup(self):
+        original = socket.socket.getsockopt
+        with open("/dev/null", "rb") as stream:
+            def wrong(sock, level, option, *args):
+                if level == socket.SOL_SOCKET and option == 77:
+                    return struct.pack("i", os.dup(stream.fileno()))
+                return original(sock, level, option, *args)
+            before = set(os.listdir("/proc/self/fd"))
+            with patch.object(socket.socket, "getsockopt", wrong), self.assertRaises(durable.Rejected):
+                self.open()
+            self.assertEqual(set(os.listdir("/proc/self/fd")), before)
+
+    def test_half_close_revokes_even_with_buffered_data_and_live_peer_process(self):
+        view = self.open()
+        view.observe(deadline=50)
+        self.server.sendall(b"buffered-prefix-is-not-liveness")
+        self.server.shutdown(socket.SHUT_WR)
+        self.assertFalse(process_mounts.wait_for_cancellation(view.pidfd, 0))
+        with self.assertRaises(durable.Rejected):
+            view.observe(deadline=50)
+        self.assertTrue(view.failed)
+
+    def test_original_socket_close_cannot_be_hidden_by_retained_duplicate(self):
+        view = self.open()
+        view.observe(deadline=50)
+        self.client.close()
+        with self.assertRaises(durable.Rejected):
+            view.observe(deadline=50)
+        self.assertTrue(view.failed)
+
+    def test_callback_disconnect_is_rechecked_before_receipt(self):
+        def disconnect(*, deadline):
+            self.server.shutdown(socket.SHUT_WR)
+            return True
+        view = self.open(check=disconnect)
+        with self.assertRaises(durable.Rejected):
+            view.observe(deadline=50)
+        self.assertTrue(view.failed)
+
+    def test_disconnect_during_final_kernel_reads_is_rechecked_before_receipt(self):
+        view = self.open()
+        original_capture = view._capture
+        reached = []
+        def capture(stack):
+            result = original_capture(stack)
+            reached.append(True)
+            if len(reached) == 2:
+                self.client.close()
+            return result
+        with patch.object(view, "_capture", side_effect=capture), self.assertRaises(durable.Rejected):
+            view.observe(deadline=50)
+        self.assertEqual(reached, [True, True])
+
+    def test_original_authority_remains_mandatory_and_sticky(self):
+        view = self.open()
+        self.fenced = False
+        with self.assertRaises(durable.Rejected):
+            view.observe(deadline=50)
+        self.fenced = True
+        with self.assertRaises(durable.Rejected):
+            view.observe(deadline=50)
+
+    def test_owned_connection_pidfd_and_proc_close_but_borrowed_socket_survives(self):
+        view = self.open()
+        view.observe(deadline=50)
+        owned = (view.pidfd, view.proc, view._connection[1].fileno(), *view._retained)
+        self.assertTrue(all(not os.get_inheritable(fd) for fd in owned))
+        self.stack.close()
+        self.server.sendall(b"still-open")
+        self.assertEqual(self.client.recv(32), b"still-open")
+        for fd in owned:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+
+
 class DeploymentProcessMountTests(unittest.TestCase):
     def setUp(self):
         self.fx = test_bind_sources.BindSourceTests()
@@ -193,6 +338,20 @@ class DeploymentProcessMountTests(unittest.TestCase):
 
     def verify(self):
         return self.gate.verify(self.fx.fx.value, deadline=1100)
+
+    def test_socket_derived_view_composes_with_stopped_deployment_guard_without_start_grant(self):
+        client, server = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        with client, server, process_mounts.open_peer_mount_view(sock=client,
+                expected_peer=(os.getpid(), os.geteuid(), os.getegid()),
+                check=self.fx.fx.check, clock=lambda: self.fx.fx.time) as view:
+            gate = deployment.OldDeploymentGate(objects=self.gate.objects, approval=self.gate.approval,
+                check=self.gate.check, clock=self.gate.clock, bind_sources=self.observer, daemon_view=view)
+            receipt = gate.verify(self.fx.fx.value, deadline=1100)
+            self.assertIs(receipt["daemon_source_namespace_verified"], True)
+            self.assertIs(receipt["start_authorized"], False)
+            server.shutdown(socket.SHUT_WR)
+            with self.assertRaises(durable.Rejected):
+                gate.verify(self.fx.fx.value, deadline=1100)
 
     def test_fresh_namespace_observations_supplement_but_do_not_authorize_start(self):
         with patch.object(self.view, "observe", wraps=self.view.observe) as observe:

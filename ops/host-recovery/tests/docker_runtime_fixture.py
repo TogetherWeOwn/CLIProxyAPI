@@ -3,6 +3,7 @@
 Diagnostic byte pins are not release provenance. No default daemon, image pull,
 production metadata, host bind mount or operational recovery authority is used.
 """
+from contextlib import ExitStack
 import hashlib
 import http.client
 import io
@@ -24,6 +25,8 @@ from offline_containerd_config import config_bytes
 from runtime_task_fixture import PINS as RUNTIME_PINS
 from runtime_task_fixture import command, emit, open_domain, protected_bytes, require, show, tool_pins
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from host_recovery.durable import Rejected
+from host_recovery.process_mounts import open_peer_mount_view
 from host_recovery.runtime_processes import RuntimeProcessWitness
 
 # Independently observed in the complete Actions 42129659342 inventory. Refuse
@@ -87,7 +90,7 @@ def validate_info(info, root):
             and info["Swarm"]["LocalNodeState"] == "inactive", "effective Docker isolation mismatch")
 
 
-def private_info(root, pid, current, deadline):
+def private_info(root, pid, current, deadline, *, unit, invocation):
     # The pinned CLI's formatted info returns success even when ServerErrors is
     # nonempty and also executes discovered client-plugin metadata helpers. Use
     # the exact fixture socket, not CLI formatting or any ambient/TCP endpoint.
@@ -99,6 +102,26 @@ def private_info(root, pid, current, deadline):
             self.sock.connect(str(root / "docker.sock"))
             peer = struct.unpack("3i", self.sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
             require(peer == (pid, 0, 0), "private Docker socket peer mismatch")
+            def bound(*, deadline):
+                current()
+                return (show(unit, "MainPID") == str(pid) and show(unit, "InvocationID") == invocation
+                        and show(unit, "ActiveState") == "active")
+            with open_peer_mount_view(sock=self.sock, expected_peer=(pid, 0, 0),
+                                      check=bound, clock=time.monotonic) as view:
+                view._current(deadline)
+                # Exercise the actual source kernel reader, not an injected
+                # namespace result. Our private daemon must not authorize a
+                # caller-namespace bind-source shortcut, even with a valid peer.
+                with ExitStack() as sample:
+                    try:
+                        view._capture(sample)
+                    except Rejected as err:
+                        require(str(err) == "process-mount-view-mismatch", "unexpected daemon view refusal")
+                    else:
+                        raise AssertionError("private daemon accepted caller mount view")
+                view._current(deadline)
+                emit(socket_derived_daemon_pidfd_verified=True, caller_mount_view_rejected=True,
+                     container_process_authenticated=False, start_allowed=False)
             current()
     connection = PrivateDockerHTTP("private-fixture")
     try:
@@ -345,7 +368,9 @@ def main(probe):
                 require(show(units[epoch]["dockerd"], "ActiveState") == "active", "dockerd startup failed")
                 pid = int(show(units[epoch]["dockerd"], "MainPID"))
                 require(pid > 1, "private dockerd MainPID required")
-                if private_info(root, pid, current, deadline) is not None:
+                invocation = show(units[epoch]["dockerd"], "InvocationID")
+                require(re.fullmatch(r"[0-9a-f]{32}", invocation), "private dockerd invocation required")
+                if private_info(root, pid, current, deadline, unit=units[epoch]["dockerd"], invocation=invocation) is not None:
                     mountinfo = Path("/proc/%d/mountinfo" % pid).read_text()
                     emit(plugin_mountinfo=[line for line in mountinfo.splitlines()
                                            if len(line.split()) >= 6 and line.split()[4] == "/run/docker"])
