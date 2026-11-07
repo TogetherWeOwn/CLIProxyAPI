@@ -154,6 +154,88 @@ class DockerRuntimeFixtureTests(unittest.TestCase):
         row["Mounts"] = copy.deepcopy(mounts)
         return row, mounts
 
+    def cold_row(self):
+        row, mounts = self.mounted_row()
+        row["Mounts"] = [dict(mounts[0], Source="/synthetic-private/" + name,
+                              Destination="/baseline/" + name) for name in ("plugins", "config", "auth")]
+        return row
+
+    def test_cold_object_accepts_only_mount_order_changes_without_mutating_samples(self):
+        first = self.cold_row()
+        second = copy.deepcopy(first)
+        second["Mounts"].reverse()
+        original_first, original_second = copy.deepcopy(first), copy.deepcopy(second)
+        fixture.require_same_cold_object(first, second)
+        self.assertEqual(first, original_first)
+        self.assertEqual(second, original_second)
+        fixture.require_same_cold_object(self.row, copy.deepcopy(self.row))
+
+    def test_cold_object_rejects_each_changed_mount_field_after_reordering(self):
+        first = self.cold_row()
+        for field, value in (("Type", "volume"), ("Source", "/other"), ("Destination", "/other"),
+                             ("Mode", "rw"), ("RW", True), ("Propagation", "shared")):
+            changed = copy.deepcopy(first)
+            changed["Mounts"].reverse()
+            changed["Mounts"][0][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(AssertionError, "cold startup object changed"):
+                fixture.require_same_cold_object(first, changed)
+
+    def test_cold_object_rejects_added_removed_and_duplicate_mounts(self):
+        first = self.cold_row()
+        for operation in ("add", "remove", "duplicate", "replace-with-duplicate"):
+            changed = copy.deepcopy(first)
+            changed["Mounts"].reverse()
+            if operation == "add":
+                changed["Mounts"].append(dict(changed["Mounts"][0], Destination="/extra"))
+            elif operation == "remove":
+                changed["Mounts"].pop()
+            elif operation == "duplicate":
+                changed["Mounts"].append(copy.deepcopy(changed["Mounts"][0]))
+            else:
+                changed["Mounts"][1] = copy.deepcopy(changed["Mounts"][0])
+            with self.subTest(operation=operation), self.assertRaisesRegex(AssertionError, "cold startup object changed"):
+                fixture.require_same_cold_object(first, changed)
+
+    def test_cold_object_does_not_canonicalize_other_fields_or_arrays(self):
+        first = self.cold_row()
+        first["Args"] = ["first", "second"]
+        first["Config"] = {"Env": ["FIRST=1", "SECOND=2"]}
+        first["HostConfig"]["Binds"] = ["/first:/first:ro", "/second:/second:ro"]
+        for field in ("Args", "Env", "Binds", "Id", "RestartCount", "State", "extra"):
+            changed = copy.deepcopy(first)
+            changed["Mounts"].reverse()
+            if field == "Args":
+                changed[field].reverse()
+            elif field == "Env":
+                changed["Config"][field].reverse()
+            elif field == "Binds":
+                changed["HostConfig"][field].reverse()
+            elif field == "Id":
+                changed[field] = "c" * 64
+            elif field == "RestartCount":
+                changed[field] = 1
+            elif field == "State":
+                changed[field]["Running"] = True
+            else:
+                changed[field] = True
+            with self.subTest(field=field), self.assertRaisesRegex(AssertionError, "cold startup object changed"):
+                fixture.require_same_cold_object(first, changed)
+
+    def test_cold_object_rejects_incomplete_or_extended_mount_schema(self):
+        first = self.cold_row()
+        for shape in ("missing", "extra", "not-list", "not-object"):
+            changed = copy.deepcopy(first)
+            if shape == "missing":
+                del changed["Mounts"][0]["RW"]
+            elif shape == "extra":
+                changed["Mounts"][0]["Other"] = "value"
+            elif shape == "not-list":
+                changed["Mounts"] = None
+            else:
+                changed["Mounts"][0] = None
+            with self.subTest(shape=shape), self.assertRaisesRegex(AssertionError, "Docker fixture mount schema changed"):
+                fixture.require_same_cold_object(first, changed)
+
     def test_only_exact_expected_mount_projection_and_bind_argv_are_accepted(self):
         row, mounts = self.mounted_row()
         inspect_object(row, self.object_id, self.image_id, self.slice, running=False, mounts=mounts)

@@ -217,6 +217,18 @@ def inspect_object(row, object_id, image_id, slice_name, *, running, mounts=None
             "Docker object running state mismatch")
 
 
+def require_same_cold_object(first, second):
+    # Docker inspect does not promise Mounts ordering. Preserve multiplicity and
+    # every mount field; all other arrays and object fields remain exact.
+    fields = ("Type", "Source", "Destination", "Mode", "RW", "Propagation")
+    def canonical(row):
+        mounts = row["Mounts"]
+        require(type(mounts) is list and all(type(mount) is dict and set(mount) == set(fields)
+                for mount in mounts), "Docker fixture mount schema changed")
+        return {**row, "Mounts": sorted(mounts, key=lambda mount: tuple(mount[field] for field in fields))}
+    require(canonical(first) == canonical(second), "cold startup object changed")
+
+
 def task_executable(root, object_id, pid, *, proc=Path("/proc")):
     # procfs executable link text is relative to the task's mount namespace, not
     # a host-side storage path. Bind the actual descriptors to Moby v28's VFS
@@ -613,7 +625,7 @@ def main(probe):
         require(ctr("--namespace=cpa-docker", "tasks", "list", "--quiet").stdout == b"", "task resurrected during cold startup")
         # Two reads are explicitly only point observations, not a drain or
         # continuous no-launch proof. The old source pidfds must remain dead.
-        require(observe(object_id, image_id, False) == first, "cold startup object changed")
+        require_same_cold_object(first, observe(object_id, image_id, False))
         witness.require_dead(check=current)
         require(not Path("/sys/fs/cgroup" + task_group).exists(), "old Docker task scope reappeared")
         pins()
