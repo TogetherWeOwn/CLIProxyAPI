@@ -4,6 +4,7 @@ import copy
 from dataclasses import replace
 import errno
 import os
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -17,6 +18,10 @@ class MountedBaselineTests(unittest.TestCase):
         self.fx = test_write_set.WriteSetTests()
         self.fx.setUp()
         self.addCleanup(self.fx.doCleanups)
+        # These self-process fixtures do not mount anything. Only the VFS flag
+        # reply is scripted; real readonly/writable controls run in Actions Docker.
+        self.vfs = self.enterContext(patch.object(mounted_baseline.os, "fstatvfs",
+            return_value=SimpleNamespace(f_flag=os.ST_RDONLY)))
         self.mounts = [{"Type": "bind", "Source": str(path), "Destination": str(path),
                         "Mode": "ro", "RW": False, "Propagation": "rprivate"}
                        for path in self.fx.paths.values()]
@@ -190,3 +195,99 @@ class MountedBaselineTests(unittest.TestCase):
                 view._view = changed
         self.assertEqual(reached, ["changed-view"])
         self.assertTrue(view.failed)
+
+    def test_readonly_metadata_cannot_override_any_writable_kernel_root(self):
+        for index in range(3):
+            with self.subTest(root=index), self.open() as view:
+                calls = []
+                def flags(fd):
+                    calls.append(fd)
+                    return SimpleNamespace(f_flag=0 if len(calls) == index + 1 else os.ST_RDONLY)
+                self.vfs.side_effect = flags
+                with patch.object(view.verifier, "verify_mounted_files") as scan, self.assertRaises(durable.Rejected):
+                    with view.observe(self.fx.value, deadline=1100):
+                        self.fail("writable root accepted from readonly metadata")
+                self.assertEqual(len(calls), index + 1)
+                scan.assert_not_called()
+                self.assertTrue(view.failed)
+
+    def test_same_identity_remount_during_file_read_is_rejected(self):
+        with self.open() as view:
+            original = view.verifier.verify_mounted_files
+            reached = []
+            def remount(*args, **kwargs):
+                receipt = original(*args, **kwargs)
+                reached.append("complete-files")
+                self.vfs.return_value = SimpleNamespace(f_flag=0)
+                return receipt
+            with patch.object(view.verifier, "verify_mounted_files", side_effect=remount), self.assertRaises(durable.Rejected):
+                with view.observe(self.fx.value, deadline=1100):
+                    self.fail("same-inode writable remount accepted")
+            self.assertEqual(reached, ["complete-files"])
+            self.assertTrue(view.failed)
+
+    def test_remount_after_yield_poisoning_cannot_be_reused(self):
+        with self.open() as view, self.assertRaises(durable.Rejected):
+            with view.observe(self.fx.value, deadline=1100):
+                self.vfs.return_value = SimpleNamespace(f_flag=0)
+        self.assertTrue(view.failed)
+        with self.assertRaises(durable.Rejected):
+            with view.observe(self.fx.value, deadline=1100):
+                self.fail("failed view reused")
+
+    def test_trailing_retained_and_reopened_mount_flags_are_both_required(self):
+        # Three leading roots, then retained/reopened pairs for every destination.
+        for index in range(3, 9):
+            with self.subTest(read=index), self.open() as view:
+                calls = []
+                def flags(fd):
+                    calls.append(fd)
+                    return SimpleNamespace(f_flag=0 if len(calls) == index + 1 else os.ST_RDONLY)
+                self.vfs.side_effect = flags
+                with self.assertRaises(durable.Rejected):
+                    with view.observe(self.fx.value, deadline=1100):
+                        self.fail("trailing writable destination accepted")
+                self.assertEqual(len(calls), index + 1)
+                self.assertTrue(view.failed)
+
+    def test_vfs_errors_refuse_without_metadata_fallback(self):
+        for code in (errno.EIO, errno.ENOSPC, errno.EBADF, errno.EACCES):
+            with self.subTest(code=code), self.open() as view:
+                reached = []
+                def fail(fd):
+                    reached.append(fd)
+                    raise OSError(code, "synthetic-vfs-fault")
+                self.vfs.side_effect = fail
+                with self.assertRaises(durable.Rejected):
+                    with view.observe(self.fx.value, deadline=1100):
+                        self.fail("unreadable mount flags accepted")
+                self.assertEqual(len(reached), 1)
+                self.assertTrue(view.failed)
+
+    def test_other_vfs_flags_do_not_substitute_for_readonly(self):
+        for flag in (os.ST_NOSUID, os.ST_NODEV, os.ST_NOEXEC, os.ST_NOSUID | os.ST_NODEV | os.ST_NOEXEC):
+            with self.subTest(flag=flag), self.open() as view:
+                self.vfs.return_value = SimpleNamespace(f_flag=flag)
+                with self.assertRaises(durable.Rejected):
+                    with view.observe(self.fx.value, deadline=1100):
+                        self.fail("non-readonly mount accepted")
+                self.assertTrue(view.failed)
+
+    def test_readonly_with_additional_flags_keeps_non_authorizing_receipt(self):
+        self.vfs.return_value = SimpleNamespace(f_flag=os.ST_RDONLY | os.ST_NOSUID | os.ST_NODEV | os.ST_NOEXEC)
+        with self.open() as view:
+            with view.observe(self.fx.value, deadline=1100) as receipt:
+                self.assertTrue(receipt["mounted_files_verified"])
+                self.assertFalse(receipt["start_authorized"])
+        self.assertEqual(self.vfs.call_count, 18)
+
+    def test_vfs_reader_uses_descriptor_and_kernel_readonly_bit(self):
+        fd = os.open(self.fx.paths["auth"], os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            mounted_baseline.require_readonly_mount(fd)
+            self.vfs.assert_called_once_with(fd)
+            self.vfs.return_value = SimpleNamespace(f_flag=0)
+            with self.assertRaisesRegex(durable.Rejected, "^mounted-baseline-kernel-readonly-required$"):
+                mounted_baseline.require_readonly_mount(fd)
+        finally:
+            os.close(fd)

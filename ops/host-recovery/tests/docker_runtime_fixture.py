@@ -26,6 +26,7 @@ from runtime_task_fixture import PINS as RUNTIME_PINS
 from runtime_task_fixture import command, emit, open_domain, protected_bytes, require, show, tool_pins
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from host_recovery.durable import Rejected
+from host_recovery.mounted_baseline import require_readonly_mount
 from host_recovery.process_mounts import open_peer_mount_view
 from host_recovery.runtime_processes import RuntimeProcessWitness
 
@@ -421,6 +422,25 @@ def main(probe):
             task_view._current(deadline)
             target_root = os.open("root", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=task_view.proc)
             try:
+                # Default Docker root is writable even though this observer opens
+                # it O_RDONLY. Descriptor access mode cannot prove mount policy.
+                require(not os.fstatvfs(target_root).f_flag & os.ST_RDONLY,
+                        "writable-root negative control is not writable")
+                try:
+                    require_readonly_mount(target_root)
+                except Rejected as err:
+                    require(str(err) == "mounted-baseline-kernel-readonly-required", "unexpected writable-root refusal")
+                else:
+                    raise AssertionError("kernel-writable task root accepted as readonly")
+                sys_root = os.open("sys", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                   dir_fd=target_root)
+                try:
+                    require(bool(os.fstatvfs(sys_root).f_flag & os.ST_RDONLY), "Docker sys mount is not readonly")
+                    require_readonly_mount(sys_root)
+                finally:
+                    os.close(sys_root)
+                emit(kernel_readonly_mount_positive=True, writable_task_root_rejected=True,
+                     complete_baseline_verified=False, continuous_writer_exclusion=False)
                 with open("/proc/%d/root/probe" % pid, "rb") as expected:
                     actual = os.open("probe", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=target_root)
                     try:

@@ -18,6 +18,17 @@ from .runtime_processes import RuntimeProcessWitness
 from .write_set import WriteSetVerifier
 
 
+def require_readonly_mount(fd):
+    """Observe this opened mount's kernel flag, not daemon metadata or mode bits.
+
+    The flag is mount-local: another writable alias, nested mount, future remount
+    or privileged writer is not excluded. Callers must retain their independent
+    writer fence and freshly reopen the destination at each observation barrier.
+    """
+    if not os.fstatvfs(fd).f_flag & os.ST_RDONLY:
+        raise Rejected("mounted-baseline-kernel-readonly-required")
+
+
 @dataclass(frozen=True)
 class MountedBaselineApproval:
     intent_sha256: str
@@ -126,6 +137,8 @@ class MountedBaseline:
                 raise Rejected("mounted-baseline-process-view-changed")
             roots = {name: self._destination(handles[1], path, sample) for name, path in mapping.items()}
             identities = {name: root_identity(fd) for name, fd in roots.items()}
+            for fd in roots.values():
+                require_readonly_mount(fd)
             receipt = verifier.verify_mounted_files(intent, roots, deadline=deadline)
             self._bound(intent)
             # No authority/clock callback follows these final kernel path reads.
@@ -142,6 +155,8 @@ class MountedBaseline:
                     current = self._destination(current_root, path, trailing)
                     if root_identity(current) != identities[name] or root_identity(roots[name]) != identities[name]:
                         raise Rejected("mounted-baseline-destination-changed")
+                    require_readonly_mount(roots[name])
+                    require_readonly_mount(current)
             process._bound()
             if self._retained is None:
                 # Retain only the namespace/root; destination fds remain scoped

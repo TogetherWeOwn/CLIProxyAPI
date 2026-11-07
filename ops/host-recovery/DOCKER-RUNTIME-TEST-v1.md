@@ -149,6 +149,30 @@ not a verified diagnosis of the unlogged field or permission to weaken the
 isolation check. A new scripted argv method checks the explicit policy; it is
 not native qualification. No local tests or manager operations were run.
 
+## Kernel read-only mount observation
+
+The captured task-pidfd/root path also exercises the mounted-baseline reader's
+`require_readonly_mount` primitive on actual kernel descriptors. An independently
+checked writable task root must be rejected even when opened with `O_RDONLY`;
+Docker's independently checked read-only `/sys` mount must be accepted. No mount,
+remount, host bind, task exec or permission change is introduced by these controls.
+New assertions require a completed exact-head Actions job before claiming PASS.
+
+The complete mounted-baseline observer now checks `fstatvfs().f_flag & ST_RDONLY`
+on each approved destination before scanning its files, and on both the retained
+and freshly reopened destination after that scan. It repeats these barriers after
+observation-record publication. Approved `RW=false` metadata, read-only descriptor
+access and matching file bytes cannot substitute for the kernel mount flag.
+Synthetic unit fixtures explicitly script this VFS result; same-inode remount and
+VFS-error negatives do not claim an actual remount drill. The native positive
+control is `/sys`, not a complete baseline/auth/config integration.
+
+This is a mount-local point observation. It does not prove that nested mounts,
+other writable aliases, future remounts or privileged writers are excluded. The
+independent writer/activation fence, authenticated object/registry/installation
+binding and complete baseline/plugin/readiness oracle remain required. No start
+or settlement authority is added, and the receipt schema remains unchanged.
+
 ## Limits and retained gates
 
 The original authority is a diagnostic root fixture, not an authenticated
