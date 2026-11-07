@@ -369,7 +369,7 @@ def cleanup():
     emit(docker_cleanup="removed", cgroup_removed=True)
 
 
-def main(probe):
+def main(probe, *, recover=False):
     root, units, slice_name = identity()
     pins()
     require(Path("/proc/1/comm").read_text().strip() == "systemd", "real system manager required")
@@ -389,8 +389,13 @@ def main(probe):
     (root / "owner.json").write_text(json.dumps(marker(units, slice_name)))
     (root / "owner.json").chmod(0o600)
     fds, domain_fd, witness, task_http = [], None, None, None
+    recovery_context = ExitStack()
     try:
         baseline = baseline_fixture.prepare(root)
+        if recover:
+            from host_recovery.durable import installation_lock
+            owner = baseline_fixture.intent(baseline["pin"], "0" * 64)["owner"]
+            recovery_context.enter_context(installation_lock(str(baseline["root"]), owner))
         (root / "client").mkdir(mode=0o700)
         containerd = config_bytes(root) + ('[plugins."io.containerd.shim.v1.manager"]\nsocket_dir = '
                                          + json.dumps(str(root / "s")) + '\n').encode()
@@ -620,6 +625,19 @@ def main(probe):
         host = json.loads(protected_bytes(metadata / "hostconfig.json", limit=1024 * 1024)[0])
         require(host["RestartPolicy"] == {"Name": "no", "MaximumRetryCount": 0}, "persisted restart policy changed")
         require(sorted(path.name for path in metadata.parent.iterdir()) == [object_id], "unexpected persisted Docker object")
+        if recover:
+            def stopped_domain(*, deadline):
+                current()
+                witness.require_dead(check=current)
+                require(domain.populated() is False, "recovery restoration domain is not empty")
+                require(not task_path.exists(), "recovery restoration task scope remains")
+                return True
+            with baseline_fixture.restore_stopped(baseline, object_id=object_id,
+                    check=stopped_domain, deadline=deadline) as restored:
+                require(restored["filesystem_verified"] is True and restored["roots"] == 3
+                        and restored["start_permission"] is False, "fresh recovery file observation missing")
+                emit(actual_synthetic_baseline_restored=restored, original_processes_dead_before_restore=True,
+                     complete_fence_proven=False, operational_recovery_accepted=False)
         launch(2)
         first = observe(object_id, image_id, False)
         require(ctr("--namespace=cpa-docker", "tasks", "list", "--quiet").stdout == b"", "task resurrected during cold startup")
@@ -628,6 +646,47 @@ def main(probe):
         require_same_cold_object(first, observe(object_id, image_id, False))
         witness.require_dead(check=current)
         require(not Path("/sys/fs/cgroup" + task_group).exists(), "old Docker task scope reappeared")
+        if recover:
+            def stopped_task(*, deadline):
+                current()
+                witness.require_dead(check=current)
+                require(not task_path.exists(), "old task started before baseline verification")
+                return True
+            with baseline_fixture.write_set.open_write_set_verifier(baseline=baseline["backup"],
+                    roots=baseline["roots"], baseline_sha256=baseline["pin"], check=stopped_task,
+                    clock=time.monotonic) as verifier:
+                verified = verifier.verify_files(baseline_fixture.intent(baseline["pin"], object_id), deadline=deadline)
+                require(verified["filesystem_verified"] is True, "pre-start baseline observation missing")
+                observe(object_id, image_id, False)
+                stopped_task(deadline=deadline)
+                # Only this explicitly hosted fixture starts its exact original
+                # inert object. This is not an operational service-start handler.
+                docker_cmd("container", "start", object_id)
+            row = observe(object_id, image_id, True)
+            pid = row["State"]["Pid"]
+            while True:
+                current()
+                members = [int(value) for value in task_path.read_text().splitlines()] if task_path.exists() else []
+                if len(members) == 2 and pid in members:
+                    break
+                select.select([], [], [], 0.02)
+            recovered = RuntimeProcessWitness.capture(domain=domain, check=current)
+            try:
+                require(recovered.count == 5, "recovered runtime process inventory changed")
+                require(task_executable(root, object_id, pid) == raw_probe, "recovered task executable changed")
+                task_http = TaskInspection(root, peer=(int(show(units[2]["dockerd"], "MainPID")), 0, 0),
+                    unit=units[2]["dockerd"], invocation=show(units[2]["dockerd"], "InvocationID"),
+                    current=current, deadline=deadline)
+                with baseline_fixture.observe(baseline, object_id=object_id, pid=pid, witness=recovered,
+                        check=task_authority, deadline=deadline) as mounted:
+                    require(mounted["mounted_files_verified"] is True and mounted["roots"] == 3,
+                            "recovered task did not mount complete original baseline")
+                witness.require_dead(check=current)
+                emit(actual_old_object_restarted=True, restored_task_mounted_baseline=mounted,
+                     original_image_unchanged=True, operational_readiness_verified=False,
+                     executable_resume_implemented=False, operational_recovery_accepted=False)
+            finally:
+                recovered.close()
         pins()
         require((root / "input.toml").read_bytes() == containerd and json.loads((root / "docker.json").read_bytes()) == docker,
                 "Docker fixture configuration changed")
@@ -648,12 +707,15 @@ def main(probe):
             os.close(fd)
         if domain_fd is not None:
             os.close(domain_fd)
+        recovery_context.close()
         cleanup()
 
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["--cleanup"]:
         cleanup()
+    elif len(sys.argv) == 3 and sys.argv[1] == "--recover":
+        main(sys.argv[2], recover=True)
     else:
         require(len(sys.argv) == 2, "one explicit source-built probe required")
         main(sys.argv[1])

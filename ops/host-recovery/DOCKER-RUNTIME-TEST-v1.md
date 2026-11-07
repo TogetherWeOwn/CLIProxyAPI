@@ -90,6 +90,40 @@ source-reference correspondence, not a binary attestation.
    shared cleanup or prefix sweep is allowed. Hosted runner retirement remains
    the native bound after cancellation/failure.
 
+## Synthetic restoration and exact old-object restart
+
+Actions runs a second, explicitly hosted `--recover` invocation after the original
+cold-runtime witness. The default invocation and its assertions are unchanged.
+Each invocation keeps its original 90-second deadline; no recovery operation
+renews it. Both use the same exact ownership/cleanup checks, and neither leaves
+an idle environment. The new path is authored, pending exact-head Actions.
+
+The recovery invocation retains a real flock on its private baseline directory.
+Its owner fields are synthetic fixture inputs, not authenticated manager authority.
+After all five original processes are dead and the runtime domain is empty, it
+restores the deliberately damaged roots with the actual `WriteSetRecovery`.
+Fresh independently opened verifier handles compare every root and metadata,
+including unrelated providers, config/Compose and plugin inventory. Storage-fault
+unit methods require the injected failure to be reached before the restoration
+context can yield; a new context must recover the partial files on retry.
+
+After the original cold-start assertions prove that the same object remains
+stopped, a fresh complete filesystem observation precedes an explicit start of
+that exact original inert object. No new object or image is adopted. A new live
+process witness binds its actual task PID/root/executable; complete baseline bytes
+and kernel read-only flags are checked again through that task's mounted root.
+The old process witness must remain dead throughout.
+
+This is a concrete restoration/restart drill, **not executable operational
+recovery/resume acceptance**. The inert probe is not CLIProxy or the Meta plugin;
+its persistent marker cannot establish application readiness. The path reports
+`operational_readiness_verified=false`, `executable_resume_implemented=false` and
+`operational_recovery_accepted=false`. It does not implement original-arm journal
+resumption, cross-boot/expired continuation, a complete activation/writer fence,
+registration/drain, semantic start authority, package attestation, replay drain or
+measured recovery phase caps. Installed entrypoints remain deny-first. A passing
+test of this path cannot close those gaps or the outstanding integration findings.
+
 ## Initial reached fixture failure and correction
 
 Exact `d6dd64e8fd6bd075265538ecede13942c9730e8f`,
@@ -196,7 +230,8 @@ requires actual kernel readonly flags before and after scanning and after yield.
 A second observation reaches its yield, then changes the nested unrelated file
 through the fixture's writable host alias. Its trailing scan must reject. This is
 an actual byte-drift counterexample, not a mount/remount drill or proof of writer
-exclusion. The fixture does not repair that synthetic drift or start another task.
+exclusion. The default cold-runtime fixture does not repair that synthetic drift
+or start another task. The separate `--recover` invocation below does both.
 Successful synthetic correspondence must retain `start_authorized=false` and
 `plugin_readiness_verified=false`. The original intent/approvals/authority remain
 diagnostic inputs: no installed supervisor lock, registered-object authority,

@@ -108,6 +108,26 @@ def observe(fixture, *, object_id, pid, witness, check, deadline):
             yield receipt
 
 
+@contextmanager
+def restore_stopped(fixture, *, object_id, check, deadline, fault=None):
+    """Actual synthetic-root restoration; caller retains its fixture lock.
+
+    This is not a complete writer fence or a semantic service-start oracle. The
+    fixture must independently keep its old task stopped throughout this context.
+    A fresh reader, not the restorer's progress bit, verifies all approved roots.
+    """
+    value = intent(fixture["pin"], object_id)
+    arguments = {"baseline": fixture["backup"], "roots": fixture["roots"],
+                 "baseline_sha256": fixture["pin"], "check": check, "clock": time.monotonic}
+    with write_set.open_write_set(**arguments) as recovery:
+        recovery.validate_recovery(value, deadline=deadline)
+        recovery.restore_complete(value, deadline=deadline, fault=fault)
+        with write_set.open_write_set_verifier(**arguments) as verifier:
+            receipt = verifier.verify_files(value, deadline=deadline)
+            yield receipt
+            verifier.verify_files(value, deadline=deadline)
+
+
 def cleanup(runtime_root):
     root = baseline_root(runtime_root)
     if not os.path.lexists(root):

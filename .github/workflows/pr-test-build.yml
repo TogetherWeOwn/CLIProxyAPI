@@ -306,6 +306,17 @@ jobs:
               GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
               /usr/bin/timeout 150s /usr/bin/python3 -I ops/host-recovery/tests/docker_runtime_fixture.py "$RUNNER_TEMP/recovery-docker-probe"
           } 2>&1 | tee "$RUNNER_TEMP/recovery-docker-runtime.log"
+      - name: Restore synthetic baseline and restart the exact old Docker task
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            git rev-parse HEAD
+            sudo env -i PATH=/usr/bin:/bin LANG=C CPA_RECOVERY_DOCKER_RUNTIME_TEST=1 \
+              GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+              GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+              /usr/bin/timeout 150s /usr/bin/python3 -I ops/host-recovery/tests/docker_runtime_fixture.py --recover "$RUNNER_TEMP/recovery-docker-probe"
+          } 2>&1 | tee "$RUNNER_TEMP/recovery-docker-restoration.log"
       - name: Collect only exact owned Docker fixture
         if: always()
         shell: bash
@@ -323,6 +334,7 @@ jobs:
           name: recovery-docker-runtime-${{ github.event.pull_request.head.sha }}
           path: |
             ${{ runner.temp }}/recovery-docker-runtime.log
+            ${{ runner.temp }}/recovery-docker-restoration.log
             ${{ runner.temp }}/recovery-docker-runtime-cleanup.log
           if-no-files-found: error
 
