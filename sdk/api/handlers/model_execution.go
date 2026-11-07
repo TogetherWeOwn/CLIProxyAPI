@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/recoverycorrelation"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	"golang.org/x/net/context"
@@ -259,9 +260,9 @@ func modelExecutionResponseProtocol(entryProtocol, exitProtocol string) string {
 
 func modelExecutionHeaders(ctx context.Context, headers http.Header) http.Header {
 	if len(headers) > 0 {
-		return cloneHeader(headers)
+		return recoverycorrelation.WithoutHeaders(headers)
 	}
-	return headersFromContext(ctx)
+	return recoverycorrelation.WithoutHeaders(headersFromContext(ctx))
 }
 
 // modelExecutionQuery prefers an explicitly provided query and otherwise falls

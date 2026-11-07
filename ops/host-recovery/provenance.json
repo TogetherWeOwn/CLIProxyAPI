@@ -1,0 +1,38 @@
+{
+  "schema": "host-recovery-reference-provenance-v1",
+  "production_acceptance": false,
+  "development_baseline": "109ac91c2691c75ea0e8e42626e134dc5f63d8c1",
+  "references": {
+    "r2": {
+      "archive_sha256": "6a2ba2e72e98828543cd0e61587bdf6fb2122e23abddc1ad3696ffd9d497f789",
+      "verified_manifest_entries": 28,
+      "controller_sha256": "c6359010d6797584fed01fe2038d9c1a117e3a804fc9a9f4d0581a457934b70f",
+      "converter_sha256": "8168065e2cc32445bbc04c09990b4c1cac4bd7c39d43c4a273d09524ffea8666",
+      "received_sources": {
+        "auto.sh": "72cf43e78bc32095c7e6c5112ba41680349c5b56f79914fcd16503472ca48b3a",
+        "execute.sh": "5853506e437caa2c3942a96bc981f3e6c1c713016a71723629a0b021a1f49519",
+        "flip.py": "e93aed78d050c70b35e8cf5521551af802337ca60dcb186dfdd83b7bec8b59be",
+        "flip.py.bak-pre-auto": "e91d6937354598ed7f075ad75841281b77884e5c82ab85d46dea597a74cfc927",
+        "flip.py.original-aborted": "e68a821dc0791db131ef7d907636bd81eba26b9d2dac4dcccec3b011af303b94",
+        "probe.py": "ddf79470c69e8dbefd575017f9a06dad151ca02157795a86da16ac8c1e737ec3",
+        "rollback.sh": "c78b35a68f83395547bc15aa3b075c4644a99ee75765f4b064d17da1dc6ab8ae"
+      },
+      "received_auto_identity": "post-01:50 snapshot, not either exact production attempt",
+      "use": "reference and immutable negative provenance only; never a production default"
+    },
+    "r3": {
+      "archive_sha256": "452003e854bacf10695cb409381b0c20a7b988c640d1ee8b7501b87b95b10f5d",
+      "verified_manifest_entries": 10,
+      "config_guard_sha256": "dae765acfa0c515db8b8662339f9d197263168c5399821ddadace37baee597bf",
+      "replay_guard_sha256": "e0ceb010c1ea225d4788119ab642acc44d8023a469ff24dceaaaba7cbfc791f1",
+      "replay_schema": "proposed-replay-evidence-v1",
+      "use": "historical component contract; not rendering/schema/producer/collector integration"
+    }
+  },
+  "prior_test_counts": {
+    "r2_lifecycle": 33,
+    "r2_converter": 32,
+    "r3_components": 49,
+    "rerun_in_this_implementation": false
+  }
+}

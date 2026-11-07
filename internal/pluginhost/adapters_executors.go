@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/recoverycorrelation"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -1321,7 +1322,7 @@ func buildExecutorRequest(host *Host, provider string, auth *coreauth.Auth, req 
 		Format:          req.Format.String(),
 		Stream:          opts.Stream,
 		Alt:             opts.Alt,
-		Headers:         cloneHeader(opts.Headers),
+		Headers:         recoverycorrelation.WithoutHeaders(opts.Headers),
 		Query:           cloneValues(opts.Query),
 		OriginalRequest: bytes.Clone(opts.OriginalRequest),
 		SourceFormat:    opts.SourceFormat.String(),
