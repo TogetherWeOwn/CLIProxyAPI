@@ -154,9 +154,18 @@ class TaskInspection(http.client.HTTPConnection):
 
     def bound(self):
         self.current()
-        require(show(self.unit, "MainPID") == str(self.peer[0])
-                and show(self.unit, "InvocationID") == self.invocation
-                and show(self.unit, "ActiveState") == "active", "task inspection daemon changed")
+        # File barriers call this thousands of times. Query all three original
+        # properties together without caching or dropping a manager recheck.
+        raw = command("/usr/bin/systemctl", "show", "--property=MainPID",
+                      "--property=InvocationID", "--property=ActiveState", "--", self.unit).stdout
+        self.current()
+        fields = {}
+        for line in raw.decode("ascii").splitlines():
+            key, separator, value = line.partition("=")
+            require(separator and key not in fields, "task inspection manager fields invalid")
+            fields[key] = value
+        require(fields == {"MainPID": str(self.peer[0]), "InvocationID": self.invocation,
+                           "ActiveState": "active"}, "task inspection daemon changed")
 
     def connect(self):
         self.bound()

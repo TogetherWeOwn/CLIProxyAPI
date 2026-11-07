@@ -58,10 +58,66 @@ class DockerRuntimeFixtureTests(unittest.TestCase):
         for name, value in (("MainPID", "124"), ("InvocationID", "b" * 32), ("ActiveState", "inactive")):
             client = self.task_http()
             fields = {**good, name: value}
-            with self.subTest(name=name), patch.object(fixture, "show", side_effect=lambda unit, key: fields[key]), \
+            raw = "".join(key + "=" + value + "\n" for key, value in fields.items()).encode()
+            with self.subTest(name=name), patch.object(fixture, "command", return_value=Mock(stdout=raw)), \
                     self.assertRaises(AssertionError):
                 client.bound()
-            client.current.assert_called_once_with()
+            self.assertEqual(client.current.call_count, 2)
+
+    def test_fixed_inspection_batches_fresh_manager_reads_within_original_budget(self):
+        client = self.task_http()
+        raw = b"MainPID=123\nInvocationID=" + b"a" * 32 + b"\nActiveState=active\n"
+        elapsed = 0
+        def current():
+            self.assertLess(elapsed, 3, "synthetic original budget exhausted")
+        def command(*args):
+            nonlocal elapsed
+            elapsed += 1
+            return Mock(stdout=raw)
+        def show(unit, key):
+            nonlocal elapsed
+            elapsed += 1
+            return dict(line.split("=", 1) for line in raw.decode().splitlines())[key]
+        client.current = current
+        with patch.object(fixture, "command", side_effect=command) as query, \
+                patch.object(fixture, "show", side_effect=show):
+            client.bound()
+            client.bound()
+        self.assertEqual(elapsed, 2)
+        self.assertEqual(query.call_count, 2)
+        query.assert_called_with("/usr/bin/systemctl", "show", "--property=MainPID",
+                                 "--property=InvocationID", "--property=ActiveState", "--", client.unit)
+
+    def test_fixed_inspection_rejects_ambiguous_or_incomplete_manager_fields(self):
+        good = b"MainPID=123\nInvocationID=" + b"a" * 32 + b"\nActiveState=active\n"
+        for raw in (b"", good.replace(b"MainPID=123\n", b""), good + b"MainPID=123\n",
+                    good + b"Unknown=value\n", good + b"ActiveState\n",
+                    good.replace(b"MainPID=123", b"MainPID=0123")):
+            client = self.task_http()
+            with self.subTest(raw=raw), patch.object(fixture, "command", return_value=Mock(stdout=raw)), \
+                    self.assertRaises(AssertionError):
+                client.bound()
+
+    def test_fixed_inspection_never_reuses_previous_manager_sample(self):
+        client = self.task_http()
+        good = b"MainPID=123\nInvocationID=" + b"a" * 32 + b"\nActiveState=active\n"
+        for bad in (good.replace(b"123", b"124"), good.replace(b"a" * 32, b"b" * 32),
+                    good.replace(b"active\n", b"inactive\n")):
+            with self.subTest(bad=bad), patch.object(fixture, "command",
+                    side_effect=[Mock(stdout=good), Mock(stdout=bad)]) as query:
+                client.bound()
+                with self.assertRaises(AssertionError):
+                    client.bound()
+                self.assertEqual(query.call_count, 2)
+
+    def test_fixed_inspection_checks_original_deadline_after_manager_query(self):
+        client = self.task_http()
+        good = b"MainPID=123\nInvocationID=" + b"a" * 32 + b"\nActiveState=active\n"
+        client.current.side_effect = [None, AssertionError("synthetic deadline expired")]
+        with patch.object(fixture, "command", return_value=Mock(stdout=good)) as query, \
+                self.assertRaisesRegex(AssertionError, "synthetic deadline expired"):
+            client.bound()
+        query.assert_called_once()
 
     def test_fixed_inspection_rejects_socket_peer_drift(self):
         client = self.task_http()

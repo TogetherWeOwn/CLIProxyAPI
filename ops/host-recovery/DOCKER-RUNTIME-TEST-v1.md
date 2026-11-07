@@ -222,6 +222,33 @@ deadline, all baseline/death/cold-start/cleanup assertions and operational denie
 are unchanged. Four additional scripted protocol/binding methods are authored,
 not locally run; corrected exact-head Actions must still verify this change.
 
+Exact `1be31a098793267986628a76fbcd25f0198f0730`,
+[Docker job](https://github.com/TogetherWeOwn/CLIProxyAPI/actions/runs/42344691913/job/128319776509),
+again failed before completing the original deadline. It emitted the positive
+mounted-baseline receipt, then refused entry to the second observation before
+its drift injection. The final assertion was `baseline drift did not reach
+trailing mounted observation`; no reached drift-negative PASS is claimed on
+that head. Both exact cleanup paths passed. The observer intentionally masks
+its inner exception, so the raw trace alone does not identify that exception.
+The retained command log does establish the remaining process amplification:
+5,846 MainPID, 5,844 InvocationID and 5,845 ActiveState `systemctl show` launches,
+with the final reads and cleanup at the 90-second boundary. Replacing Docker CLI
+inspection alone did not remove those repeated manager process launches.
+
+The next fixture correction samples the same three manager properties with one
+explicit `systemctl show` invocation per barrier, without caching, skipping a
+barrier or changing the 90-second deadline. Exact keys/values are required;
+missing, duplicate, malformed and unexpected fields refuse. Original fixture
+clock/domain checks run both before and after the query. Socket-peer, full
+object/image/policy/mount/PID and whole-inventory checks remain unchanged. One
+focused synthetic-cost regression fails on the earlier three-process reader and
+passes on the batched reader; this demonstrates command amplification, not native
+timing or the masked exception. Three additional schema/freshness/deadline methods
+are authored for Actions, not locally run. Exact-head Docker and full CI must
+verify that the corrected fixture reaches the drift, kill and cold-start checks
+within its unchanged deadline; no native PASS or complete-fence claim is made by
+the focused result.
+
 This is a mount-local point observation. It does not prove that nested mounts,
 other writable aliases, future remounts or privileged writers are excluded. The
 independent writer/activation fence, authenticated object/registry/installation
