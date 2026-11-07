@@ -87,6 +87,27 @@ interpret the workflow's green status as functional recovery proof.
 No dependencies are installed for this inspector. Tests execute only in Actions;
 no local full suite or CI mirror is part of this runbook.
 
+## Probe acceptance adaptation — parser only
+
+`service_evidence.py` adapts the retained probe's `/v1/messages` acceptance
+checks without network calls, credentials, dependencies or runtime authority.
+The synthetic contract requires a fresh 128-bit request nonce, exact model and
+assistant response identity, expected text and `end_turn`. Streams must contain
+ordered message/block events, completed blocks, terminal reason and final
+`message_stop`; an EOF, substring, error, truncated prefix, foreign block or late
+event fails. Tool checks construct a result correlated to the observed tool-use
+ID and nonce, and require a distinct final answer after the caller sends it.
+
+These are **parser controls, not service observations**. The future wrapper must
+bind actual requests/responses to the attempt and runtime, submit the correlated
+tool result, and prove the stock runtime traversed the intended synthetic provider.
+A fabricated response transcript cannot establish that. This helper intentionally
+has no network/CLI entrypoint and cannot authorize execution. It covers the retained
+Messages probe format only; any additional API/provider format needs its own real
+runtime qualification. Run `python3 -I ops/stock-recovery/test_service_evidence.py -v`
+in Actions for positive and negative parser controls. Its green check still means
+service recovery NOT_TESTED, and it does not clear any packet gate.
+
 ## Required wrapper adaptation — NOT IMPLEMENTED
 
 Continue within this single detached, self-testing wrapper lineage, not a second

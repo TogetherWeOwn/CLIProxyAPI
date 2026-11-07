@@ -21,6 +21,8 @@ jobs:
           persist-credentials: false
       - name: Test offline source binding, not runtime recovery
         run: python3 -I ops/stock-recovery/test_packet.py -v
+      - name: Test synthetic response validators, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_service_evidence.py -v
       - name: Record source-only HOLD report
         run: |
           mkdir -p qualification-evidence
