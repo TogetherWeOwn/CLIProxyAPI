@@ -5,13 +5,16 @@ Death checks apply only to the observed process set. They cannot prove that no
 process escaped before capture, exclude a later launch, or establish complete
 runtime/shim/writer ownership. No signal, numeric-PID fallback or replay exists.
 """
+from contextlib import contextmanager
 import os
 import re
 import select
 import stat
 
 from .broker_runtime import RuntimeDomain
+from .commands import Deadline
 from .durable import Rejected
+from .process_mounts import fdinfo_number, open_process_mount_view
 
 MAX_GROUPS = 128
 MAX_PROCESSES = 256
@@ -100,6 +103,7 @@ class RuntimeProcessWitness:
         self.domain = self._original_domain = domain
         self._configuration = domain.configuration()
         self._fds = []
+        self._snapshot = None
         self.closed = False
 
     def _current(self, check):
@@ -151,10 +155,85 @@ class RuntimeProcessWitness:
             if any(witness._exited(fd, identity) for fd, identity in witness._fds):
                 raise Rejected("runtime-processes-trailing-capture-exited")
             witness._current(check)
+            witness._snapshot = (tuple(sorted(first[0].items())), tuple(sorted(first[1].items())))
             return witness
         except BaseException:
             witness.close()
             raise
+
+    @contextmanager
+    def docker_task_mount_view(self, *, object_id, pid, check, clock):
+        """Map an approved full Docker ID/PID to an already-captured live pidfd.
+
+        Only the pinned systemd cgroup layout is supported. The caller must retain
+        authenticated daemon/registry/installation authority in check; a matching
+        cgroup name cannot provision it. No new pidfd acquisition, launch, signal
+        or namespace change occurs. Rescans are point observations, not a fence.
+        """
+        if (type(object_id) is not str or re.fullmatch(r"[0-9a-f]{64}", object_id) is None
+                or type(pid) is not int or not 1 < pid <= 2147483647
+                or not callable(check) or not callable(clock) or self._snapshot is None):
+            raise Rejected("runtime-processes-approved-task-required")
+        snapshot, fds = self._snapshot, tuple(self._fds)
+        group = self._original_domain.cgroup + "/docker-" + object_id + ".scope"
+        matches = [(index, path) for index, (member, path) in enumerate(snapshot[1]) if member == pid]
+        if len(matches) != 1 or matches[0][1] != group or len(fds) != len(snapshot[1]):
+            raise Rejected("runtime-processes-task-not-captured")
+        fd, identity = fds[matches[0][0]]
+        busy = failed = False
+
+        def current(*, deadline):
+            nonlocal busy, failed
+            try:
+                if busy or failed:
+                    raise Rejected("runtime-processes-task-view-revoked")
+                busy = True
+                remaining = Deadline(clock, deadline).remaining
+
+                def authority():
+                    remaining()
+                    if check(deadline=deadline) is not True:
+                        raise Rejected("runtime-processes-task-authority-unconfirmed")
+                    remaining()
+
+                self._current(authority)
+                groups, members = _scan(self.domain, authority)
+                if (tuple(sorted(groups.items())), tuple(sorted(members.items()))) != snapshot:
+                    raise Rejected("runtime-processes-task-inventory-changed")
+                self._current(authority)
+                remaining()
+                if (failed or self._snapshot != snapshot or tuple(self._fds) != fds
+                        or self._exited(fd, identity) or fdinfo_number(fd, b"Pid") != pid):
+                    raise Rejected("runtime-processes-task-identity-changed")
+                target = os.open("docker-" + object_id + ".scope",
+                                 os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                 dir_fd=self.domain.fd)
+                try:
+                    info = os.fstat(target)
+                    if (info.st_dev, info.st_ino) != dict(snapshot[0])[group] or pid not in _procs(target, info.st_dev):
+                        raise Rejected("runtime-processes-task-group-changed")
+                    with open("/proc/%d/cgroup" % pid, "rb") as stream:
+                        membership = stream.read(MAX_BYTES + 1)
+                    if membership != ("0::" + group + "\n").encode("utf-8") or self._exited(fd, identity):
+                        raise Rejected("runtime-processes-task-membership-unconfirmed")
+                    path = os.stat("docker-" + object_id + ".scope", dir_fd=self.domain.fd, follow_symlinks=False)
+                    if (path.st_dev, path.st_ino) != (info.st_dev, info.st_ino):
+                        raise Rejected("runtime-processes-task-group-replaced")
+                    self.domain.current()
+                finally:
+                    os.close(target)
+                return True
+            except BaseException:
+                failed = True
+                raise Rejected("runtime-processes-task-view-unconfirmed") from None
+            finally:
+                busy = False
+
+        with open_process_mount_view(pid=pid, pidfd=fd, check=current, clock=clock) as view:
+            try:
+                yield view
+            finally:
+                failed = True
 
     @property
     def count(self):

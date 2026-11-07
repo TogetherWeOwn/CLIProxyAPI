@@ -414,6 +414,35 @@ def main(probe):
                     "Docker task is not a sibling of both daemon services")
         witness = RuntimeProcessWitness.capture(domain=domain, check=current)
         require(witness.count == 5, "dockerd/containerd/shim/task/child inventory required")
+        def task_authority(*, deadline):
+            return observe(object_id, image_id, True)["State"]["Pid"] == pid
+        with witness.docker_task_mount_view(object_id=object_id, pid=pid, check=task_authority,
+                                           clock=time.monotonic) as task_view:
+            task_view._current(deadline)
+            target_root = os.open("root", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=task_view.proc)
+            try:
+                with open("/proc/%d/root/probe" % pid, "rb") as expected:
+                    actual = os.open("probe", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=target_root)
+                    try:
+                        require((os.fstat(actual).st_dev, os.fstat(actual).st_ino)
+                                == (os.fstat(expected.fileno()).st_dev, os.fstat(expected.fileno()).st_ino),
+                                "witnessed task root does not resolve the actual probe")
+                    finally:
+                        os.close(actual)
+                require(task_executable(root, object_id, pid) == raw_probe, "witnessed task VFS identity changed")
+            finally:
+                os.close(target_root)
+            task_view._current(deadline)
+        for wrong_id, wrong_pid in (("0" * 64 if object_id != "0" * 64 else "1" * 64, pid),
+                                    (object_id, int(show(units[1]["dockerd"], "MainPID")))):
+            try:
+                with witness.docker_task_mount_view(object_id=wrong_id, pid=wrong_pid, check=task_authority,
+                                                   clock=time.monotonic):
+                    raise AssertionError("wrong object or daemon PID accepted as task")
+            except Rejected:
+                pass
+        emit(captured_task_pidfd_mapping_verified=True, wrong_object_and_daemon_pid_rejected=True,
+             complete_baseline_verified=False, start_allowed=False)
         # Independently pin all original runtime process executables/membership.
         # The source witness retains pidfds; these numeric reads cannot survive a
         # death unnoticed because require_dead must subsequently cover that set.

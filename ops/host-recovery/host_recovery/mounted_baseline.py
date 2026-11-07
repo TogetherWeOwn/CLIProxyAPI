@@ -14,6 +14,7 @@ from .durable import Rejected, canonical, digest
 from .journal import validate_intent
 from .loading import pin
 from .process_mounts import mount_identity, open_process_mount_view, root_identity
+from .runtime_processes import RuntimeProcessWitness
 from .write_set import WriteSetVerifier
 
 
@@ -29,17 +30,24 @@ class MountedBaselineApproval:
 
 
 @contextmanager
-def open_mounted_baseline(*, pid, pidfd, approval, mounts, verifier, check, clock):
+def open_mounted_baseline(*, pid, approval, mounts, verifier, check, clock, pidfd=None, witness=None):
     """Borrow authenticated authority, duplicate the pidfd and retain kernel views.
 
     approval and the entire mount mapping are provisioned independently, not
     inferred from a worker report or the current process. Unsupported procfs/nsfs
-    access fails closed without a numeric-PID or caller-namespace fallback.
+    access fails closed without a numeric-PID or caller-namespace fallback. Supply
+    exactly one authenticated pidfd or retained runtime witness. The latter binds
+    the approved full Docker ID/PID to its captured systemd scope and live pidfd;
+    the supplied check must still retain daemon/registry/installation authority.
     """
-    if not isinstance(approval, MountedBaselineApproval) or not isinstance(verifier, WriteSetVerifier):
+    if (not isinstance(approval, MountedBaselineApproval) or not isinstance(verifier, WriteSetVerifier)
+            or (pidfd is None) == (witness is None)
+            or witness is not None and not isinstance(witness, RuntimeProcessWitness)):
         raise Rejected("mounted-baseline-explicit-boundaries-required")
     with ExitStack() as stack:
-        process = stack.enter_context(open_process_mount_view(pid=pid, pidfd=pidfd, check=check, clock=clock))
+        boundary = (open_process_mount_view(pid=pid, pidfd=pidfd, check=check, clock=clock) if witness is None
+                    else witness.docker_task_mount_view(object_id=approval.object_id, pid=pid, check=check, clock=clock))
+        process = stack.enter_context(boundary)
         view = MountedBaseline(process, approval, mounts, verifier, stack)
         try:
             yield view

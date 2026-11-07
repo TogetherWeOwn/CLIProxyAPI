@@ -114,6 +114,18 @@ as a substitute for the accepted production binaries.
   connection linkage and requires rejection of its different mount namespace,
   not an invented same-view success. Full container-mounted-byte/plugin/readiness
   verification and the operational recovery runner remain separate prerequisites.
+- `host_recovery/runtime_processes.py:docker_task_mount_view`: map an independently
+  approved full Docker ID and inspected PID to an already captured live pidfd and
+  exact `docker-<full-id>.scope` in the retained dedicated domain. Full inventory,
+  group inode, live membership and caller authority are rechecked; no numeric PID
+  reacquisition or alternate layout fallback. `open_mounted_baseline` can use this
+  witness instead of a separately authenticated pidfd, retaining the same complete
+  file checks through the target procfs root. The disposable Docker fixture checks
+  actual task/VFS linkage and rejects wrong objects and the daemon PID. Synthetic
+  file tests exercise complete baseline composition; the real fixture does not
+  claim full baseline, plugin/readiness, continuous fencing or operational start
+  authority. The caller still owns authenticated daemon/registry/installation
+  provisioning, mount/writer exclusion and all independent recovery gates.
 - `host_recovery/durable.py`: no-follow fd-relative filesystem access, one
   installation-directory lock, bounded regular-file reads, restricted atomic
   writes with file fsync → rename → directory fsync → readback acknowledgment.
