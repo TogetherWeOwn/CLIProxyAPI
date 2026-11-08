@@ -451,7 +451,7 @@ func TestSanitizeOpenAIResponsesReasoningEncryptedContent_TaggedMuseStrippedOnNo
 
 	t.Run("generic keepForeign", func(t *testing.T) {
 		got := sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign(context.Background(), "test", body)
-		if gjson.GetBytes(got, "input.0.encrypted_content").Exists() {
+		if ojson.GetBytes(got, "input.0.encrypted_content").Exists() {
 			t.Fatalf("tagged Muse encrypted_content should be stripped by generic keepForeign; body=%s", got)
 		}
 	})
@@ -467,7 +467,7 @@ func TestSanitizeOpenAIResponsesReasoningEncryptedContent_TaggedMuseStrippedOnNo
 	} {
 		t.Run(tc.model, func(t *testing.T) {
 			got := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModel(context.Background(), "test", body, tc.isCompat, tc.model)
-			if gjson.GetBytes(got, "input.0.encrypted_content").Exists() {
+			if ojson.GetBytes(got, "input.0.encrypted_content").Exists() {
 				t.Fatalf("model=%s isCompat=%v: tagged Muse encrypted_content should be stripped; body=%s", tc.model, tc.isCompat, got)
 			}
 		})
