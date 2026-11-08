@@ -19,7 +19,9 @@
     "recovery_manifest_digest": "sha256:8472aae0903a964412b8e73dd11d95d7a9932d8645789f77e8e162daa401474a"
   },
   "files": {
-    "README.md": "sha256:784072efc278202d1ffccdc58d16db1bed85d64840a04e9038ce69686eecac75",
+    "README.md": "sha256:32387841fd61b5f2e33b4ec91781985ef4c85bb21360dfd0e541f260deb45a58",
+    "runtime_artifact.py": "sha256:f125a046dc8be1a8193548cf10d19b99e56ee3fde1ec3e78425a9631859e9793",
+    "test_runtime_artifact.py": "sha256:dbac71a0e65108c9f8d457e94dc95a2d8da7fdf45bcae8dca05d2384cded64cc",
     "attempt.py": "sha256:12eac031dd28ad7a6e295e8791b5486c500133e5380a374981a4d8e6ad609a17",
     "test_attempt.py": "sha256:5bfc38d9e522055e69ee653088a486a79d4aee38d37d323d98b4566678884ffb",
     "packet.py": "sha256:b7016d1ec38b8f887b0e244f813d7c87945245e1f0183b51d502bddc205217f1",

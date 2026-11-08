@@ -143,6 +143,48 @@ watchdog, runtime, journal, grant, process-kill barrier or recovery path. **The
 primitives are not integrated into a runnable replacement wrapper yet.** Every
 acceptance gate in `manifest.json` remains unresolved.
 
+## Frozen runtime preparation — not functional qualification
+
+`runtime_artifact.py` prepares the actual frozen linux/amd64 OCI runtime for
+Actions-only tests, rather than building a replacement from this older repository
+baseline. It verifies the source packet, config descriptor, every compressed layer
+size/digest and every uncompressed rootfs diff ID. It interprets only the final
+`CLIProxyAPI/CLIProxyAPI` regular-file member. It never extracts an archive tree or
+executes downloaded scripts. Target/ancestor links, relevant whiteouts, unsafe
+archive paths, missing runtime and bounded-size violations fail closed. All layers
+must validate before an executable is published. Each invocation requires a new
+nonexistent download directory; existing inputs are never overwritten.
+
+The public pull token is acquired without workspace or production credentials and
+is stripped from CDN redirects. No package dependencies, Docker daemon or installed
+runtime are used. Actions retains the manifest/config/binary identities and exact
+head/run/job evidence. This establishes registry-artifact lineage, **not** a
+binary-to-source attestation. The binary has not become an accepted recovery target.
+
+The `runtime-bootstrap` job attempts only `--help`, with an empty environment,
+unprivileged UID/GID, new empty chroot and network/PID namespaces on a disposable
+hosted runner. No host credentials/state/config or provider is mounted, and no
+network interface is brought up. A missing namespace capability or required runtime
+library is a failing prerequisite, not a reason to run on the shared host or default
+daemon. Explicit cleanup removes the allocated download/test roots on success or
+failure; hosted-job teardown owns cancellation cleanup. There is no persistent
+preview or recurring idle runtime. Help output is **not service, journal, watchdog,
+quiescence, restart, or recovery proof**. All source packet gates remain unresolved.
+
+### Completed one-shot interrupt diagnostic
+
+At source head `6194ec233e22b68dcdd774cbf3aa5ca78ef38802`, the standard
+[Go vet/test/build job passed](https://github.com/TogetherWeOwn/CLIProxyAPI/actions/runs/42428321214/job/128571365597).
+The previously observed interrupt failure was reproduced separately 20 times on
+both pinned sources: `TestResponsesInterruptStopsHTTPUpstream` reported "http
+upstream was not canceled" in
+[11/20 approved-base executions](https://github.com/TogetherWeOwn/CLIProxyAPI/actions/runs/42428321293/job/128571364978)
+and [7/20 head executions](https://github.com/TogetherWeOwn/CLIProxyAPI/actions/runs/42428321293/job/128571365010).
+This establishes pre-existing intermittent failure, not its root cause or a fix.
+Those one-shot diagnostic jobs are concluded and no longer run on every source
+change. The normal full Go CI remains unchanged and required on every new head;
+no SDK/core fix, test skip, continue-on-error or acceptance waiver is included.
+
 ## Required wrapper adaptation — orchestration NOT IMPLEMENTED
 
 Continue within this single detached, self-testing wrapper lineage, not a second
