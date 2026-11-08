@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -18,14 +19,13 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	"github.com/tiktoken-go/tokenizer"
 )
 
 type metaPreparedRequest struct {
 	applyPatch      *helps.ApplyPatchResponsesState
 	baseModel       string
+	effectiveModel  string
 	from            sdktranslator.Format
 	responseFormat  sdktranslator.Format
 	to              sdktranslator.Format
@@ -35,7 +35,7 @@ type metaPreparedRequest struct {
 	// the one-shot retry can strip reasoning first and re-apply the rules last.
 	bodyBeforePayload []byte
 	// applyPayload applies user payload rules exactly once to one attempt's body.
-	applyPayload func([]byte) []byte
+	applyPayload func(*ojson.Doc)
 	// replay carries the account-bound Muse reasoning policy for this request.
 	replay helps.MetaReasoningReplay
 	// replayRetried records that the one-shot retry without reasoning envelopes ran.
@@ -53,11 +53,16 @@ func (p *metaPreparedRequest) retryWithoutReplay(ctx context.Context, statusCode
 	// Re-derive the retry body from the pre-payload-rules payload: stripping the
 	// envelopes is built-in cleanup, so user payload rules must be applied after
 	// it, exactly once, as the final step before this attempt is sent.
-	retryBody := sanitizeMetaReasoningRequest(ctx, p.replay.WithoutReplay(), bytes.Clone(p.bodyBeforePayload))
+	retryDoc := ojson.NewDoc(bytes.Clone(p.bodyBeforePayload))
+	sanitizeMetaReasoningRequestDoc(ctx, p.replay.WithoutReplay(), retryDoc)
 	if p.applyPayload != nil {
-		retryBody = p.applyPayload(retryBody)
+		p.applyPayload(retryDoc)
 	}
-	p.body = retryBody
+	p.body = retryDoc.Bytes()
+	p.effectiveModel = strings.TrimSpace(retryDoc.Get("model").String())
+	if p.effectiveModel == "" {
+		p.effectiveModel = p.baseModel
+	}
 	helps.LogWithRequestID(ctx).Warnf("meta reasoning replay: Meta rejected %d replayed reasoning envelope(s) as not issued to this caller; retrying once without reasoning", p.replay.Stats.Kept)
 	return true
 }
@@ -88,49 +93,52 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 		return nil, err
 	}
 
-	var errThinking error
-	body, errThinking = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
-	if errThinking != nil {
+	doc := ojson.NewDoc(body)
+	if errThinking := helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier()); errThinking != nil {
 		return nil, errThinking
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.SetStringIfDifferent(body, "model", baseModel)
-	body = helps.SetBoolIfDifferent(body, "stream", stream)
-	body, _ = sjson.DeleteBytes(body, "generate")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	body, _ = sjson.DeleteBytes(body, "stream_options")
-	body, _ = sjson.DeleteBytes(body, "client_metadata")
+	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
+	helps.SetBoolIfDifferentDoc(doc, "stream", stream)
+	_ = doc.Delete("generate")
+	_ = doc.Delete("prompt_cache_retention")
+	_ = doc.Delete("safety_identifier")
+	_ = doc.Delete("stream_options")
+	_ = doc.Delete("client_metadata")
 	applyPatch := helps.NewApplyPatchResponsesState(from, originalPayload, originalTranslated)
-	var errNormalizePatch error
-	body, errNormalizePatch = helps.NormalizeApplyPatchResponsesRequest(body, originalPayload)
-	if errNormalizePatch != nil {
+	if errNormalizePatch := helps.NormalizeApplyPatchResponsesRequestDoc(doc, originalPayload); errNormalizePatch != nil {
 		return nil, errNormalizePatch
 	}
-	body = normalizeCodexInstructions(body)
+	normalizeCodexInstructionsDoc(doc)
 	replay := e.newMetaReasoningReplay(opts, req.Model, baseModel, auth)
-	body = sanitizeMetaReasoningRequest(ctx, replay, body)
-	body = helps.SanitizeMetaWebSearchTools(body)
-	body = helps.NormalizeCodexToolIntegerTypes(body, opts.Headers)
-	body = helps.EnsureMetaMuseToolNamespace(body)
+	sanitizeMetaReasoningRequestDoc(ctx, replay, doc)
+	helps.SanitizeMetaWebSearchToolsDoc(doc)
+	helps.NormalizeCodexToolIntegerTypesDoc(doc, opts.Headers)
+	helps.EnsureMetaMuseToolNamespaceDoc(doc)
 
-	applyPayload := func(payload []byte) []byte {
-		return helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, e.Identifier(), from.String(), "", payload, originalTranslated, requestedModel, requestPath, opts.Headers)
+	applyPayloadDoc := func(payload *ojson.Doc) {
+		helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, e.Identifier(), from.String(), "", payload, originalTranslated, requestedModel, requestPath, opts.Headers)
 	}
-	bodyBeforePayload := bytes.Clone(body)
-	body = applyPayload(body)
+	bodyBeforePayload := bytes.Clone(doc.Bytes())
+	applyPayloadDoc(doc)
+	effectiveModel := strings.TrimSpace(doc.Get("model").String())
+	if effectiveModel == "" {
+		effectiveModel = baseModel
+	}
+	body = doc.Bytes()
 	return &metaPreparedRequest{
 		applyPatch:        applyPatch,
 		baseModel:         baseModel,
+		effectiveModel:    effectiveModel,
 		from:              from,
 		responseFormat:    responseFormat,
 		to:                to,
 		originalPayload:   originalPayload,
 		body:              body,
 		bodyBeforePayload: bodyBeforePayload,
-		applyPayload:      applyPayload,
+		applyPayload:      applyPayloadDoc,
 		replay:            replay,
 	}, nil
 }
@@ -179,7 +187,7 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 			errPost  error
 			errEvent error
 		)
-		httpResp, data, errPost = e.postMetaResponses(ctx, enriched, token, url, prepared.body, opts, reporter)
+		httpResp, data, errPost = e.postMetaResponses(ctx, enriched, token, url, prepared.body, opts, reporter, prepared.effectiveModel)
 		if errPost != nil {
 			return resp, errPost
 		}
@@ -222,12 +230,12 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 // postMetaResponses sends one non-streaming-collected /responses request and reads
 // the whole upstream body. The returned response has its body already consumed
 // and closed; only its status and headers remain meaningful.
-func (e *MetaExecutor) postMetaResponses(ctx context.Context, auth *cliproxyauth.Auth, token, url string, body []byte, opts cliproxyexecutor.Options, reporter *helps.UsageReporter) (*http.Response, []byte, error) {
+func (e *MetaExecutor) postMetaResponses(ctx context.Context, auth *cliproxyauth.Auth, token, url string, body []byte, opts cliproxyexecutor.Options, reporter *helps.UsageReporter, model string) (*http.Response, []byte, error) {
 	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errRequest != nil {
 		return nil, nil, errRequest
 	}
-	applyMetaAPIHeaders(httpReq, auth, token, true, opts.Headers)
+	applyMetaAPIHeaders(httpReq, auth, token, true, opts.Headers, model)
 	e.recordMetaRequest(ctx, auth, url, httpReq.Header.Clone(), body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -278,14 +286,14 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 			continue
 		}
 		eventData := bytes.TrimSpace(trimmedLine[len(dataTag):])
-		eventType := gjson.GetBytes(eventData, "type").String()
+		eventType := ojson.GetBytesNoCopy(eventData, "type").String()
 		if isMetaSubscriptionUsageEvent(eventType, eventData) {
 			filteringSubscriptionUsage = false
 			continue
 		}
 		if filteringSubscriptionUsage {
 			if eventType == "" {
-				if gjson.ValidBytes(eventData) {
+				if ojson.ValidBytes(eventData) {
 					filteringSubscriptionUsage = false
 				}
 				continue
@@ -303,7 +311,7 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 			return metaCompletedTranslation{}, errBridge
 		}
 		for _, eventData := range events {
-			eventType := gjson.GetBytes(eventData, "type").String()
+			eventType := ojson.GetBytesNoCopy(eventData, "type").String()
 			switch eventType {
 			case "response.output_item.done":
 				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -464,10 +472,14 @@ func applyMetaClientIdentity(req *http.Request) {
 	req.Header.Set("X-Tbh-Thread-Id", sessionID)
 	req.Header.Set("X-Tbh-Root-Session-Id", sessionID)
 	req.Header.Set("X-Tbh-Agent-Role", "main")
-	req.Header.Set("X-Tbh-Contributor-Mode", "1")
 }
 
-func applyMetaAPIHeaders(req *http.Request, auth *cliproxyauth.Auth, token string, stream bool, clientHeaders http.Header) {
+func isMetaContributorModel(model string) bool {
+	base := strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(model)).ModelName)
+	return strings.HasSuffix(strings.ToLower(base), "-contributor")
+}
+
+func applyMetaAPIHeaders(req *http.Request, auth *cliproxyauth.Auth, token string, stream bool, clientHeaders http.Header, model ...string) {
 	req.Header.Set("Content-Type", "application/json")
 	if strings.TrimSpace(token) != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -475,6 +487,12 @@ func applyMetaAPIHeaders(req *http.Request, auth *cliproxyauth.Auth, token strin
 		req.Header.Del("Authorization")
 	}
 	applyMetaClientIdentity(req)
+	for _, m := range model {
+		if isMetaContributorModel(m) {
+			req.Header.Set("X-Tbh-Contributor-Mode", "1")
+			break
+		}
+	}
 	if stream {
 		req.Header.Set("Accept", "text/event-stream")
 		req.Header.Set("Cache-Control", "no-cache")
@@ -499,7 +517,7 @@ func isMetaSubscriptionUsageEvent(eventType string, eventData []byte) bool {
 	if eventType == metaSubscriptionUsageEventType {
 		return true
 	}
-	if eventType == "" && len(eventData) > 0 && gjson.GetBytes(eventData, "subscription").IsObject() {
+	if eventType == "" && len(eventData) > 0 && ojson.GetBytesNoCopy(eventData, "subscription").IsObject() {
 		return true
 	}
 	return false
@@ -527,12 +545,12 @@ func wrapMetaUpstreamError(statusCode int, body []byte) error {
 }
 
 func metaStreamEventError(eventData []byte) error {
-	eventType := gjson.GetBytes(eventData, "type").String()
+	eventType := ojson.GetBytesNoCopy(eventData, "type").String()
 	if eventType != "error" && eventType != "response.failed" {
 		return nil
 	}
 	statusCode := http.StatusBadGateway
-	if code := int(gjson.GetBytes(eventData, "error.code").Int()); code >= 400 && code <= 599 {
+	if code := int(ojson.GetBytesNoCopy(eventData, "error.code").Int()); code >= 400 && code <= 599 {
 		statusCode = code
 	}
 	return wrapMetaUpstreamError(statusCode, eventData)
@@ -540,16 +558,16 @@ func metaStreamEventError(eventData []byte) error {
 
 func metaAsCompletedEvent(data []byte) ([]byte, bool) {
 	trimmed := bytes.TrimSpace(data)
-	if !gjson.ValidBytes(trimmed) {
+	if !ojson.ValidBytes(trimmed) {
 		return nil, false
 	}
-	root := gjson.ParseBytes(trimmed)
+	root := util.ParseGJSONBytesNoCopy(trimmed)
 	switch root.Get("type").String() {
 	case "response.completed", "response.incomplete":
 		return trimmed, true
 	}
 	if root.Get("object").String() == "response" || root.Get("output").Exists() {
-		wrapped, errSet := sjson.SetRawBytes([]byte(`{"type":"response.completed"}`), "response", trimmed)
+		wrapped, errSet := ojson.SetRawBytes([]byte(`{"type":"response.completed"}`), "response", trimmed)
 		if errSet != nil {
 			return nil, false
 		}

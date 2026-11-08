@@ -7,10 +7,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // MetaReasoningNotIssuedMessage is the stable fragment of the 400 Meta returns for
@@ -106,16 +105,28 @@ func (p MetaReasoningReplay) Decide(raw string) MetaReasoningReplayDecision {
 // sanitizer afterwards, which strips anything that is not a recognized Meta
 // envelope (fail-closed).
 func (p MetaReasoningReplay) ApplyAccountPolicy(ctx context.Context, body []byte) []byte {
-	input := gjson.GetBytes(body, "input")
-	if !input.IsArray() {
+	doc := ojson.NewDoc(body)
+	if !p.ApplyAccountPolicyDoc(ctx, doc) {
 		return body
+	}
+	return doc.Bytes()
+}
+
+// ApplyAccountPolicyDoc applies the account policy to the shared request document.
+func (p MetaReasoningReplay) ApplyAccountPolicyDoc(ctx context.Context, doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	input := doc.Get("input")
+	if !input.IsArray() {
+		return false
 	}
 	items := input.Array()
 	rebuilt := make([]string, 0, len(items))
 	changed := false
 	for index, item := range items {
 		encrypted := item.Get("encrypted_content")
-		if item.Get("type").String() != "reasoning" || encrypted.Type != gjson.String {
+		if item.Get("type").String() != "reasoning" || encrypted.Type != ojson.String {
 			rebuilt = append(rebuilt, item.Raw)
 			continue
 		}
@@ -125,9 +136,10 @@ func (p MetaReasoningReplay) ApplyAccountPolicy(ctx context.Context, body []byte
 				rebuilt = append(rebuilt, item.Raw)
 				continue
 			}
-			next, errSet := sjson.Set(item.Raw, "encrypted_content", decision.Replay)
+			itemDoc := ojson.NewDocString(item.Raw)
+			errSet := itemDoc.Set("encrypted_content", decision.Replay)
 			if errSet == nil {
-				rebuilt = append(rebuilt, next)
+				rebuilt = append(rebuilt, itemDoc.String())
 				changed = true
 				continue
 			}
@@ -140,32 +152,31 @@ func (p MetaReasoningReplay) ApplyAccountPolicy(ctx context.Context, body []byte
 		if metaReasoningReplayItemIsEmpty(item) {
 			continue
 		}
-		next, errDelete := sjson.Delete(item.Raw, "encrypted_content")
-		if errDelete != nil {
+		itemDoc := ojson.NewDocString(item.Raw)
+		if errDelete := itemDoc.Delete("encrypted_content"); errDelete != nil {
 			continue
 		}
-		rebuilt = append(rebuilt, next)
+		rebuilt = append(rebuilt, itemDoc.String())
 	}
 	if !changed {
-		return body
+		return false
 	}
-	out, errSet := sjson.SetRawBytes(body, "input", []byte("["+strings.Join(rebuilt, ",")+"]"))
-	if errSet != nil {
+	if errSet := doc.SetRaw("input", []byte("["+strings.Join(rebuilt, ",")+"]")); errSet != nil {
 		LogWithRequestID(ctx).Debugf("meta executor: failed to rebuild input after reasoning replay policy: %v", errSet)
-		return body
+		return false
 	}
-	return out
+	return true
 }
 
 // metaReasoningReplayItemIsEmpty reports whether a reasoning item carries no summary
 // and no content, so that nothing is left of it once encrypted_content is gone.
-func metaReasoningReplayItemIsEmpty(item gjson.Result) bool {
+func metaReasoningReplayItemIsEmpty(item ojson.Result) bool {
 	summary := item.Get("summary")
-	if summary.Exists() && summary.Type != gjson.Null && !(summary.IsArray() && len(summary.Array()) == 0) {
+	if summary.Exists() && summary.Type != ojson.Null && !(summary.IsArray() && len(summary.Array()) == 0) {
 		return false
 	}
 	content := item.Get("content")
-	return !content.Exists() || content.Type == gjson.Null || (content.IsArray() && len(content.Array()) == 0)
+	return !content.Exists() || content.Type == ojson.Null || (content.IsArray() && len(content.Array()) == 0)
 }
 
 // WithoutReplay is the policy for the single retry: it is enabled but names no
@@ -185,48 +196,44 @@ func (p MetaReasoningReplay) TagResponseEvent(eventData []byte) []byte {
 	if !p.ShouldTag() || len(eventData) == 0 {
 		return eventData
 	}
-	switch gjson.GetBytes(eventData, "type").String() {
+	doc := ojson.NewDoc(eventData)
+	switch doc.Get("type").String() {
 	case "response.output_item.added", "response.output_item.done":
-		return p.tagReasoningItem(eventData, "item")
+		p.tagReasoningItemDoc(doc, "item")
 	case "response.completed", "response.incomplete", "response.failed":
-		return p.tagOutputItems(eventData, "response.output")
+		p.tagOutputItemsDoc(doc, "response.output")
 	case "":
-		return p.tagOutputItems(eventData, "output")
+		p.tagOutputItemsDoc(doc, "output")
 	}
-	return eventData
+	return doc.Bytes()
 }
 
-func (p MetaReasoningReplay) tagOutputItems(data []byte, outputPath string) []byte {
-	output := gjson.GetBytes(data, outputPath)
+func (p MetaReasoningReplay) tagOutputItemsDoc(doc *ojson.Doc, outputPath string) {
+	output := doc.Get(outputPath)
 	if !output.IsArray() {
-		return data
+		return
 	}
 	for index := range output.Array() {
-		data = p.tagReasoningItem(data, outputPath+"."+strconv.Itoa(index))
+		p.tagReasoningItemDoc(doc, outputPath+"."+strconv.Itoa(index))
 	}
-	return data
 }
 
-func (p MetaReasoningReplay) tagReasoningItem(data []byte, itemPath string) []byte {
-	item := gjson.GetBytes(data, itemPath)
+func (p MetaReasoningReplay) tagReasoningItemDoc(doc *ojson.Doc, itemPath string) {
+	item := doc.Get(itemPath)
 	if item.Get("type").String() != "reasoning" {
-		return data
+		return
 	}
 	encrypted := item.Get("encrypted_content")
-	if encrypted.Type != gjson.String || encrypted.String() == "" {
-		return data
+	if encrypted.Type != ojson.String || encrypted.String() == "" {
+		return
 	}
 	tagged := signature.TagMetaReasoning(p.AccountKey, encrypted.String())
 	if tagged == encrypted.String() {
-		return data
+		return
 	}
-	out, errSet := sjson.SetBytes(data, itemPath+".encrypted_content", tagged)
-	if errSet != nil {
-		// An untagged envelope is dropped on replay, so failing to tag only costs the
-		// replay; it must never fail the response.
-		return data
-	}
-	return out
+	// An untagged envelope is dropped on replay, so failing to tag only costs the
+	// replay; it must never fail the response.
+	_ = doc.Set(itemPath+".encrypted_content", tagged)
 }
 
 // RecordRequest logs what happened to the reasoning envelopes of one request, so the

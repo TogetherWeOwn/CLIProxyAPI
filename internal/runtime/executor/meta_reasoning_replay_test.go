@@ -3,7 +3,6 @@ package executor
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +12,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -21,8 +22,6 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const museReplayModel = "muse-spark-1.3"
@@ -52,6 +51,7 @@ type museReplayCall struct {
 	items     int      // reasoning items in the request input, with or without envelope
 	issued    string   // envelope issued in the response, if any
 	body      []byte
+	headers   http.Header
 }
 
 func newMuseReplayUpstream(t *testing.T, accounts ...string) *museReplayUpstream {
@@ -73,8 +73,8 @@ func (u *museReplayUpstream) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, _ := io.ReadAll(r.Body)
-	call := museReplayCall{account: account, body: body}
-	for _, item := range gjson.GetBytes(body, "input").Array() {
+	call := museReplayCall{account: account, body: body, headers: r.Header.Clone()}
+	for _, item := range ojson.GetBytes(body, "input").Array() {
 		if item.Get("type").String() != "reasoning" {
 			continue
 		}
@@ -220,7 +220,7 @@ func (c *museReplayConversation) payload() []byte {
 // received.
 func (c *museReplayConversation) absorb(response []byte) string {
 	c.t.Helper()
-	content := gjson.GetBytes(response, "content")
+	content := ojson.GetBytes(response, "content")
 	if !content.IsArray() {
 		c.t.Fatalf("response has no content array: %s", response)
 	}
@@ -274,7 +274,9 @@ func museReplayStream(t *testing.T, exec *MetaExecutor, auth *cliproxyauth.Auth,
 // museReplayThinking returns an assistant turn that carries a thinking block with
 // the given signature, followed by a tool_use and its result.
 func museReplayThinkingTurns(signature string) []json.RawMessage {
-	assistant, _ := sjson.SetBytes([]byte(`{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":""},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]}`), "content.0.signature", signature)
+	doc := ojson.NewDocString(`{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":""},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]}`)
+	_ = doc.Set("content.0.signature", signature)
+	assistant := doc.Bytes()
 	return []json.RawMessage{
 		json.RawMessage(`{"role":"user","content":"list the files"}`),
 		assistant,
@@ -307,7 +309,7 @@ func TestMetaReasoningReplay_TagsReasoningReturnedToClaudeClients(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		sig := gjson.GetBytes(response, `content.#(type=="thinking").signature`).String()
+		sig := ojson.GetBytes(response, `content.#(type=="thinking").signature`).String()
 		accountKey, envelope, ok := signature.ParseMetaReasoningTag(sig)
 		if !ok || accountKey != key || !museEnvIssuedBy(envelope, "a") {
 			t.Fatalf("thinking signature %q is not tagged for account key %q", sig, key)
@@ -321,8 +323,8 @@ func TestMetaReasoningReplay_TagsReasoningReturnedToClaudeClients(t *testing.T) 
 		}
 		var sigs []string
 		for _, line := range strings.Split(out, "\n") {
-			if data, ok := strings.CutPrefix(line, "data: "); ok && gjson.Get(data, "delta.type").String() == "signature_delta" {
-				sigs = append(sigs, gjson.Get(data, "delta.signature").String())
+			if data, ok := strings.CutPrefix(line, "data: "); ok && ojson.Get(data, "delta.type").String() == "signature_delta" {
+				sigs = append(sigs, ojson.Get(data, "delta.signature").String())
 			}
 		}
 		if len(sigs) != 1 {
@@ -354,7 +356,7 @@ func TestMetaReasoningReplay_TagsReasoningReturnedToResponsesClients(t *testing.
 		if err != nil {
 			t.Fatal(err)
 		}
-		assertTagged(t, "completed output", gjson.GetBytes(resp.Payload, `output.#(type=="reasoning").encrypted_content`).String())
+		assertTagged(t, "completed output", ojson.GetBytes(resp.Payload, `output.#(type=="reasoning").encrypted_content`).String())
 	})
 
 	t.Run("stream", func(t *testing.T) {
@@ -374,14 +376,14 @@ func TestMetaReasoningReplay_TagsReasoningReturnedToResponsesClients(t *testing.
 				if !ok {
 					continue
 				}
-				switch gjson.Get(data, "type").String() {
+				switch ojson.Get(data, "type").String() {
 				case "response.output_item.done":
-					if gjson.Get(data, "item.type").String() == "reasoning" {
-						assertTagged(t, "output_item.done", gjson.Get(data, "item.encrypted_content").String())
+					if ojson.Get(data, "item.type").String() == "reasoning" {
+						assertTagged(t, "output_item.done", ojson.Get(data, "item.encrypted_content").String())
 						doneItems++
 					}
 				case "response.completed":
-					assertTagged(t, "response.completed", gjson.Get(data, `response.output.#(type=="reasoning").encrypted_content`).String())
+					assertTagged(t, "response.completed", ojson.Get(data, `response.output.#(type=="reasoning").encrypted_content`).String())
 					completedItems++
 				}
 			}
@@ -403,7 +405,7 @@ func TestMetaReasoningReplay_DisabledLeavesResponsesUntaggedAndDropsReplay(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	sig := gjson.GetBytes(response, `content.#(type=="thinking").signature`).String()
+	sig := ojson.GetBytes(response, `content.#(type=="thinking").signature`).String()
 	if signature.IsMetaReasoningTagged(sig) || !museEnvIssuedBy(sig, "a") {
 		t.Fatalf("disabled feature changed the signature returned to the client: %q", sig)
 	}
@@ -496,7 +498,7 @@ func TestMetaReasoningReplay_ResponsesClientHistory(t *testing.T) {
 	// its summary, which is not account-bound, and only loses the envelope and, as
 	// for any reasoning item without a usable envelope, its store id.
 	var items []string
-	for _, item := range gjson.GetBytes(got.body, "input").Array() {
+	for _, item := range ojson.GetBytes(got.body, "input").Array() {
 		if item.Get("type").String() == "reasoning" {
 			items = append(items, fmt.Sprintf("id=%q envelope=%v summary=%q", item.Get("id").String(), item.Get("encrypted_content").Exists(), item.Get("summary.0.text").String()))
 		}
@@ -547,32 +549,56 @@ func TestMetaReasoningReplay_RetriesOnceWithoutReasoningWhenMetaRejects(t *testi
 // payload rules are applied exactly once to each attempt's final body, so the
 // retry neither drops a configured value nor restores a filtered field.
 func TestMetaReasoningReplay_PayloadRulesStayFinalOnRetry(t *testing.T) {
-	upstream := newMuseReplayUpstream(t, "a")
-	upstream.alwaysDeny = true
-	auth := upstream.auth("a")
-	signed := signature.TagMetaReasoning(helps.MetaReasoningAccountKey(auth), museEnv("a", 7))
-	cfg := museReplayConfig(true)
-	cfg.Payload = config.PayloadConfig{
-		Override: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: museReplayModel}}, Params: map[string]any{"max_output_tokens": 321}}},
-		Filter:   []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: museReplayModel}}, Params: []string{"instructions"}}},
-	}
-	if _, err := museReplayExecute(t, NewMetaExecutor(cfg), auth, museReplayHistoryPayload(t, signed)); err != nil {
-		t.Fatalf("the rejected-envelope 400 reached the caller: %v", err)
-	}
-	calls := upstream.recorded()
-	if len(calls) != 2 {
-		t.Fatalf("upstream saw %d requests, want 2 (rejected, then retried)", len(calls))
-	}
-	for attempt, call := range calls {
-		if got := gjson.GetBytes(call.body, "max_output_tokens").Int(); got != 321 {
-			t.Fatalf("attempt %d: max_output_tokens = %d, want the payload override 321: %s", attempt, got, call.body)
+	for _, mode := range []string{"non-stream", "stream"} {
+		for _, model := range []string{museReplayModel, museReplayModel + "-contributor"} {
+			t.Run(mode+"/"+model, func(t *testing.T) {
+				upstream := newMuseReplayUpstream(t, "a")
+				upstream.alwaysDeny = true
+				auth := upstream.auth("a")
+				signed := signature.TagMetaReasoning(helps.MetaReasoningAccountKey(auth), museEnv("a", 7))
+				cfg := museReplayConfig(true)
+				cfg.Payload = config.PayloadConfig{
+					Override: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: museReplayModel}}, Params: map[string]any{"max_output_tokens": 321, "model": model}}},
+					Filter:   []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: museReplayModel}}, Params: []string{"instructions"}}},
+				}
+				exec := NewMetaExecutor(cfg)
+				payload := museReplayHistoryPayload(t, signed)
+				var err error
+				if mode == "stream" {
+					_, err = museReplayStream(t, exec, auth, payload, "claude")
+				} else {
+					_, err = museReplayExecute(t, exec, auth, payload)
+				}
+				if err != nil {
+					t.Fatalf("the rejected-envelope 400 reached the caller: %v", err)
+				}
+				calls := upstream.recorded()
+				if len(calls) != 2 {
+					t.Fatalf("upstream saw %d requests, want 2 (rejected, then retried)", len(calls))
+				}
+				wantContributor := ""
+				if strings.HasSuffix(model, "-contributor") {
+					wantContributor = "1"
+				}
+				for attempt, call := range calls {
+					if got := ojson.GetBytes(call.body, "max_output_tokens").Int(); got != 321 {
+						t.Fatalf("attempt %d: max_output_tokens = %d, want the payload override 321: %s", attempt, got, call.body)
+					}
+					if ojson.GetBytes(call.body, "instructions").Exists() {
+						t.Fatalf("attempt %d: filtered instructions field was restored: %s", attempt, call.body)
+					}
+					if got := ojson.GetBytes(call.body, "model").String(); got != model {
+						t.Fatalf("attempt %d: model = %q, want %q", attempt, got, model)
+					}
+					if got := call.headers.Get("X-Tbh-Contributor-Mode"); got != wantContributor {
+						t.Fatalf("attempt %d: contributor header = %q, want %q", attempt, got, wantContributor)
+					}
+				}
+				if len(calls[0].envelopes) != 1 || calls[1].items != 0 {
+					t.Fatalf("want one initial envelope and no retry reasoning items, got %d and %d", len(calls[0].envelopes), calls[1].items)
+				}
+			})
 		}
-		if gjson.GetBytes(call.body, "instructions").Exists() {
-			t.Fatalf("attempt %d: filtered instructions field was restored: %s", attempt, call.body)
-		}
-	}
-	if calls[1].items != 0 {
-		t.Fatalf("retry carried %d reasoning items, want none", calls[1].items)
 	}
 }
 
@@ -691,7 +717,7 @@ func TestMetaReasoningReplay_TagsPlainJSONResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key, envelope, ok := signature.ParseMetaReasoningTag(gjson.GetBytes(response, `content.#(type=="thinking").signature`).String())
+	key, envelope, ok := signature.ParseMetaReasoningTag(ojson.GetBytes(response, `content.#(type=="thinking").signature`).String())
 	if !ok || key != helps.MetaReasoningAccountKey(auth) || envelope != museEnv("a", 1) {
 		t.Fatalf("plain JSON response was not tagged: %s", response)
 	}
@@ -813,7 +839,7 @@ func TestMetaReasoningReplay_ModelScope(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			sig := gjson.GetBytes(response, `content.#(type=="thinking").signature`).String()
+			sig := ojson.GetBytes(response, `content.#(type=="thinking").signature`).String()
 			if got := signature.IsMetaReasoningTagged(sig); got != tc.wantTagged {
 				t.Fatalf("tagged = %v, want %v (signature %q)", got, tc.wantTagged, sig)
 			}
@@ -828,7 +854,7 @@ func TestMetaReasoningReplay_ModelScope(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if sig := gjson.GetBytes(resp.Payload, `content.#(type=="thinking").signature`).String(); !signature.IsMetaReasoningTagged(sig) {
+			if sig := ojson.GetBytes(resp.Payload, `content.#(type=="thinking").signature`).String(); !signature.IsMetaReasoningTagged(sig) {
 				t.Fatalf("alias %q on the canary list was not tagged: %q", requested, sig)
 			}
 		})
@@ -854,12 +880,14 @@ func TestMetaReasoningReplay_CanaryAliasThroughManager(t *testing.T) {
 
 	signatureFor := func(model string) string {
 		t.Helper()
-		payload, _ := sjson.SetBytes(newMuseReplayConversation(t).payload(), "model", model)
+		doc := ojson.NewDoc(newMuseReplayConversation(t).payload())
+		_ = doc.Set("model", model)
+		payload := doc.Bytes()
 		resp, err := manager.Execute(context.Background(), []string{"meta"}, cliproxyexecutor.Request{Model: model, Payload: payload}, museReplayClaudeOptions())
 		if err != nil {
 			t.Fatalf("model %s: %v", model, err)
 		}
-		return gjson.GetBytes(resp.Payload, `content.#(type=="thinking").signature`).String()
+		return ojson.GetBytes(resp.Payload, `content.#(type=="thinking").signature`).String()
 	}
 	if sig := signatureFor(alias); !signature.IsMetaReasoningTagged(sig) {
 		t.Fatalf("a request for the canary alias was not tagged: %q", sig)
@@ -997,11 +1025,11 @@ func TestMetaReasoningReplay_StreamingConversationAcrossAccounts(t *testing.T) {
 				if !ok {
 					continue
 				}
-				if gjson.Get(data, "delta.type").String() == "signature_delta" {
-					signatureDelta = gjson.Get(data, "delta.signature").String()
+				if ojson.Get(data, "delta.type").String() == "signature_delta" {
+					signatureDelta = ojson.Get(data, "delta.signature").String()
 				}
-				if gjson.Get(data, "content_block.type").String() == "tool_use" {
-					toolID, toolName = gjson.Get(data, "content_block.id").String(), gjson.Get(data, "content_block.name").String()
+				if ojson.Get(data, "content_block.type").String() == "tool_use" {
+					toolID, toolName = ojson.Get(data, "content_block.id").String(), ojson.Get(data, "content_block.name").String()
 				}
 			}
 		}
@@ -1038,7 +1066,7 @@ func TestMetaReasoningReplay_StreamingConversationAcrossAccounts(t *testing.T) {
 
 func museReplayReasoningEnvelopes(body []byte) []string {
 	var envelopes []string
-	for _, item := range gjson.GetBytes(body, "input").Array() {
+	for _, item := range ojson.GetBytes(body, "input").Array() {
 		if item.Get("type").String() == "reasoning" && item.Get("encrypted_content").Exists() {
 			envelopes = append(envelopes, item.Get("encrypted_content").String())
 		}
@@ -1068,7 +1096,9 @@ func TestMetaReasoningTag_ClaudeHistoryThroughCodexTranslation(t *testing.T) {
 	for _, model := range []string{"gpt-5.4", "deepseek-v4", "claude-sonnet-4-6", "grok-4.5", "gemini-3-pro"} {
 		// The client asks for this model too; otherwise an unmapped upstream name
 		// resolves back to the Muse model named in the client payload.
-		clientPayload, _ := sjson.SetBytes(payload, "model", model)
+		doc := ojson.NewDoc(payload)
+		_ = doc.Set("model", model)
+		clientPayload := doc.Bytes()
 		for _, compat := range []bool{false, true} {
 			convert := codexclaude.ConvertClaudeRequestToCodex
 			if compat {

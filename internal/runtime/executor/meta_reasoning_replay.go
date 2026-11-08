@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -53,9 +54,14 @@ func (e *MetaExecutor) newMetaReasoningReplay(opts cliproxyexecutor.Options, req
 }
 
 // sanitizeMetaReasoningRequest applies the account policy to a Responses request body and
-// then the native-only Meta sanitizer, which still strips anything that is not
-// a recognized Meta envelope (fail-closed).
+// then the BaseURL-aware Meta sanitizer, which still strips unusable envelopes.
 func sanitizeMetaReasoningRequest(ctx context.Context, replay helps.MetaReasoningReplay, body []byte) []byte {
-	body = replay.ApplyAccountPolicy(ctx, body)
-	return sanitizeOpenAIResponsesReasoningEncryptedContentForMetaBaseURL(ctx, "meta executor", body, replay.BaseURL)
+	doc := ojson.NewDoc(body)
+	sanitizeMetaReasoningRequestDoc(ctx, replay, doc)
+	return doc.Bytes()
+}
+
+func sanitizeMetaReasoningRequestDoc(ctx context.Context, replay helps.MetaReasoningReplay, doc *ojson.Doc) {
+	replay.ApplyAccountPolicyDoc(ctx, doc)
+	sanitizeOpenAIResponsesReasoningEncryptedContentForMetaBaseURLDoc(ctx, "meta executor", doc, replay.BaseURL)
 }
