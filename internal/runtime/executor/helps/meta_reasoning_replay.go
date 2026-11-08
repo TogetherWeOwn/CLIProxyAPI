@@ -161,7 +161,7 @@ func (p MetaReasoningReplay) ApplyAccountPolicyDoc(ctx context.Context, doc *ojs
 	if !changed {
 		return false
 	}
-	if errSet := doc.SetRaw("input", []byte("["+strings.Join(rebuilt, ",")+"]")); errSet != nil {
+	if errSet := doc.SetRaw("input", "["+strings.Join(rebuilt, ",")+"]"); errSet != nil {
 		LogWithRequestID(ctx).Debugf("meta executor: failed to rebuild input after reasoning replay policy: %v", errSet)
 		return false
 	}
