@@ -23,6 +23,8 @@ jobs:
         run: python3 -I ops/stock-recovery/test_packet.py -v
       - name: Test synthetic response validators, not runtime recovery
         run: python3 -I ops/stock-recovery/test_service_evidence.py -v
+      - name: Test wrapper ownership and attempt records, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_attempt.py -v
       - name: Record source-only HOLD report
         run: |
           mkdir -p qualification-evidence
@@ -49,5 +51,48 @@ jobs:
         with:
           name: stock-recovery-source-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
           path: qualification-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  interrupt-diagnostic:
+    name: interrupt-diagnostic (${{ matrix.source }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - source: approved-base
+            ref: 109ac91c2691c75ea0e8e42626e134dc5f63d8c1
+          - source: pr-head
+            ref: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout pinned diagnostic source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Record tested source
+        run: |
+          mkdir -p diagnostic-evidence
+          git rev-parse HEAD > diagnostic-evidence/tested-sha.txt
+      - name: Verify head compilation independently of full-suite failure
+        if: matrix.source == 'pr-head'
+        run: go build -o test-output ./cmd/server && rm test-output
+      - name: Reproduce only the observed interrupt test
+        run: |
+          set -o pipefail
+          go test -v -count=20 -run '^TestResponsesInterruptStopsHTTPUpstream$' ./sdk/api/handlers/openai 2>&1 | tee diagnostic-evidence/interrupt-test.log
+      - name: Retain diagnostic output even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: interrupt-diagnostic-${{ matrix.source }}-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          path: diagnostic-evidence/
           if-no-files-found: error
           retention-days: 14

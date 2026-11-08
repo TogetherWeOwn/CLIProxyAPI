@@ -108,7 +108,42 @@ runtime qualification. Run `python3 -I ops/stock-recovery/test_service_evidence.
 in Actions for positive and negative parser controls. Its green check still means
 service recovery NOT_TESTED, and it does not clear any packet gate.
 
-## Required wrapper adaptation — NOT IMPLEMENTED
+## Wrapper ownership and attempt records — primitives only
+
+`attempt.py` supplies Linux-local primitives for the retained wrapper adaptation,
+not a second wrapper, scheduler or state authority. No CLI, runtime mutation,
+credential/journal read, daemon call or successful terminal receipt exists.
+
+All future forward, watchdog and manual recovery entrants must share **one stable
+private resource directory**, not one lock per attempt. The helper refuses
+concurrent owners using one persistent `flock` inode; it never deletes or truncates
+that lock. The caller must provide a pre-existing mode-0700 directory owned by the
+caller, with trusted ancestors and stable placement on a supported local filesystem.
+Symlink inputs, public/hardlinked locks, replaced lock inodes and stale handles
+are rejected. Cooperative same-user exclusion is not a hostile-user security
+boundary. A successful lock acquisition is **not** descendant/daemon quiescence.
+
+Attempts have a fresh 128-bit nonce and exact package digest. Identity and records
+are bounded private files, published without overwriting, with file and directory
+sync before acknowledgement. Existing attempt nonces cannot be recreated and a
+different package cannot adopt them. The current record types are only `armed`,
+`stop-intent` and `failure`, each referencing a digest-bound observation. They are
+storage primitives, **not verification of that observation**. In particular an
+`armed` record alone does not prove a living independent watchdog, and a `failure`
+record does not prove that the operator can observe it when storage is unavailable.
+All sync/readback errors must abort the caller's action; visible bytes after a
+failed sync do not acknowledge durability. Neither a missing result nor a parsed
+record is success. Power-loss durability is not established by these tests.
+
+Actions runs `python3 -I ops/stock-recovery/test_attempt.py -v` using disposable
+local directories only. Tests cover separate-process exclusion and release,
+identity binding, nonce reuse, immutable publication, symlink/hardlink/public-mode
+rejection, stale descriptors and injected sync failures. These do not exercise a
+watchdog, runtime, journal, grant, process-kill barrier or recovery path. **The
+primitives are not integrated into a runnable replacement wrapper yet.** Every
+acceptance gate in `manifest.json` remains unresolved.
+
+## Required wrapper adaptation — orchestration NOT IMPLEMENTED
 
 Continue within this single detached, self-testing wrapper lineage, not a second
 installer, scheduler, daemon, journal, or state authority:
