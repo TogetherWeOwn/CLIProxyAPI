@@ -59,15 +59,16 @@ jobs:
   runtime-bootstrap:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      DOWNLOAD: ${{ runner.temp }}/stock-runtime-${{ github.run_id }}-${{ github.run_attempt }}
-      ROOT: ${{ runner.temp }}/stock-root-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout exact PR head
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
+      - name: Set disposable download and test-root locations
+        run: |
+          printf 'DOWNLOAD=%s/stock-runtime-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          printf 'ROOT=%s/stock-root-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - name: Materialize the frozen OCI runtime without executing archive content
         run: |
           mkdir -p runtime-evidence
