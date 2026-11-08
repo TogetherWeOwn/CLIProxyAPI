@@ -12,6 +12,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Verify PR head checkout
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          actual_head_sha=$(git rev-parse HEAD)
+          printf 'Expected PR head: %s\nChecked-out HEAD: %s\n' "$EXPECTED_HEAD_SHA" "$actual_head_sha"
+          test "$actual_head_sha" = "$EXPECTED_HEAD_SHA"
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -21,6 +30,10 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
+      - name: Build PR head
+        run: |
+          go build -o test-output ./cmd/server
+          rm -f test-output
       - name: Refresh models catalog
         run: bash .github/scripts/refresh-model-catalogs.sh
       - name: Build
