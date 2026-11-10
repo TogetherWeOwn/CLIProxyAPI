@@ -182,7 +182,7 @@ class PrevalidationTests(unittest.TestCase):
     def test_nested_digest_host_identity_may_be_supplied(self):
         observed = make_observed(
             self.manifest,
-            provider_artifacts={"openai": "sha256:" + "1" * 64, "anthropic": "sha256:" + "2" * 64},
+            provider_artifacts={"claude": "sha256:" + "1" * 64, "codex": "sha256:" + "2" * 64},
         )
         result = prevalidation.prevalidate(self.manifest, observed)
         self.assertTrue(result["identity_match"])
@@ -193,15 +193,28 @@ class PrevalidationTests(unittest.TestCase):
             self.manifest,
             provider_artifacts={"provider_token": "sha256:" + "1" * 64},
         )
-        with self.assertRaisesRegex(prevalidation.PrevalidationError, "secrets"):
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "not a supported channel"):
             prevalidation.prevalidate(self.manifest, observed)
 
     def test_nested_tag_host_value_fails_closed(self):
         observed = make_observed(
             self.manifest,
-            provider_artifacts={"openai": "latest"},
+            provider_artifacts={"codex": "latest"},
         )
-        with self.assertRaisesRegex(prevalidation.PrevalidationError, "host-only identity"):
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "provider artifact"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_unknown_provider_artifact_channel_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            provider_artifacts={"openai": "sha256:" + "1" * 64},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "not a supported channel"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_empty_provider_artifacts_fails_closed(self):
+        observed = make_observed(self.manifest, provider_artifacts={})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
             prevalidation.prevalidate(self.manifest, observed)
 
     def test_non_object_observed_fails_closed(self):

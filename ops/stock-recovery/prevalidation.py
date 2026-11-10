@@ -53,6 +53,19 @@ REQUIRED_OBSERVED_KEYS = (
 
 SECRET_SUBSTRINGS = ("secret", "token", "password", "credential", "auth", "apikey", "api_key", "private")
 
+# Mirrors the supported channels in config.example.yaml; a provider
+# account outside them cannot be a CLIProxyAPI artifact identity.
+SUPPORTED_PROVIDER_CHANNELS = (
+    "vertex",
+    "aistudio",
+    "antigravity",
+    "claude",
+    "codex",
+    "kimi",
+    "xai",
+    "meta",
+)
+
 
 class PrevalidationError(ValueError):
     """An observed identity cannot be prevalidated against the packet."""
@@ -134,6 +147,28 @@ def _checked_source_digests(files, bundle):
             raise PrevalidationError("observed source digest does not match the frozen packet: " + name)
 
 
+def _checked_provider_artifacts(bundle):
+    """Check provider artifact identities, where supplied, against the channels.
+
+    Provider artifact identities are host-only and have no frozen packet
+    value, so they are bound by shape: a non-empty object naming only
+    supported configuration channels, each with a digest value. Unknown
+    or secret-shaped channels fail closed; absence leaves the named gate
+    unresolved rather than defaulting.
+    """
+    if "provider_artifacts" not in bundle:
+        return
+    supplied = bundle["provider_artifacts"]
+    if not isinstance(supplied, dict) or not supplied or len(supplied) > len(SUPPORTED_PROVIDER_CHANNELS):
+        raise PrevalidationError("observed provider artifacts must be a non-empty object")
+    for name, expected in supplied.items():
+        if not isinstance(name, str) or not name:
+            raise PrevalidationError("observed provider artifact key is malformed")
+        if name not in SUPPORTED_PROVIDER_CHANNELS:
+            raise PrevalidationError("observed provider artifact is not a supported channel: " + name)
+        _require_digest(expected, "observed provider artifact digest for " + name)
+
+
 def _checked_observed(observed):
     if not isinstance(observed, dict):
         raise PrevalidationError("observed identities must be an object")
@@ -180,10 +215,14 @@ def prevalidate(manifest, observed):
     # the packet by name; absence leaves the named gate unresolved.
     _checked_source_digests(files, bundle)
 
+    # Provider artifact identities, where supplied, must name supported
+    # channels with digest values; absence leaves the gate unresolved.
+    _checked_provider_artifacts(bundle)
+
     # Optional host-only identities are validated only where supplied;
     # absence leaves the named gate unresolved rather than defaulting.
     for key, value in bundle.items():
-        if key in REQUIRED_OBSERVED_KEYS or key == "source_digests":
+        if key in REQUIRED_OBSERVED_KEYS or key in ("source_digests", "provider_artifacts"):
             continue
         if isinstance(value, str):
             _require_digest(value, "host-only identity " + key)

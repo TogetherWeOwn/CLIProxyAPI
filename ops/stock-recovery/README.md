@@ -233,7 +233,11 @@ host identity cannot hide one level down under a clean name. An optional
 `source_digests` bundle, where
 supplied, must name frozen packet files and match their stored digests
 exactly by name; unknown names, empty/non-object bundles, tag values and
-secret-shaped keys fail closed. Optional host-only identities are validated only
+secret-shaped keys fail closed. An optional `provider_artifacts` bundle,
+where supplied, must name only the supported configuration channels
+(vertex, aistudio, antigravity, claude, codex, kimi, xai, meta) with
+digest values; unknown or secret-shaped channels fail closed. Optional
+host-only identities are validated only
 where supplied; absence leaves the named gate unresolved rather than
 defaulting. A match is still BOUND/HOLD with execution not authorized, so it
 is an identity gate, not recovery proof; `test_prevalidation.py` covers it
