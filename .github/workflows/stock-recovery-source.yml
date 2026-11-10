@@ -41,10 +41,10 @@ jobs:
         run: python3 -I ops/stock-recovery/test_bootstrap_smoke.py -v
       - name: Test stdout-evidence controls, not runtime recovery
         run: python3 -I ops/stock-recovery/test_stdout_evidence.py -v
+      - name: Test source-report controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_source_report.py -v
       - name: Record source-only HOLD report
-        run: |
-          python3 -I ops/stock-recovery/stdout_evidence.py --dir qualification-evidence --output source-binding.json -- python3 -I ops/stock-recovery/packet.py ops/stock-recovery/manifest.json
-          python3 -I ops/stock-recovery/actions_identity.py --mode source --output qualification-evidence/actions-identity.json
+        run: python3 -I ops/stock-recovery/source_report.py
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       - name: Retain source checkpoint evidence even on failure

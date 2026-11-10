@@ -19,7 +19,7 @@
     "recovery_manifest_digest": "sha256:8472aae0903a964412b8e73dd11d95d7a9932d8645789f77e8e162daa401474a"
   },
   "files": {
-    "README.md": "sha256:03ce343df31dd4268827fe68f0e499f9be870e696204f5b770708b6f1c5b18f0",
+    "README.md": "sha256:58dae5bfbe97e32cefd5a23973b2d84bdda8705a1180891b4e39ce1cce91bf91",
     "runtime_artifact.py": "sha256:8e2f70c1d3779f3a3ca8448184202a246c30c9fda663d0f7eb709f91d6c15c9f",
     "test_runtime_artifact.py": "sha256:884e98321b584f668fefb5f8b4f315a472cb93ad59fa37807e7bea63e5516787",
     "attempt.py": "sha256:12eac031dd28ad7a6e295e8791b5486c500133e5380a374981a4d8e6ad609a17",
@@ -48,7 +48,9 @@
     "bootstrap_smoke.py": "sha256:ab71099dae6a2cba002d67ae16f43d4f2ec197bfa7f03551623f9a09b6a1a088",
     "test_bootstrap_smoke.py": "sha256:eadb278cc7cd6b23fcb2ff5ed817d1b2503c256431afdaea173dbc9d1d52b0e2",
     "stdout_evidence.py": "sha256:88027081738bafc66c074e27ce69d72050e56c696a6e76faac31274f77301b37",
-    "test_stdout_evidence.py": "sha256:3ec3aab951d95a8c197aa85e38ca3b38565872caa5e8f6cf291883db1649ac8c"
+    "test_stdout_evidence.py": "sha256:3ec3aab951d95a8c197aa85e38ca3b38565872caa5e8f6cf291883db1649ac8c",
+    "source_report.py": "sha256:6c002db0e3f3a3aeca94303628b994f962ccb65869ba926a12f327395fe302c7",
+    "test_source_report.py": "sha256:5e17eb91de73c2f5329b26f1c621991871e844b6fd4ab48fc89d601aa241d1f2"
   },
   "unresolved_bindings": [
     "binary_source_attestation",

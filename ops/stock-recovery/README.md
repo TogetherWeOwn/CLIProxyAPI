@@ -216,9 +216,15 @@ evidence directory with parents exactly as the old `mkdir -p` plus `>`
 redirect did, but failing closed on a symlinked or non-directory evidence
 path, on a non-bare output name, and on a symlinked output; the command
 itself is mocked in tests, never executed; `test_stdout_evidence.py`
-covers it with positive and negative controls. After this extraction no
-multi-line inline shell remains in the workflow — every step is a single
-module invocation. The bootstrap-identity step also dropped its now
+covers it with positive and negative controls. `source_report.py`
+(stdlib-only, offline) composes the source-packet HOLD report — the packet
+capture into `source-binding.json`, then the actions identity into
+`actions-identity.json` — with fixed argv token-identical to the former
+two-line workflow shell, propagating child exit codes fail-fast so a
+failing packet never writes an identity; the child commands are mocked in
+tests, never executed; `test_source_report.py` covers it with positive
+and negative controls. After this extraction no multi-line inline shell
+remains in the workflow — every step is a single module invocation. The bootstrap-identity step also dropped its now
 redundant `mkdir -p`, which `actions_identity.py` always performed itself
 before writing. Hosted-job teardown owns
 cancellation cleanup. There is no
