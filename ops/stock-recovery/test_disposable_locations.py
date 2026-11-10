@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent
@@ -165,7 +166,7 @@ class DisposableLocationsTests(unittest.TestCase):
         env = self.env(GITHUB_ENV=str(self.env_file))
         download, root = disposable_locations.build_locations(env)
         import os
-        with unittest.mock.patch.dict(os.environ, env, clear=True):
+        with mock.patch.dict(os.environ, env, clear=True):
             self.assertEqual(disposable_locations.main([]), 0)
         expected = "DOWNLOAD=%s\nROOT=%s\n" % (download, root)
         self.assertEqual(
@@ -181,7 +182,7 @@ class DisposableLocationsTests(unittest.TestCase):
         original = sys.stderr
         sys.stderr = stderr
         try:
-            with unittest.mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch.dict(os.environ, env, clear=True):
                 code = disposable_locations.main([])
         finally:
             sys.stderr = original

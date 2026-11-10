@@ -44,7 +44,7 @@
     "disposable_cleanup.py": "sha256:f524ddb935c6eedd0157d8d3b117e8d4b1706e977f672171738b59f71b40244f",
     "test_disposable_cleanup.py": "sha256:d62edad530533909f0a10e523f6ec516634753a9e671abcab25f883c4293b2dd",
     "disposable_locations.py": "sha256:43665993395aaf671b77d311a3ca4d3310b053e67c9433780725e8605f55012c",
-    "test_disposable_locations.py": "sha256:f104bf45f2bae5fa99b508e172fd3c77a58f6f718b744cffdbf320c294a13ed3"
+    "test_disposable_locations.py": "sha256:f9ca5c8589cfdf911c53fccb6b8fe7d65711683f77438037644a9931c5d884c2"
   },
   "unresolved_bindings": [
     "binary_source_attestation",
