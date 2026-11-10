@@ -149,11 +149,24 @@ acceptance gate in `manifest.json` remains unresolved.
 Actions-only tests, rather than building a replacement from this older repository
 baseline. It verifies the source packet, config descriptor, every compressed layer
 size/digest and every uncompressed rootfs diff ID. It interprets only the final
-`CLIProxyAPI/CLIProxyAPI` regular-file member. It never extracts an archive tree or
-executes downloaded scripts. Target/ancestor links, relevant whiteouts, unsafe
-archive paths, missing runtime and bounded-size violations fail closed. All layers
-must validate before an executable is published. Each invocation requires a new
-nonexistent download directory; existing inputs are never overwritten.
+`CLIProxyAPI/CLIProxyAPI` regular-file member plus the frozen loader set
+(`ld-linux-x86-64.so.2`, `libc.so.6`, `libm.so.6`, `libdl.so.2`,
+`libpthread.so.0`, `libgcc_s.so.1`, `etc/ld.so.cache`) from the same image
+layers. It never extracts an archive tree or executes downloaded scripts.
+Target/ancestor links, frozen-library links, relevant whiteouts, unsafe archive
+paths, missing runtime/loader members and bounded-size violations fail closed.
+All layers must validate before an executable or library is published. Each
+invocation requires a new nonexistent download directory; existing inputs are
+never overwritten.
+
+The first bootstrap attempt failed with exit 127 (`chroot: failed to run
+command '/CLIProxyAPI': No such file or directory`). The binary is dynamically
+linked (`PT_INTERP /lib64/ld-linux-x86-64.so.2`, `DT_NEEDED libc.so.6`), so an
+empty root without the frozen loader fails before the binary starts. The fix
+materializes the frozen loader set from the same image layers and recreates the
+image's merged-usr topology (`/lib64 -> usr/lib64`, `/lib -> usr/lib`, loader
+symlink) in the disposable root. No host libraries are used. This remains a
+lineage smoke test, not functional qualification.
 
 The public pull token is acquired without workspace or production credentials and
 is stripped from CDN redirects. No package dependencies, Docker daemon or installed
@@ -162,14 +175,15 @@ head/run/job evidence. This establishes registry-artifact lineage, **not** a
 binary-to-source attestation. The binary has not become an accepted recovery target.
 
 The `runtime-bootstrap` job attempts only `--help`, with an empty environment,
-unprivileged UID/GID, new empty chroot and network/PID namespaces on a disposable
-hosted runner. No host credentials/state/config or provider is mounted, and no
-network interface is brought up. A missing namespace capability or required runtime
-library is a failing prerequisite, not a reason to run on the shared host or default
-daemon. Explicit cleanup removes the allocated download/test roots on success or
-failure; hosted-job teardown owns cancellation cleanup. There is no persistent
-preview or recurring idle runtime. Help output is **not service, journal, watchdog,
-quiescence, restart, or recovery proof**. All source packet gates remain unresolved.
+unprivileged UID/GID, new empty chroot (plus the frozen loader set above) and
+network/PID namespaces on a disposable hosted runner. No host credentials/state/
+config or provider is mounted, and no network interface is brought up. A missing
+namespace capability is a failing prerequisite, not a reason to run on the shared
+host or default daemon. Explicit cleanup removes the allocated download/test roots
+on success or failure; hosted-job teardown owns cancellation cleanup. There is no
+persistent preview or recurring idle runtime. Help output is **not service,
+journal, watchdog, quiescence, restart, or recovery proof**. All source packet
+gates remain unresolved.
 
 ### Completed one-shot interrupt diagnostic
 

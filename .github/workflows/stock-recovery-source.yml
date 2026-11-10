@@ -77,6 +77,19 @@ jobs:
         run: |
           mkdir -m 755 "$ROOT"
           install -m 755 "$DOWNLOAD/runtime/CLIProxyAPI" "$ROOT/CLIProxyAPI"
+          # Frozen loader set from the same image layers; no host libraries.
+          # Recreate the image's merged-usr topology so PT_INTERP resolves:
+          # /lib64 -> usr/lib64, /lib -> usr/lib, and the loader symlink.
+          mkdir -m 755 "$ROOT/usr/lib/x86_64-linux-gnu" "$ROOT/usr/lib64" "$ROOT/etc"
+          for lib in ld-linux-x86-64.so.2 libc.so.6 libm.so.6 libdl.so.2 \
+                     libpthread.so.0 libgcc_s.so.1; do
+            install -m 755 "$DOWNLOAD/runtime/libs/usr/lib/x86_64-linux-gnu/$lib" \
+              "$ROOT/usr/lib/x86_64-linux-gnu/$lib"
+          done
+          install -m 644 "$DOWNLOAD/runtime/libs/etc/ld.so.cache" "$ROOT/etc/ld.so.cache"
+          ln -s /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 "$ROOT/usr/lib64/ld-linux-x86-64.so.2"
+          ln -s usr/lib "$ROOT/lib"
+          ln -s usr/lib64 "$ROOT/lib64"
           # No host state, store, provider, network interface, daemon or environment.
           sudo unshare --net --pid --fork --kill-child \
             env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \

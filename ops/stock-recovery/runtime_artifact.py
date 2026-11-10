@@ -22,8 +22,24 @@ DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 MAX_COMPRESSED = 128 * 1024 * 1024
 MAX_UNPACKED = 256 * 1024 * 1024
 MAX_BINARY = 128 * 1024 * 1024
+MAX_LIB = 8 * 1024 * 1024
 TARGET = "CLIProxyAPI/CLIProxyAPI"
 ANCESTORS = frozenset(("CLIProxyAPI",))
+# Frozen, regular-file members of the stock image that the dynamically linked
+# runtime needs in an otherwise empty chroot: the PT_INTERP loader, the glibc
+# runtime set, and the loader cache that maps them under merged-usr paths.
+# Each is verified against its layer diff ID like the binary itself; residual
+# keeps last-layer-wins semantics and fails closed on whiteouts or links.
+FROZEN_LIBS = (
+    "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    "usr/lib/x86_64-linux-gnu/libc.so.6",
+    "usr/lib/x86_64-linux-gnu/libm.so.6",
+    "usr/lib/x86_64-linux-gnu/libdl.so.2",
+    "usr/lib/x86_64-linux-gnu/libpthread.so.0",
+    "usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
+    "etc/ld.so.cache",
+)
+FROZEN_LIB_SET = frozenset(FROZEN_LIBS)
 
 
 class ArtifactError(ValueError):
@@ -92,6 +108,38 @@ def layer_binary(raw, current):
     return current
 
 
+def layer_libs(raw, current):
+    """Interpret only the frozen loader set; never use extract/extractall."""
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+        for number, member in enumerate(archive):
+            if number >= 100000:
+                raise ArtifactError("too many archive entries")
+            name = member.name
+            while name.startswith("./"):
+                name = name[2:]
+            name = name.rstrip("/")
+            if name in ("", ".") and member.isdir():
+                continue
+            if name.startswith("/") or any(part in ("", ".", "..") for part in name.split("/")):
+                raise ArtifactError("unsafe archive member path")
+            if name not in FROZEN_LIB_SET:
+                # A whiteout that would shadow a frozen library is rejected
+                # instead of guessing overlay semantics.
+                parts = name.split("/")
+                if len(parts) >= 2 and parts[-1].startswith(".wh."):
+                    base = parts[-1][4:]
+                    if base == ".wh..opq" or "/".join(parts[:-1] + [base]) in FROZEN_LIB_SET:
+                        raise ArtifactError("frozen library path affected by whiteout")
+                continue
+            if not member.isfile() or not 0 < member.size <= MAX_LIB:
+                raise ArtifactError("frozen library is not a bounded regular file")
+            with archive.extractfile(member) as stream:
+                current[name] = bounded_read(stream, MAX_LIB)
+            if len(current[name]) != member.size:
+                raise ArtifactError("truncated frozen library member")
+    return current
+
+
 def materialize(manifest_raw, config_raw, fetch_blob, destination):
     manifest, config = map(json.loads, (manifest_raw, config_raw))
     checked_descriptor(manifest["config"], config_raw)
@@ -108,6 +156,7 @@ def materialize(manifest_raw, config_raw, fetch_blob, destination):
     inputs = destination / "inputs"
     inputs.mkdir(mode=0o700)
     binary = None
+    libs = {}
     for index, (descriptor, diff_id) in enumerate(zip(layers, diff_ids)):
         if (descriptor.get("mediaType") != "application/vnd.oci.image.layer.v1.tar+gzip"
                 or type(descriptor.get("size")) is not int
@@ -124,16 +173,28 @@ def materialize(manifest_raw, config_raw, fetch_blob, destination):
         if digest(unpacked) != diff_id:
             raise ArtifactError("uncompressed layer identity mismatch")
         binary = layer_binary(unpacked, binary)
+        libs = layer_libs(unpacked, libs)
     if binary is None:
         raise ArtifactError("frozen runtime path absent")
+    if set(libs) != set(FROZEN_LIBS):
+        raise ArtifactError("frozen loader set incomplete")
     output = destination / "runtime"
     output.mkdir(mode=0o700)
     executable = output / "CLIProxyAPI"
     with executable.open("xb") as stream:
         stream.write(binary)
     os.chmod(executable, 0o700)
+    library_root = output / "libs"
+    library_root.mkdir(mode=0o700)
+    for name in FROZEN_LIBS:
+        target = library_root / name
+        target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        with target.open("xb") as stream:
+            stream.write(libs[name])
+        os.chmod(target, 0o755)
     return {"manifest_digest": digest(manifest_raw), "config_digest": digest(config_raw),
             "binary_digest": digest(binary), "binary_size": len(binary),
+            "libs": {name: digest(libs[name]) for name in FROZEN_LIBS},
             "platform": "linux/amd64", "qualification": "HOLD", "service_recovery": "NOT_TESTED"}
 
 

@@ -57,8 +57,14 @@ class RuntimeArtifactTests(unittest.TestCase):
                                     fetch or (lambda key, size: blobs[key]), self.destination)
 
     def binary_layer(self, data=b"synthetic-not-an-executable"):
-        return archive(("CLIProxyAPI", b"", tarfile.DIRTYPE),
-                       ("./CLIProxyAPI/CLIProxyAPI", data, tarfile.REGTYPE))
+        entries = [("CLIProxyAPI", b"", tarfile.DIRTYPE),
+                   ("./CLIProxyAPI/CLIProxyAPI", data, tarfile.REGTYPE)]
+        entries.extend((name, ("synthetic-" + name).encode(), tarfile.REGTYPE)
+                       for name in artifact.FROZEN_LIBS)
+        return archive(*entries)
+
+    def libs_layer(self, data=b"synthetic-lib"):
+        return archive(*[("./" + name, data, tarfile.REGTYPE) for name in artifact.FROZEN_LIBS])
 
     def test_complete_chain_selects_last_regular_binary_without_extracting_tree(self):
         image = self.image(self.binary_layer(b"old"), archive(("other", b"ignored", tarfile.REGTYPE)),
@@ -137,6 +143,40 @@ class RuntimeArtifactTests(unittest.TestCase):
         with self.assertRaises(artifact.ArtifactError):
             self.materialize(self.image(archive(("other", b"x", tarfile.REGTYPE))))
         self.assertFalse((self.destination / "runtime").exists())
+
+    def test_frozen_libs_are_materialized_without_tree_extraction(self):
+        image = self.image(self.binary_layer())
+        result = self.materialize(image)
+        for name in artifact.FROZEN_LIBS:
+            published = self.destination / "runtime/libs" / name
+            self.assertTrue(published.is_file())
+            self.assertEqual(published.read_bytes(), ("synthetic-" + name).encode())
+            self.assertEqual(result["libs"][name], artifact.digest(published.read_bytes()))
+        self.assertFalse((self.destination / "other").exists())
+
+    def test_missing_frozen_lib_fails_closed(self):
+        layer = archive(("CLIProxyAPI", b"", tarfile.DIRTYPE),
+                        ("CLIProxyAPI/CLIProxyAPI", b"synthetic", tarfile.REGTYPE),
+                        ("etc/ld.so.cache", b"synthetic-cache", tarfile.REGTYPE))
+        with self.assertRaises(artifact.ArtifactError):
+            self.materialize(self.image(layer))
+        self.assertFalse((self.destination / "runtime").exists())
+
+    def test_frozen_lib_links_and_dirs_fail_closed(self):
+        for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.DIRTYPE, tarfile.FIFOTYPE):
+            with self.subTest(kind=kind), self.assertRaises(artifact.ArtifactError):
+                artifact.layer_libs(archive(("etc/ld.so.cache", b"", kind)), {})
+
+    def test_frozen_lib_whiteout_fails_closed(self):
+        for path in ("usr/lib/x86_64-linux-gnu/.wh.libc.so.6", "etc/.wh..wh..opq"):
+            with self.subTest(path=path), self.assertRaises(artifact.ArtifactError):
+                artifact.layer_libs(archive((path, b"", tarfile.REGTYPE)), {})
+
+    def test_frozen_libs_use_last_layer_wins(self):
+        image = self.image(self.binary_layer(b"old"), self.libs_layer(b"overridden"))
+        result = self.materialize(image)
+        for name in artifact.FROZEN_LIBS:
+            self.assertEqual(result["libs"][name], artifact.digest(b"overridden"))
 
     def test_compressed_size_and_limit(self):
         image = self.image(self.binary_layer())
