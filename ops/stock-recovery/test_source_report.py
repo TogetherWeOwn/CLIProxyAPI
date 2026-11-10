@@ -1,8 +1,10 @@
 """Source-report controls. These verify HOLD-report composition only."""
 
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -132,11 +134,16 @@ class SourceReportTests(unittest.TestCase):
         # evidence file may appear. Run from an empty scratch cwd.
         def run(command, check=False, **kwargs):
             raise FileNotFoundError("python3")
-        with Path.cwd():
-            with mock.patch.object(subprocess, "run", side_effect=run):
-                with self.assertRaises(source_report.SourceReportError):
-                    source_report.record()
-        self.assertFalse(Path("qualification-evidence").exists())
+        with tempfile.TemporaryDirectory() as scratch:
+            previous = os.getcwd()
+            os.chdir(scratch)
+            try:
+                with mock.patch.object(subprocess, "run", side_effect=run):
+                    with self.assertRaises(source_report.SourceReportError):
+                        source_report.record()
+                self.assertFalse(Path("qualification-evidence").exists())
+            finally:
+                os.chdir(previous)
 
 
 if __name__ == "__main__":
