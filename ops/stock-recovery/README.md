@@ -228,7 +228,9 @@ and negative controls. `prevalidation.py`
 an observed identity bundle against the packet's frozen candidate by role
 (index, manifest, config, image ID, recovery target, platform, repository)
 and fails closed on mismatch, malformed or missing identities, on tag-as-identity,
-and on secret-shaped keys. An optional `source_digests` bundle, where
+and on secret-shaped keys — including nested keys, so a secret-shaped
+host identity cannot hide one level down under a clean name. An optional
+`source_digests` bundle, where
 supplied, must name frozen packet files and match their stored digests
 exactly by name; unknown names, empty/non-object bundles, tag values and
 secret-shaped keys fail closed. Optional host-only identities are validated only

@@ -191,7 +191,10 @@ def prevalidate(manifest, observed):
             for item in value:
                 _require_digest(item, "host-only identity " + key)
         elif isinstance(value, dict) and value:
-            for item in value.values():
+            # Nested keys are screened too, so a secret-shaped host
+            # identity cannot hide one level down under a clean name.
+            for nested_key, item in value.items():
+                _check_secret_key(nested_key, "host-only identity " + key)
                 _require_digest(item, "host-only identity " + key)
         else:
             raise PrevalidationError("host-only identity is malformed: " + key)

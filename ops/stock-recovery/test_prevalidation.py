@@ -179,6 +179,31 @@ class PrevalidationTests(unittest.TestCase):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "secrets"):
             prevalidation.prevalidate(self.manifest, observed)
 
+    def test_nested_digest_host_identity_may_be_supplied(self):
+        observed = make_observed(
+            self.manifest,
+            provider_artifacts={"openai": "sha256:" + "1" * 64, "anthropic": "sha256:" + "2" * 64},
+        )
+        result = prevalidation.prevalidate(self.manifest, observed)
+        self.assertTrue(result["identity_match"])
+        self.assertIn("provider_artifacts", result["unresolved_bindings"])
+
+    def test_nested_secret_shaped_host_key_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            provider_artifacts={"provider_token": "sha256:" + "1" * 64},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "secrets"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_nested_tag_host_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            provider_artifacts={"openai": "latest"},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "host-only identity"):
+            prevalidation.prevalidate(self.manifest, observed)
+
     def test_non_object_observed_fails_closed(self):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be an object"):
             prevalidation.prevalidate(self.manifest, ["not", "an", "object"])
