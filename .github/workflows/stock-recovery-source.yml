@@ -27,6 +27,8 @@ jobs:
         run: python3 -I ops/stock-recovery/test_attempt.py -v
       - name: Test frozen-runtime archive controls, not runtime recovery
         run: python3 -I ops/stock-recovery/test_runtime_artifact.py -v
+      - name: Test help-identity controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_help_identity.py -v
       - name: Record source-only HOLD report
         run: |
           mkdir -p qualification-evidence
@@ -96,21 +98,7 @@ jobs:
             chroot --userspec=65534:65534 "$ROOT" /CLIProxyAPI --help \
             > runtime-evidence/help.log 2>&1
       - name: Verify help output identifies the frozen candidate
-        run: |
-          python3 -I - <<'PY'
-          import hashlib
-          from pathlib import Path
-          data = Path("runtime-evidence/help.log").read_bytes()
-          if not 0 < len(data) <= 65536:
-              raise SystemExit("help output size out of bounds")
-          text = data.decode(errors="strict")
-          for marker in ("CLIProxyAPI Version: v8.0.60", "Commit: 91e0dee",
-                         "\nUsage of /CLIProxyAPI\n", "\n  -config", "\n  -tui"):
-              if marker not in text:
-                  raise SystemExit("help output missing frozen marker: " + marker)
-          print("help sha256:", hashlib.sha256(data).hexdigest())
-          print("markers: version, commit, usage, config, tui")
-          PY
+        run: python3 -I ops/stock-recovery/help_identity.py runtime-evidence/help.log
       - name: Record bootstrap identity, never functional acceptance
         if: always()
         env:

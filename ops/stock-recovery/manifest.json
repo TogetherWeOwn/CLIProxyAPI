@@ -19,7 +19,7 @@
     "recovery_manifest_digest": "sha256:8472aae0903a964412b8e73dd11d95d7a9932d8645789f77e8e162daa401474a"
   },
   "files": {
-    "README.md": "sha256:e320cafb6d416147dfb213bc06968925feb224e9f4198d757d0b9c4cb2bf1e13",
+    "README.md": "sha256:e813fc509ebf0162ef4eaca116116c961c964db42316de1061a029ed6604e1db",
     "runtime_artifact.py": "sha256:8e2f70c1d3779f3a3ca8448184202a246c30c9fda663d0f7eb709f91d6c15c9f",
     "test_runtime_artifact.py": "sha256:884e98321b584f668fefb5f8b4f315a472cb93ad59fa37807e7bea63e5516787",
     "attempt.py": "sha256:12eac031dd28ad7a6e295e8791b5486c500133e5380a374981a4d8e6ad609a17",
@@ -34,7 +34,9 @@
     "oci/manifest-linux-amd64.json": "sha256:8472aae0903a964412b8e73dd11d95d7a9932d8645789f77e8e162daa401474a",
     "oci/config-linux-amd64.json": "sha256:f47991389017dd92a46f5d28fbb822bbce55392a70eb570231714ab2de5c0098",
     "service_evidence.py": "sha256:6ae1c6049d456ade05ef949a70f8db4e073934d1f6bc3acfb3201c70c4eee764",
-    "test_service_evidence.py": "sha256:7f4d334e13240551953e64e6ad174b1f4cba14fb203a69a2d05805462595583f"
+    "test_service_evidence.py": "sha256:7f4d334e13240551953e64e6ad174b1f4cba14fb203a69a2d05805462595583f",
+    "help_identity.py": "sha256:b4c9fc8db276d2caa654d3c530f11da3493b3d83f31c72a38ae1f237649e9c2b",
+    "test_help_identity.py": "sha256:0dd49a34c90e511ecdb713dc8ba36b28c0876731866006d3b2bc9d24755eb533"
   },
   "unresolved_bindings": [
     "binary_source_attestation",
