@@ -196,7 +196,13 @@ removes the allocated download/test roots on success or failure with checked
 removal: absolute paths of sufficient depth only, absence is an idempotent
 no-op, and a symlinked or regular-file path fails closed and preserves its
 target, with each removal verified afterwards; `test_disposable_cleanup.py`
-covers it with positive and negative controls. Hosted-job teardown owns
+covers it with positive and negative controls. `disposable_locations.py`
+(stdlib-only, offline) allocates the download/test roots under the runner
+temp as the two `GITHUB_ENV` lines, failing closed on a missing, relative,
+shallow, symlinked or non-directory base and on a missing, malformed or
+oversized run/attempt identifier, so an unset base cannot silently produce
+a filesystem-root child path; `test_disposable_locations.py` covers it
+with positive and negative controls. Hosted-job teardown owns
 cancellation cleanup. There is no
 persistent preview or recurring idle runtime. Help output is **not service,
 journal, watchdog, quiescence, restart, or recovery proof**. All source packet
