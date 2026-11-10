@@ -209,7 +209,18 @@ temp as the two `GITHUB_ENV` lines, failing closed on a missing, relative,
 shallow, symlinked or non-directory base and on a missing, malformed or
 oversized run/attempt identifier, so an unset base cannot silently produce
 a filesystem-root child path; `test_disposable_locations.py` covers it
-with positive and negative controls. Hosted-job teardown owns
+with positive and negative controls. `stdout_evidence.py` (stdlib-only,
+offline) captures each evidence command's stdout into its retained file
+(`source-binding.json`, `artifact.json`, `root.json`), creating the
+evidence directory with parents exactly as the old `mkdir -p` plus `>`
+redirect did, but failing closed on a symlinked or non-directory evidence
+path, on a non-bare output name, and on a symlinked output; the command
+itself is mocked in tests, never executed; `test_stdout_evidence.py`
+covers it with positive and negative controls. After this extraction no
+multi-line inline shell remains in the workflow — every step is a single
+module invocation. The bootstrap-identity step also dropped its now
+redundant `mkdir -p`, which `actions_identity.py` always performed itself
+before writing. Hosted-job teardown owns
 cancellation cleanup. There is no
 persistent preview or recurring idle runtime. Help output is **not service,
 journal, watchdog, quiescence, restart, or recovery proof**. All source packet

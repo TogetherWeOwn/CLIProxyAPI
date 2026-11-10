@@ -39,10 +39,11 @@ jobs:
         run: python3 -I ops/stock-recovery/test_disposable_locations.py -v
       - name: Test bootstrap-smoke controls, not runtime recovery
         run: python3 -I ops/stock-recovery/test_bootstrap_smoke.py -v
+      - name: Test stdout-evidence controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_stdout_evidence.py -v
       - name: Record source-only HOLD report
         run: |
-          mkdir -p qualification-evidence
-          python3 -I ops/stock-recovery/packet.py ops/stock-recovery/manifest.json > qualification-evidence/source-binding.json
+          python3 -I ops/stock-recovery/stdout_evidence.py --dir qualification-evidence --output source-binding.json -- python3 -I ops/stock-recovery/packet.py ops/stock-recovery/manifest.json
           python3 -I ops/stock-recovery/actions_identity.py --mode source --output qualification-evidence/actions-identity.json
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -67,13 +68,9 @@ jobs:
       - name: Set disposable download and test-root locations
         run: python3 -I ops/stock-recovery/disposable_locations.py
       - name: Materialize the frozen OCI runtime without executing archive content
-        run: |
-          mkdir -p runtime-evidence
-          python3 -I ops/stock-recovery/runtime_artifact.py ops/stock-recovery/manifest.json "$DOWNLOAD" > runtime-evidence/artifact.json
+        run: python3 -I ops/stock-recovery/stdout_evidence.py --dir runtime-evidence --output artifact.json -- python3 -I ops/stock-recovery/runtime_artifact.py ops/stock-recovery/manifest.json "$DOWNLOAD"
       - name: Prepare the disposable root with the frozen loader set
-        run: |
-          mkdir -p runtime-evidence
-          python3 -I ops/stock-recovery/bootstrap_root.py "$DOWNLOAD/runtime" "$ROOT" > runtime-evidence/root.json
+        run: python3 -I ops/stock-recovery/stdout_evidence.py --dir runtime-evidence --output root.json -- python3 -I ops/stock-recovery/bootstrap_root.py "$DOWNLOAD/runtime" "$ROOT"
       - name: Smoke-test help in an unprivileged empty root and network namespace
         run: python3 -I ops/stock-recovery/bootstrap_smoke.py "$ROOT" runtime-evidence/help.log
       - name: Verify help output identifies the frozen candidate
@@ -83,9 +80,7 @@ jobs:
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           JOB_STATUS: ${{ job.status }}
-        run: |
-          mkdir -p runtime-evidence
-          python3 -I ops/stock-recovery/actions_identity.py --mode bootstrap --output runtime-evidence/actions-identity.json
+        run: python3 -I ops/stock-recovery/actions_identity.py --mode bootstrap --output runtime-evidence/actions-identity.json
       - name: Remove disposable downloaded bytes and empty test root
         if: always()
         run: python3 -I ops/stock-recovery/disposable_cleanup.py "$ROOT" "$DOWNLOAD"
