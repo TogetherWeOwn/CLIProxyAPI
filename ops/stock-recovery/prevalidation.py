@@ -76,6 +76,32 @@ def _require_digest(value, label):
         raise PrevalidationError(label + " must be a sha256 digest")
 
 
+# Roles of the host Compose/config identity; a Compose file and the config
+# rendered from it are different artifacts and must not be conflated.
+COMPOSE_CONFIG_ROLES = ("compose_digest", "config_digest")
+
+
+def _checked_compose_config(bundle):
+    """Check host Compose/config identities, where supplied, by role.
+
+    Compose/config identities are host-only and have no frozen packet
+    value, so they are bound by shape: a non-empty object naming exactly
+    the Compose-file and rendered-config roles, each with a digest value.
+    A partial or role-swapped bundle conflates identities and fails
+    closed; absence leaves the named gate unresolved rather than
+    defaulting.
+    """
+    if "compose_config" not in bundle:
+        return
+    supplied = bundle["compose_config"]
+    if not isinstance(supplied, dict) or not supplied:
+        raise PrevalidationError("observed compose/config must be a non-empty object")
+    if tuple(sorted(supplied)) != tuple(sorted(COMPOSE_CONFIG_ROLES)):
+        raise PrevalidationError("observed compose/config must name exactly the compose and config roles")
+    for role, expected in supplied.items():
+        _require_digest(expected, "observed compose/config digest for " + role)
+
+
 def _checked_manifest_candidate(manifest):
     if not isinstance(manifest, dict) or manifest.get("schema") != "stock-recovery-source/v1":
         raise PrevalidationError("unsupported source packet schema")
@@ -219,10 +245,14 @@ def prevalidate(manifest, observed):
     # channels with digest values; absence leaves the gate unresolved.
     _checked_provider_artifacts(bundle)
 
+    # Host Compose/config identities, where supplied, must name both
+    # roles with digest values; absence leaves the gate unresolved.
+    _checked_compose_config(bundle)
+
     # Optional host-only identities are validated only where supplied;
     # absence leaves the named gate unresolved rather than defaulting.
     for key, value in bundle.items():
-        if key in REQUIRED_OBSERVED_KEYS or key in ("source_digests", "provider_artifacts"):
+        if key in REQUIRED_OBSERVED_KEYS or key in ("source_digests", "provider_artifacts", "compose_config"):
             continue
         if isinstance(value, str):
             _require_digest(value, "host-only identity " + key)

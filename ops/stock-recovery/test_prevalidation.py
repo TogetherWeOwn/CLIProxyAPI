@@ -217,6 +217,55 @@ class PrevalidationTests(unittest.TestCase):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
             prevalidation.prevalidate(self.manifest, observed)
 
+    def test_matching_compose_config_still_hold(self):
+        observed = make_observed(
+            self.manifest,
+            compose_config={
+                "compose_digest": "sha256:" + "3" * 64,
+                "config_digest": "sha256:" + "4" * 64,
+            },
+        )
+        result = prevalidation.prevalidate(self.manifest, observed)
+        self.assertTrue(result["identity_match"])
+        self.assertEqual(result["qualification"], "HOLD")
+        self.assertIn("compose_config", result["unresolved_bindings"])
+
+    def test_partial_compose_config_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            compose_config={"compose_digest": "sha256:" + "3" * 64},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_unknown_compose_config_role_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            compose_config={
+                "compose_digest": "sha256:" + "3" * 64,
+                "config_digest": "sha256:" + "4" * 64,
+                "service_tag": "v8.0.60",
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_compose_config_tag_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            compose_config={
+                "compose_digest": "latest",
+                "config_digest": "sha256:" + "4" * 64,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "compose/config digest"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_empty_compose_config_fails_closed(self):
+        observed = make_observed(self.manifest, compose_config={})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
     def test_non_object_observed_fails_closed(self):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be an object"):
             prevalidation.prevalidate(self.manifest, ["not", "an", "object"])
