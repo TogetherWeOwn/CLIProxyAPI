@@ -19,7 +19,7 @@
     "recovery_manifest_digest": "sha256:8472aae0903a964412b8e73dd11d95d7a9932d8645789f77e8e162daa401474a"
   },
   "files": {
-    "README.md": "sha256:0928171c380abab51c21517301e77118f9f93912cf0e0713239cb5e4abbc3ac9",
+    "README.md": "sha256:39eaae4843509d2486db6ede23050722f43b23b9fa0572e4a9e223fe993f2e35",
     "runtime_artifact.py": "sha256:8e2f70c1d3779f3a3ca8448184202a246c30c9fda663d0f7eb709f91d6c15c9f",
     "test_runtime_artifact.py": "sha256:884e98321b584f668fefb5f8b4f315a472cb93ad59fa37807e7bea63e5516787",
     "attempt.py": "sha256:12eac031dd28ad7a6e295e8791b5486c500133e5380a374981a4d8e6ad609a17",
@@ -38,7 +38,9 @@
     "help_identity.py": "sha256:b4c9fc8db276d2caa654d3c530f11da3493b3d83f31c72a38ae1f237649e9c2b",
     "test_help_identity.py": "sha256:0dd49a34c90e511ecdb713dc8ba36b28c0876731866006d3b2bc9d24755eb533",
     "bootstrap_root.py": "sha256:13a11b872918a39efe53567be0ba3d437c0fbb0e060cdf438fb167662616e73e",
-    "test_bootstrap_root.py": "sha256:6e9e40d1b59e0c8f70476df915e911c2593b0e1b5ec225c82f87fee1083a646a"
+    "test_bootstrap_root.py": "sha256:6e9e40d1b59e0c8f70476df915e911c2593b0e1b5ec225c82f87fee1083a646a",
+    "actions_identity.py": "sha256:712702966ae68342122c1cce7d9afe2e308bd630a42416d96b61dccdb34330e1",
+    "test_actions_identity.py": "sha256:8ef3f1b8f13f6629a3f93b017d5f5c049cf0416d42802cf8e8930ce2d027a22c"
   },
   "unresolved_bindings": [
     "binary_source_attestation",

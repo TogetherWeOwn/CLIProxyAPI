@@ -31,24 +31,13 @@ jobs:
         run: python3 -I ops/stock-recovery/test_help_identity.py -v
       - name: Test bootstrap-root controls, not runtime recovery
         run: python3 -I ops/stock-recovery/test_bootstrap_root.py -v
+      - name: Test actions-identity controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_actions_identity.py -v
       - name: Record source-only HOLD report
         run: |
           mkdir -p qualification-evidence
           python3 -I ops/stock-recovery/packet.py ops/stock-recovery/manifest.json > qualification-evidence/source-binding.json
-          python3 -I - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          identity = {
-              "head_sha": os.environ["HEAD_SHA"],
-              "run_id": os.environ["GITHUB_RUN_ID"],
-              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
-              "job": os.environ["GITHUB_JOB"],
-              "qualification": "HOLD",
-              "service_recovery": "NOT_TESTED",
-          }
-          Path("qualification-evidence/actions-identity.json").write_text(json.dumps(identity, sort_keys=True) + "\n")
-          PY
+          python3 -I ops/stock-recovery/actions_identity.py --mode source --output qualification-evidence/actions-identity.json
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       - name: Retain source checkpoint evidence even on failure
@@ -97,14 +86,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           mkdir -p runtime-evidence
-          python3 -I - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          identity = {key: os.environ[key] for key in ("HEAD_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_JOB", "JOB_STATUS")}
-          identity.update(qualification="HOLD", service_recovery="NOT_TESTED", journal_matrix="NOT_RUN")
-          Path("runtime-evidence/actions-identity.json").write_text(json.dumps(identity, sort_keys=True) + "\n")
-          PY
+          python3 -I ops/stock-recovery/actions_identity.py --mode bootstrap --output runtime-evidence/actions-identity.json
       - name: Remove disposable downloaded bytes and empty test root
         if: always()
         run: |

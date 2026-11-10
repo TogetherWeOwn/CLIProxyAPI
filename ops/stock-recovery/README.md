@@ -188,7 +188,10 @@ positive and negative controls. `help_identity.py` (stdlib-only, offline) then f
 closed unless the retained help output identifies the frozen candidate
 (version/commit self-report plus usage and core flags), so an exit code with
 empty or wrong output cannot pass; `test_help_identity.py` covers it with
-positive and negative controls. Explicit cleanup removes the allocated download/test roots
+positive and negative controls. `actions_identity.py` (stdlib-only, offline)
+writes each job's `actions-identity.json`, binding the exact head, run and job
+while retaining HOLD/NOT_TESTED/NOT_RUN; `test_actions_identity.py` covers it
+with positive and negative controls. Explicit cleanup removes the allocated download/test roots
 on success or failure; hosted-job teardown owns cancellation cleanup. There is no
 persistent preview or recurring idle runtime. Help output is **not service,
 journal, watchdog, quiescence, restart, or recovery proof**. All source packet
