@@ -80,7 +80,7 @@ jobs:
           # Frozen loader set from the same image layers; no host libraries.
           # Recreate the image's merged-usr topology so PT_INTERP resolves:
           # /lib64 -> usr/lib64, /lib -> usr/lib, and the loader symlink.
-          mkdir -m 755 "$ROOT/usr/lib/x86_64-linux-gnu" "$ROOT/usr/lib64" "$ROOT/etc"
+          mkdir -p -m 755 "$ROOT/usr/lib/x86_64-linux-gnu" "$ROOT/usr/lib64" "$ROOT/etc"
           for lib in ld-linux-x86-64.so.2 libc.so.6 libm.so.6 libdl.so.2 \
                      libpthread.so.0 libgcc_s.so.1; do
             install -m 755 "$DOWNLOAD/runtime/libs/usr/lib/x86_64-linux-gnu/$lib" \
