@@ -223,7 +223,12 @@ capture into `source-binding.json`, then the actions identity into
 two-line workflow shell, propagating child exit codes fail-fast so a
 failing packet never writes an identity; the child commands are mocked in
 tests, never executed; `test_source_report.py` covers it with positive
-and negative controls. After this extraction no multi-line inline shell
+and negative controls. The `Test for deprecated APIs` step re-runs the whole
+suite under `-W error::DeprecationWarning` so a version-gated API removal
+(host Python 3.12 tolerates what Actions Python 3.13 rejects) fails in
+Actions even if a local pre-push on an older interpreter missed it; pre-push
+must run that flag locally and must run the workflow test invocations in
+direct `python3 -I ...` form, not discover-only. After this extraction no multi-line inline shell
 remains in the workflow — every step is a single module invocation. The bootstrap-identity step also dropped its now
 redundant `mkdir -p`, which `actions_identity.py` always performed itself
 before writing. Hosted-job teardown owns
