@@ -188,7 +188,14 @@ positive and negative controls. `help_identity.py` (stdlib-only, offline) then f
 closed unless the retained help output identifies the frozen candidate
 (version/commit self-report plus usage and core flags), so an exit code with
 empty or wrong output cannot pass; `test_help_identity.py` covers it with
-positive and negative controls. `actions_identity.py` (stdlib-only, offline)
+positive and negative controls. `bootstrap_smoke.py` (stdlib-only, offline)
+runs only the fixed help smoke — `sudo unshare --net --pid --fork
+--kill-child env -i` with a minimal `PATH`, then `chroot --userspec=65534:65534`
+on the disposable root — capturing stdout and stderr into the retained help
+log and propagating the child exit code, failing closed on a missing,
+relative, shallow, symlinked or non-directory root and on a symlinked output
+path; `test_bootstrap_smoke.py` covers it with positive and negative
+controls (the command itself is mocked in tests, never executed). `actions_identity.py` (stdlib-only, offline)
 writes each job's `actions-identity.json`, binding the exact head, run and job
 while retaining HOLD/NOT_TESTED/NOT_RUN; `test_actions_identity.py` covers it
 with positive and negative controls. `disposable_cleanup.py` (stdlib-only, offline)

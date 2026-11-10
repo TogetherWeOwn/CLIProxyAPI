@@ -19,7 +19,7 @@
     "recovery_manifest_digest": "sha256:8472aae0903a964412b8e73dd11d95d7a9932d8645789f77e8e162daa401474a"
   },
   "files": {
-    "README.md": "sha256:92368f0d83790985cf4084f61b433e29791748c6453295fcafa49b4ebe99f59f",
+    "README.md": "sha256:e577da0bda44bac07fa4fdccfcdb9e7bb1c5c68f473938ecbd30918ab372df07",
     "runtime_artifact.py": "sha256:8e2f70c1d3779f3a3ca8448184202a246c30c9fda663d0f7eb709f91d6c15c9f",
     "test_runtime_artifact.py": "sha256:884e98321b584f668fefb5f8b4f315a472cb93ad59fa37807e7bea63e5516787",
     "attempt.py": "sha256:12eac031dd28ad7a6e295e8791b5486c500133e5380a374981a4d8e6ad609a17",
@@ -44,7 +44,9 @@
     "disposable_cleanup.py": "sha256:f524ddb935c6eedd0157d8d3b117e8d4b1706e977f672171738b59f71b40244f",
     "test_disposable_cleanup.py": "sha256:d62edad530533909f0a10e523f6ec516634753a9e671abcab25f883c4293b2dd",
     "disposable_locations.py": "sha256:43665993395aaf671b77d311a3ca4d3310b053e67c9433780725e8605f55012c",
-    "test_disposable_locations.py": "sha256:f9ca5c8589cfdf911c53fccb6b8fe7d65711683f77438037644a9931c5d884c2"
+    "test_disposable_locations.py": "sha256:f9ca5c8589cfdf911c53fccb6b8fe7d65711683f77438037644a9931c5d884c2",
+    "bootstrap_smoke.py": "sha256:ab71099dae6a2cba002d67ae16f43d4f2ec197bfa7f03551623f9a09b6a1a088",
+    "test_bootstrap_smoke.py": "sha256:eadb278cc7cd6b23fcb2ff5ed817d1b2503c256431afdaea173dbc9d1d52b0e2"
   },
   "unresolved_bindings": [
     "binary_source_attestation",

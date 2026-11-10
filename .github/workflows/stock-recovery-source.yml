@@ -37,6 +37,8 @@ jobs:
         run: python3 -I ops/stock-recovery/test_disposable_cleanup.py -v
       - name: Test disposable-location controls, not runtime recovery
         run: python3 -I ops/stock-recovery/test_disposable_locations.py -v
+      - name: Test bootstrap-smoke controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_bootstrap_smoke.py -v
       - name: Record source-only HOLD report
         run: |
           mkdir -p qualification-evidence
@@ -73,12 +75,7 @@ jobs:
           mkdir -p runtime-evidence
           python3 -I ops/stock-recovery/bootstrap_root.py "$DOWNLOAD/runtime" "$ROOT" > runtime-evidence/root.json
       - name: Smoke-test help in an unprivileged empty root and network namespace
-        run: |
-          # No host state, store, provider, network interface, daemon or environment.
-          sudo unshare --net --pid --fork --kill-child \
-            env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
-            chroot --userspec=65534:65534 "$ROOT" /CLIProxyAPI --help \
-            > runtime-evidence/help.log 2>&1
+        run: python3 -I ops/stock-recovery/bootstrap_smoke.py "$ROOT" runtime-evidence/help.log
       - name: Verify help output identifies the frozen candidate
         run: python3 -I ops/stock-recovery/help_identity.py runtime-evidence/help.log
       - name: Record bootstrap identity, never functional acceptance
