@@ -179,7 +179,10 @@ unprivileged UID/GID, new empty chroot (plus the frozen loader set above) and
 network/PID namespaces on a disposable hosted runner. No host credentials/state/
 config or provider is mounted, and no network interface is brought up. A missing
 namespace capability is a failing prerequisite, not a reason to run on the shared
-host or default daemon. Explicit cleanup removes the allocated download/test roots
+host or default daemon. A separate verification step then fails closed unless
+the retained help output identifies the frozen candidate (version/commit
+self-report plus usage and core flags), so an exit code with empty or wrong
+output cannot pass. Explicit cleanup removes the allocated download/test roots
 on success or failure; hosted-job teardown owns cancellation cleanup. There is no
 persistent preview or recurring idle runtime. Help output is **not service,
 journal, watchdog, quiescence, restart, or recovery proof**. All source packet
