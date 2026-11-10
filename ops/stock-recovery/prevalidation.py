@@ -88,17 +88,59 @@ def _checked_manifest_candidate(manifest):
     return candidate
 
 
+def _check_secret_key(key, label):
+    if not isinstance(key, str) or not key or len(key) > 128:
+        raise PrevalidationError(label + " key is malformed")
+    lowered = key.lower()
+    if any(part in lowered for part in SECRET_SUBSTRINGS):
+        raise PrevalidationError(label + " must not carry secrets")
+
+
+def _checked_manifest_files(manifest):
+    files = manifest.get("files")
+    if not isinstance(files, dict) or not files or len(files) > 64:
+        raise PrevalidationError("packet source inputs are missing")
+    for name, expected in files.items():
+        # File names are fixed packet identities (e.g. retained/authcount
+        # legitimately contains a secret-shaped substring); only the
+        # digest shape is enforced here.
+        if not isinstance(name, str) or not name:
+            raise PrevalidationError("packet source input key is malformed")
+        _require_digest(expected, "packet source digest for " + name)
+    return files
+
+
+def _checked_source_digests(files, bundle):
+    """Compare an optional observed source bundle against the packet by name.
+
+    Source/helper/runbook identities are frozen in the packet, so any
+    observed digest supplied under source_digests must match exactly.
+    Absence leaves the named gate unresolved rather than defaulting.
+    """
+    if "source_digests" not in bundle:
+        return
+    supplied = bundle["source_digests"]
+    if not isinstance(supplied, dict) or not supplied or len(supplied) > 64:
+        raise PrevalidationError("observed source digests must be a non-empty object")
+    for name, expected in supplied.items():
+        # Unknown names fail closed — including secret-shaped names,
+        # which cannot be frozen packet files.
+        if not isinstance(name, str) or not name:
+            raise PrevalidationError("observed source digest key is malformed")
+        if name not in files:
+            raise PrevalidationError("observed source digest is not in the frozen packet: " + name)
+        _require_digest(expected, "observed source digest for " + name)
+        if expected != files[name]:
+            raise PrevalidationError("observed source digest does not match the frozen packet: " + name)
+
+
 def _checked_observed(observed):
     if not isinstance(observed, dict):
         raise PrevalidationError("observed identities must be an object")
     if len(observed) > 32:
         raise PrevalidationError("observed identities exceed key limit")
     for key, value in observed.items():
-        if not isinstance(key, str) or not key or len(key) > 128:
-            raise PrevalidationError("observed identity key is malformed")
-        lowered = key.lower()
-        if any(part in lowered for part in SECRET_SUBSTRINGS):
-            raise PrevalidationError("observed identities must not carry secrets")
+        _check_secret_key(key, "observed identity")
         if value is None or isinstance(value, (bool, int, float)):
             raise PrevalidationError("observed identity value is malformed")
     for required in REQUIRED_OBSERVED_KEYS:
@@ -109,6 +151,7 @@ def _checked_observed(observed):
 
 def prevalidate(manifest, observed):
     candidate = _checked_manifest_candidate(manifest)
+    files = _checked_manifest_files(manifest)
     bundle = _checked_observed(observed)
 
     if bundle["repository"] != candidate["repository"]:
@@ -133,10 +176,14 @@ def prevalidate(manifest, observed):
     if bundle["recovery_manifest_digest"] != candidate["manifest_digest"]:
         raise PrevalidationError("an alternative recovery target needs separate qualification")
 
+    # Frozen source/helper/runbook identities, where supplied, must match
+    # the packet by name; absence leaves the named gate unresolved.
+    _checked_source_digests(files, bundle)
+
     # Optional host-only identities are validated only where supplied;
     # absence leaves the named gate unresolved rather than defaulting.
     for key, value in bundle.items():
-        if key in REQUIRED_OBSERVED_KEYS:
+        if key in REQUIRED_OBSERVED_KEYS or key == "source_digests":
             continue
         if isinstance(value, str):
             _require_digest(value, "host-only identity " + key)

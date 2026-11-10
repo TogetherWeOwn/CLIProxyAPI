@@ -108,6 +108,56 @@ class PrevalidationTests(unittest.TestCase):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "repository"):
             prevalidation.prevalidate(self.manifest, observed)
 
+    def test_matching_source_digests_still_hold(self):
+        supplied = {
+            name: self.manifest["files"][name]
+            for name in ("packet.py", "attempt.py", "README.md")
+        }
+        observed = make_observed(self.manifest, source_digests=supplied)
+        result = prevalidation.prevalidate(self.manifest, observed)
+        self.assertTrue(result["identity_match"])
+        self.assertEqual(result["qualification"], "HOLD")
+        self.assertIn("compose_config", result["unresolved_bindings"])
+
+    def test_missing_source_digests_stays_a_gate_not_a_default(self):
+        result = prevalidation.prevalidate(self.manifest, self.observed)
+        self.assertIn("compose_config", result["unresolved_bindings"])
+        self.assertFalse(result["execution_authorized"])
+
+    def test_source_digest_mismatch_fails_closed(self):
+        supplied = {"packet.py": "sha256:" + "0" * 64}
+        observed = make_observed(self.manifest, source_digests=supplied)
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "does not match the frozen packet"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_source_digest_tag_fails_closed(self):
+        supplied = {"packet.py": "v8.0.60"}
+        observed = make_observed(self.manifest, source_digests=supplied)
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "source digest"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_source_digest_unknown_file_fails_closed(self):
+        supplied = {"not-a-packet-file.py": "sha256:" + "1" * 64}
+        observed = make_observed(self.manifest, source_digests=supplied)
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "not in the frozen packet"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_empty_source_digests_fails_closed(self):
+        observed = make_observed(self.manifest, source_digests={})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_non_object_source_digests_fails_closed(self):
+        observed = make_observed(self.manifest, source_digests=["packet.py"])
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_secret_shaped_source_digest_key_fails_closed(self):
+        supplied = {"provider_token.txt": "sha256:" + "1" * 64}
+        observed = make_observed(self.manifest, source_digests=supplied)
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "not in the frozen packet"):
+            prevalidation.prevalidate(self.manifest, observed)
+
     def test_missing_required_identity_fails_closed(self):
         observed = dict(self.observed)
         del observed["config_digest"]
