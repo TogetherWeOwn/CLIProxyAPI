@@ -43,6 +43,8 @@ jobs:
         run: python3 -I ops/stock-recovery/test_stdout_evidence.py -v
       - name: Test source-report controls, not runtime recovery
         run: python3 -I ops/stock-recovery/test_source_report.py -v
+      - name: Test identity-prevalidation controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_prevalidation.py -v
       - name: Test for deprecated APIs, not runtime recovery
         run: python3 -I -W error::DeprecationWarning -m unittest discover -s ops/stock-recovery -v
       - name: Record source-only HOLD report

@@ -223,7 +223,16 @@ capture into `source-binding.json`, then the actions identity into
 two-line workflow shell, propagating child exit codes fail-fast so a
 failing packet never writes an identity; the child commands are mocked in
 tests, never executed; `test_source_report.py` covers it with positive
-and negative controls. The `Test for deprecated APIs` step re-runs the whole
+and negative controls. `prevalidation.py`
+(stdlib-only, offline) prevalidates wrapper-adaptation item 1 — it compares
+an observed identity bundle against the packet's frozen candidate by role
+(index, manifest, config, image ID, recovery target, platform, repository)
+and fails closed on mismatch, malformed or missing identities, on tag-as-identity,
+and on secret-shaped keys. Optional host-only identities are validated only
+where supplied; absence leaves the named gate unresolved rather than
+defaulting. A match is still BOUND/HOLD with execution not authorized, so it
+is an identity gate, not recovery proof; `test_prevalidation.py` covers it
+with positive and negative controls. The `Test for deprecated APIs` step re-runs the whole
 suite under `-W error::DeprecationWarning` so a version-gated API removal
 (host Python 3.12 tolerates what Actions Python 3.13 rejects) fails in
 Actions even if a local pre-push on an older interpreter missed it; pre-push
