@@ -33,6 +33,8 @@ jobs:
         run: python3 -I ops/stock-recovery/test_bootstrap_root.py -v
       - name: Test actions-identity controls, not runtime recovery
         run: python3 -I ops/stock-recovery/test_actions_identity.py -v
+      - name: Test disposable-cleanup controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_disposable_cleanup.py -v
       - name: Record source-only HOLD report
         run: |
           mkdir -p qualification-evidence
@@ -89,15 +91,7 @@ jobs:
           python3 -I ops/stock-recovery/actions_identity.py --mode bootstrap --output runtime-evidence/actions-identity.json
       - name: Remove disposable downloaded bytes and empty test root
         if: always()
-        run: |
-          for directory in "$ROOT" "$DOWNLOAD"; do
-            if [ -e "$directory" ]; then
-              test ! -L "$directory"
-              ls -ld -- "$directory"
-              rm -r -- "$directory"
-              test ! -e "$directory"
-            fi
-          done
+        run: python3 -I ops/stock-recovery/disposable_cleanup.py "$ROOT" "$DOWNLOAD"
       - name: Retain bootstrap evidence even on failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
