@@ -179,7 +179,12 @@ unprivileged UID/GID, new empty chroot (plus the frozen loader set above) and
 network/PID namespaces on a disposable hosted runner. No host credentials/state/
 config or provider is mounted, and no network interface is brought up. A missing
 namespace capability is a failing prerequisite, not a reason to run on the shared
-host or default daemon. `help_identity.py` (stdlib-only, offline) then fails
+host or default daemon. `bootstrap_root.py` (stdlib-only, offline) creates the
+root and installs the frozen binary/loader set with the merged-usr topology
+(`/lib64 -> usr/lib64`, `/lib -> usr/lib`, loader symlink), failing closed
+before creation on a missing, symlinked, non-regular or oversized source and
+never overwriting an existing root; `test_bootstrap_root.py` covers it with
+positive and negative controls. `help_identity.py` (stdlib-only, offline) then fails
 closed unless the retained help output identifies the frozen candidate
 (version/commit self-report plus usage and core flags), so an exit code with
 empty or wrong output cannot pass; `test_help_identity.py` covers it with
