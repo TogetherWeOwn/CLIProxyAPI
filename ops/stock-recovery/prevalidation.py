@@ -118,6 +118,17 @@ ROUTING_ROLES = (
     "force_model_prefix",
 )
 
+# Mirrors the management booleans in config.example.yaml under the
+# top-level management section (allow-remote,
+# disable-control-panel, disable-auto-update-panel). The section's
+# secret-key is a secret string, not a boolean policy identity, and
+# base-url / panel-github-repository are strings; none are named here.
+MANAGEMENT_ROLES = (
+    "allow_remote",
+    "disable_control_panel",
+    "disable_auto_update_panel",
+)
+
 
 class PrevalidationError(ValueError):
     """An observed identity cannot be prevalidated against the packet."""
@@ -283,6 +294,36 @@ def _checked_routing(bundle):
             raise PrevalidationError("observed routing value must be a boolean for " + role)
 
 
+def _checked_management(bundle):
+    """Check the claimed management policy, where supplied, by role.
+
+    The management policy is host-only and has no frozen packet value,
+    so it is bound by shape: a non-empty object naming exactly the three
+    management booleans mirrored from the top-level management section
+    in config.example.yaml (allow-remote, which admits non-localhost
+    management access, disable-control-panel, which skips serving and
+    syncing the bundled panel, and disable-auto-update-panel, which
+    disables periodic background panel updates), each with a boolean
+    value. The secret-key is a secret string, not a boolean policy
+    identity, and base-url / panel-github-repository are strings; none
+    are named here. A partial or role-swapped bundle conflates which
+    management behavior is claimed and fails closed; absence leaves the
+    named gate unresolved rather than defaulting. The values are bound,
+    not judged: whether they satisfy the unchanged-management matrix
+    row is a qualification decision, not an identity gate.
+    """
+    if "management" not in bundle:
+        return
+    supplied = bundle["management"]
+    if not isinstance(supplied, dict) or not supplied:
+        raise PrevalidationError("observed management must be a non-empty object")
+    if tuple(sorted(supplied)) != tuple(sorted(MANAGEMENT_ROLES)):
+        raise PrevalidationError("observed management must name exactly the management roles")
+    for role, value in supplied.items():
+        if not isinstance(value, bool):
+            raise PrevalidationError("observed management value must be a boolean for " + role)
+
+
 def _checked_disabled_providers(bundle):
     """Check the claimed disabled-provider set, where supplied, by shape.
 
@@ -334,7 +375,7 @@ def _checked_manifest_candidate(manifest):
 
 # Closed-schema protocol keys; each is validated by its own checker, so
 # the open-ended secret-substring screen does not apply to the key itself.
-NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store", "policy", "quota_cooling", "cooldown", "routing", "disabled_providers")
+NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store", "policy", "quota_cooling", "cooldown", "routing", "management", "disabled_providers")
 
 
 def _check_secret_key(key, label, named_bundle=False):
@@ -483,6 +524,11 @@ def prevalidate(manifest, observed):
     # three top-level routing booleans; absence leaves the gate
     # unresolved.
     _checked_routing(bundle)
+
+    # The claimed management policy, where supplied, must name exactly
+    # the three top-level management booleans; absence leaves the gate
+    # unresolved.
+    _checked_management(bundle)
 
     # The claimed disabled-provider set, where supplied, must name
     # secret-screened providers with boolean values; absence leaves

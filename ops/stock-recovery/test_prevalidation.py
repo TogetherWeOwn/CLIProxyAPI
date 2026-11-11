@@ -563,6 +563,74 @@ class PrevalidationTests(unittest.TestCase):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
             prevalidation.prevalidate(self.manifest, observed)
 
+    def test_matching_management_still_hold(self):
+        observed = make_observed(
+            self.manifest,
+            management={
+                "allow_remote": False,
+                "disable_control_panel": False,
+                "disable_auto_update_panel": False,
+            },
+        )
+        result = prevalidation.prevalidate(self.manifest, observed)
+        self.assertTrue(result["identity_match"])
+        self.assertEqual(result["qualification"], "HOLD")
+
+    def test_partial_management_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            management={"allow_remote": False},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the management roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_unknown_management_role_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            management={
+                "allow_remote": False,
+                "disable_control_panel": False,
+                "disable_auto_update_panel": False,
+                "quota_auto_reset": False,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the management roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_management_string_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            management={
+                "allow_remote": "on",
+                "disable_control_panel": False,
+                "disable_auto_update_panel": False,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_management_digest_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            management={
+                "allow_remote": "sha256:" + "5" * 64,
+                "disable_control_panel": False,
+                "disable_auto_update_panel": False,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_empty_management_fails_closed(self):
+        observed = make_observed(self.manifest, management={})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_non_object_management_fails_closed(self):
+        observed = make_observed(self.manifest, management=["allow_remote"])
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
     def test_matching_disabled_providers_still_hold(self):
         observed = make_observed(
             self.manifest,

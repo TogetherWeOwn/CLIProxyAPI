@@ -274,7 +274,15 @@ top-level `routing` section in `config.example.yaml`
 `force-model-prefix`) with boolean values; the section's strategy,
 session-affinity-ttl and session-affinity-rebind-on are strings, not
 boolean policy identities — a partial or role-swapped bundle conflates
-which routing behavior is claimed and fails closed. Optional
+which routing behavior is claimed and fails closed. An optional
+`management` bundle, where supplied, must name exactly the three
+management booleans under the top-level `management` section in
+`config.example.yaml` (`allow-remote`, `disable-control-panel`,
+`disable-auto-update-panel`) with boolean values; the section's
+secret-key is a secret string, not a boolean policy identity, and
+base-url / panel-github-repository are strings — a partial or
+role-swapped bundle conflates which management behavior is claimed and
+fails closed. Optional
 host-only identities are validated only
 where supplied; absence leaves the named gate unresolved rather than
 defaulting. A match is still BOUND/HOLD with execution not authorized, so it
