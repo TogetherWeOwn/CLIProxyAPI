@@ -292,7 +292,15 @@ min-bytes and discovery service-name/type/subtypes/interfaces are
 strings, lists, paths or ints, and `discovery.advertise-management` is
 deprecated and ignored — none are named here — a partial or
 role-swapped bundle conflates which server behavior is claimed and
-fails closed. Optional
+fails closed. An optional `client` bundle, where supplied, must name
+exactly the four client booleans under the top-level `client` section
+in `config.example.yaml` (`codex.enable-apply-patch`,
+`codex.optimize-multi-agent-v2`, `codex.web-search-result-cache.
+enabled`, `claude.show-codex-commentary`, confirmed in
+`internal/config/sdk_config.go`) with boolean values; the
+web-search-result-cache ttl and limit are a duration string and an
+int, none named here — a partial or role-swapped bundle conflates
+which client behavior is claimed and fails closed. Optional
 host-only identities are validated only
 where supplied; absence leaves the named gate unresolved rather than
 defaulting. A match is still BOUND/HOLD with execution not authorized, so it
