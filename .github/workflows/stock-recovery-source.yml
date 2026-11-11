@@ -1,0 +1,98 @@
+name: stock-recovery-source
+
+on:
+  pull_request:
+    paths:
+      - 'ops/stock-recovery/**'
+      - '.github/workflows/stock-recovery-source.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  source-packet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Test offline source binding, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_packet.py -v
+      - name: Test synthetic response validators, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_service_evidence.py -v
+      - name: Test wrapper ownership and attempt records, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_attempt.py -v
+      - name: Test frozen-runtime archive controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_runtime_artifact.py -v
+      - name: Test help-identity controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_help_identity.py -v
+      - name: Test bootstrap-root controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_bootstrap_root.py -v
+      - name: Test actions-identity controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_actions_identity.py -v
+      - name: Test disposable-cleanup controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_disposable_cleanup.py -v
+      - name: Test disposable-location controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_disposable_locations.py -v
+      - name: Test bootstrap-smoke controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_bootstrap_smoke.py -v
+      - name: Test stdout-evidence controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_stdout_evidence.py -v
+      - name: Test source-report controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_source_report.py -v
+      - name: Test identity-prevalidation controls, not runtime recovery
+        run: python3 -I ops/stock-recovery/test_prevalidation.py -v
+      - name: Test for deprecated APIs, not runtime recovery
+        run: python3 -I -W error::DeprecationWarning -m unittest discover -s ops/stock-recovery -v
+      - name: Record source-only HOLD report
+        run: python3 -I ops/stock-recovery/source_report.py
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      - name: Retain source checkpoint evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stock-recovery-source-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          path: qualification-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  runtime-bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Set disposable download and test-root locations
+        run: python3 -I ops/stock-recovery/disposable_locations.py
+      - name: Materialize the frozen OCI runtime without executing archive content
+        run: python3 -I ops/stock-recovery/stdout_evidence.py --dir runtime-evidence --output artifact.json -- python3 -I ops/stock-recovery/runtime_artifact.py ops/stock-recovery/manifest.json "$DOWNLOAD"
+      - name: Prepare the disposable root with the frozen loader set
+        run: python3 -I ops/stock-recovery/stdout_evidence.py --dir runtime-evidence --output root.json -- python3 -I ops/stock-recovery/bootstrap_root.py "$DOWNLOAD/runtime" "$ROOT"
+      - name: Smoke-test help in an unprivileged empty root and network namespace
+        run: python3 -I ops/stock-recovery/bootstrap_smoke.py "$ROOT" runtime-evidence/help.log
+      - name: Verify help output identifies the frozen candidate
+        run: python3 -I ops/stock-recovery/help_identity.py runtime-evidence/help.log
+      - name: Record bootstrap identity, never functional acceptance
+        if: always()
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          JOB_STATUS: ${{ job.status }}
+        run: python3 -I ops/stock-recovery/actions_identity.py --mode bootstrap --output runtime-evidence/actions-identity.json
+      - name: Remove disposable downloaded bytes and empty test root
+        if: always()
+        run: python3 -I ops/stock-recovery/disposable_cleanup.py "$ROOT" "$DOWNLOAD"
+      - name: Retain bootstrap evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runtime-bootstrap-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          path: runtime-evidence/
+          if-no-files-found: error
+          retention-days: 14
