@@ -1,0 +1,122 @@
+# Review risk tiers for TogetherWeOwn/CLIProxyAPI.
+#
+# Classification: a PR's tier is the highest tier of any changed file.
+# Sensitive always wins on overlap. Any path not matched by any glob
+# below is sensitive (see default_tier). This file itself is sensitive.
+#
+# Content triggers escalate any PR to sensitive regardless of path:
+# new or changed public endpoint or input parsing; auth, authz or
+# session handling; crypto or keys; secrets or credentials; permission
+# checks; tenant isolation or personal data; SQL, schema or migrations;
+# dependency or lockfile changes; CI or workflow changes; weakened test
+# assertions, deleted tests or snapshots, or lowered gates in test files.
+#
+# Review routing per tier: low -> QA; ordinary -> QA;
+# sensitive or unclassified -> Security, then QA.
+# QA verifies the author's risk_tier attestation in the PR body and may
+# escalate any PR to sensitive. When in doubt, leave a path unlisted
+# (it defaults to sensitive). This map is intentionally small: only
+# paths verified against the actual repo layout are listed, and only
+# modules with no untrusted input, sensitive output, permissions,
+# persistence, or trust-boundary effect are admitted to ordinary.
+# Every new top-level path stays sensitive until classified here.
+version: 1
+default_tier: sensitive # anything not matched below
+tiers:
+  low:
+    # Allowlisted docs copy.
+    - "README.md"
+    - "README_CN.md"
+    - "README_JA.md"
+    - "docs/**"
+    - "LICENSE"
+    # Static non-sensitive fixtures (images and logos only).
+    - "assets/**"
+    # Additive unit and integration tests only. Content triggers still
+    # apply: deleting tests, weakening assertions, or lowering gates
+    # escalates to sensitive. Tests under sensitive paths stay
+    # sensitive because sensitive wins on overlap.
+    - "**/*_test.go"
+    - "test/**"
+  ordinary:
+    # Audited modules only, justified in the PR body: compile-time
+    # metadata only, no untrusted input, sensitive output, permissions,
+    # persistence, or trust-boundary effect.
+    - "internal/buildinfo/**"
+    - "internal/constant/**"
+  sensitive:
+    # This risk map and ownership routing.
+    - ".github/review-tiers.yml"
+    - "CODEOWNERS"
+    - ".github/CODEOWNERS"
+    # CI, workflows, and the scripts they run.
+    - ".github/workflows/**"
+    - ".github/scripts/**"
+    # Dependency manifests, lockfiles, and install or build scripts
+    # (including dev dependencies).
+    - "go.mod"
+    - "go.sum"
+    - "Dockerfile"
+    - "docker-build.sh"
+    - "docker-build.ps1"
+    # Runtime, network, and IAM-adjacent config; infra and deploy paths.
+    - "config.example.yaml"
+    - ".env.example"
+    - ".env.cluster.example"
+    - ".env*"
+    - "docker-compose.yml"
+    - "docker-compose.cluster.yml"
+    - ".dockerignore"
+    # Agent and tool-permission files.
+    - "AGENTS.md"
+    - "CLAUDE.md"
+    - ".claude/**"
+    # Auth, sessions, credentials, and local auth material.
+    - "internal/auth/**"
+    - "internal/access/**"
+    - "internal/credentialweight/**"
+    - "internal/safemode/**"
+    - "internal/misc/**"
+    - "auths/**"
+    - "sdk/auth/**"
+    - "sdk/access/**"
+    # Public endpoints, input parsing, and wire protocols.
+    - "internal/api/**"
+    - "internal/httpwire/**"
+    - "internal/httpfetch/**"
+    - "internal/wsrelay/**"
+    - "internal/redisqueue/**"
+    - "internal/client/**"
+    - "internal/htmlsanitize/**"
+    - "internal/signature/**"
+    - "internal/cache/**"
+    # Config, persistence, and tenant or personal data surfaces.
+    - "internal/config/**"
+    - "internal/store/**"
+    - "internal/usage/**"
+    - "internal/discovery/**"
+    - "**/migrations/**"
+    - "**/*.sql"
+    # Plugin and control-plane trust boundaries (code loading, dispatch).
+    - "internal/pluginhost/**"
+    - "internal/pluginstore/**"
+    - "internal/home/**"
+    - "internal/homeplugins/**"
+    - "internal/managementasset/**"
+    - "internal/watcher/**"
+    - "sdk/pluginhost/**"
+    - "sdk/pluginstore/**"
+    - "sdk/pluginabi/**"
+    - "sdk/pluginapi/**"
+    # Provider runtime executors and protocol translation.
+    - "internal/runtime/**"
+    - "internal/translator/**"
+    - "internal/thinking/**"
+    - "internal/registry/**"
+    - "internal/browser/**"
+    # Entrypoints and the embeddable SDK surface.
+    - "cmd/**"
+    - "internal/cmd/**"
+    - "sdk/**"
+    # Terminal UI (credential and OAuth flows, config editing).
+    - "internal/tui/**"
