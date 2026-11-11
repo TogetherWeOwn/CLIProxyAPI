@@ -66,6 +66,16 @@ SUPPORTED_PROVIDER_CHANNELS = (
     "meta",
 )
 
+# Mirrors AuthSourceFile/Git/ObjectStore/Postgres in
+# sdk/cliproxy/auth/classification.go; "config" is an auth source, not a
+# credential-store backend, so it cannot name the authoritative store.
+SUPPORTED_STORE_BACKENDS = (
+    "file",
+    "git",
+    "objectstore",
+    "postgres",
+)
+
 
 class PrevalidationError(ValueError):
     """An observed identity cannot be prevalidated against the packet."""
@@ -102,6 +112,31 @@ def _checked_compose_config(bundle):
         _require_digest(expected, "observed compose/config digest for " + role)
 
 
+def _checked_authoritative_store(bundle):
+    """Check which storage backend is claimed authoritative, where supplied.
+
+    The authoritative store is host-only and has no frozen packet value,
+    so it is bound by shape: a non-empty object naming exactly one
+    supported store backend with a digest value identifying its canonical
+    scope. Naming two backends (e.g. a file-store mirror beside Postgres)
+    conflates which store wins and fails closed; absence leaves the named
+    gate unresolved rather than defaulting.
+    """
+    if "authoritative_store" not in bundle:
+        return
+    supplied = bundle["authoritative_store"]
+    if not isinstance(supplied, dict) or not supplied:
+        raise PrevalidationError("observed authoritative store must be a non-empty object")
+    if len(supplied) != 1:
+        raise PrevalidationError("observed authoritative store must name exactly one backend")
+    for name, expected in supplied.items():
+        if not isinstance(name, str) or not name:
+            raise PrevalidationError("observed authoritative store key is malformed")
+        if name not in SUPPORTED_STORE_BACKENDS:
+            raise PrevalidationError("observed authoritative store is not a supported backend: " + name)
+        _require_digest(expected, "observed authoritative store digest for " + name)
+
+
 def _checked_manifest_candidate(manifest):
     if not isinstance(manifest, dict) or manifest.get("schema") != "stock-recovery-source/v1":
         raise PrevalidationError("unsupported source packet schema")
@@ -127,9 +162,16 @@ def _checked_manifest_candidate(manifest):
     return candidate
 
 
-def _check_secret_key(key, label):
+# Closed-schema protocol keys; each is validated by its own checker, so
+# the open-ended secret-substring screen does not apply to the key itself.
+NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store")
+
+
+def _check_secret_key(key, label, named_bundle=False):
     if not isinstance(key, str) or not key or len(key) > 128:
         raise PrevalidationError(label + " key is malformed")
+    if named_bundle:
+        return
     lowered = key.lower()
     if any(part in lowered for part in SECRET_SUBSTRINGS):
         raise PrevalidationError(label + " must not carry secrets")
@@ -201,7 +243,7 @@ def _checked_observed(observed):
     if len(observed) > 32:
         raise PrevalidationError("observed identities exceed key limit")
     for key, value in observed.items():
-        _check_secret_key(key, "observed identity")
+        _check_secret_key(key, "observed identity", named_bundle=key in NAMED_BUNDLE_KEYS)
         if value is None or isinstance(value, (bool, int, float)):
             raise PrevalidationError("observed identity value is malformed")
     for required in REQUIRED_OBSERVED_KEYS:
@@ -249,10 +291,14 @@ def prevalidate(manifest, observed):
     # roles with digest values; absence leaves the gate unresolved.
     _checked_compose_config(bundle)
 
+    # The claimed authoritative store, where supplied, must name exactly
+    # one supported backend; absence leaves the gate unresolved.
+    _checked_authoritative_store(bundle)
+
     # Optional host-only identities are validated only where supplied;
     # absence leaves the named gate unresolved rather than defaulting.
     for key, value in bundle.items():
-        if key in REQUIRED_OBSERVED_KEYS or key in ("source_digests", "provider_artifacts", "compose_config"):
+        if key in REQUIRED_OBSERVED_KEYS or key in NAMED_BUNDLE_KEYS:
             continue
         if isinstance(value, str):
             _require_digest(value, "host-only identity " + key)

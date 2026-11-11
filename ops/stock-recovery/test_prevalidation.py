@@ -60,6 +60,7 @@ class PrevalidationTests(unittest.TestCase):
         result = prevalidation.prevalidate(self.manifest, self.observed)
         self.assertIn("compose_config", result["unresolved_bindings"])
         self.assertIn("provider_artifacts", result["unresolved_bindings"])
+        self.assertIn("authoritative_store", result["unresolved_bindings"])
         self.assertIn("host_platform", result["unresolved_bindings"])
 
     def test_index_digest_mismatch_fails_closed(self):
@@ -263,6 +264,56 @@ class PrevalidationTests(unittest.TestCase):
 
     def test_empty_compose_config_fails_closed(self):
         observed = make_observed(self.manifest, compose_config={})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_matching_authoritative_store_still_hold(self):
+        observed = make_observed(
+            self.manifest,
+            authoritative_store={"postgres": "sha256:" + "5" * 64},
+        )
+        result = prevalidation.prevalidate(self.manifest, observed)
+        self.assertTrue(result["identity_match"])
+        self.assertEqual(result["qualification"], "HOLD")
+        self.assertIn("authoritative_store", result["unresolved_bindings"])
+
+    def test_two_authoritative_stores_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            authoritative_store={
+                "file": "sha256:" + "5" * 64,
+                "postgres": "sha256:" + "6" * 64,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly one backend"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_unknown_authoritative_store_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            authoritative_store={"memory": "sha256:" + "5" * 64},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "not a supported backend"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_config_as_authoritative_store_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            authoritative_store={"config": "sha256:" + "5" * 64},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "not a supported backend"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_authoritative_store_tag_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            authoritative_store={"file": "latest"},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "authoritative store digest"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_empty_authoritative_store_fails_closed(self):
+        observed = make_observed(self.manifest, authoritative_store={})
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
             prevalidation.prevalidate(self.manifest, observed)
 

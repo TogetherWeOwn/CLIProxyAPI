@@ -239,7 +239,11 @@ where supplied, must name only the supported configuration channels
 digest values; unknown or secret-shaped channels fail closed. An optional
 `compose_config` bundle, where supplied, must name exactly the Compose-file
 and rendered-config roles with digest values; a partial bundle conflates
-roles and fails closed. Optional
+roles and fails closed. An optional `authoritative_store` bundle, where
+supplied, must name exactly one supported store backend (file, git,
+objectstore, postgres — mirroring the auth source kinds) with a digest
+value identifying its canonical scope; naming two backends conflates which
+store wins and fails closed. Optional
 host-only identities are validated only
 where supplied; absence leaves the named gate unresolved rather than
 defaulting. A match is still BOUND/HOLD with execution not authorized, so it
