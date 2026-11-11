@@ -300,7 +300,18 @@ enabled`, `claude.show-codex-commentary`, confirmed in
 `internal/config/sdk_config.go`) with boolean values; the
 web-search-result-cache ttl and limit are a duration string and an
 int, none named here — a partial or role-swapped bundle conflates
-which client behavior is claimed and fails closed. Optional
+which client behavior is claimed and fails closed. An optional
+`observability` bundle, where supplied, must name exactly the five
+observability booleans under the top-level `observability` section
+in `config.example.yaml` (`logs.debug`, `logs.logging-to-file`,
+`logs.request-log`, `usage.usage-statistics-enabled`,
+`pprof.enable`, confirmed in `internal/config/config.go` and
+`internal/config/sdk_config.go`) with boolean values; the
+logs-max-total-size-mb and error-logs-max-files are ints, the
+redis-usage-queue-retention-seconds is an int, and pprof.addr is a
+host:port string — none are named here — a partial or role-swapped
+bundle conflates which observability behavior is claimed and fails
+closed. Optional
 host-only identities are validated only
 where supplied; absence leaves the named gate unresolved rather than
 defaulting. A match is still BOUND/HOLD with execution not authorized, so it

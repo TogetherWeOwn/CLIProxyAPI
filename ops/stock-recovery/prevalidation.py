@@ -158,6 +158,21 @@ CLIENT_ROLES = (
     "claude_show_codex_commentary",
 )
 
+# Mirrors the observability booleans in config.example.yaml under the
+# top-level observability section (logs.debug, logs.logging-to-file,
+# logs.request-log, usage.usage-statistics-enabled and pprof.enable,
+# confirmed in internal/config/config.go and sdk_config.go). The
+# logs-max-total-size-mb and error-logs-max-files are ints, the
+# redis-usage-queue-retention-seconds is an int, and pprof.addr is a
+# host:port string; none are named here.
+OBSERVABILITY_ROLES = (
+    "logs_debug",
+    "logs_logging_to_file",
+    "logs_request_log",
+    "usage_usage_statistics_enabled",
+    "pprof_enable",
+)
+
 
 class PrevalidationError(ValueError):
     """An observed identity cannot be prevalidated against the packet."""
@@ -419,6 +434,39 @@ def _checked_client(bundle):
             raise PrevalidationError("observed client value must be a boolean for " + role)
 
 
+def _checked_observability(bundle):
+    """Check the claimed observability policy, where supplied, by role.
+
+    The observability policy is host-only and has no frozen packet value,
+    so it is bound by shape: a non-empty object naming exactly the five
+    observability booleans mirrored from config.example.yaml under the
+    top-level observability section (logs.debug, which enables debug
+    logging, logs.logging-to-file, which writes application logs to
+    rotating files instead of stdout, logs.request-log, which records
+    proxy request/response logs, usage.usage-statistics-enabled, which
+    enables in-memory usage statistics aggregation, and pprof.enable,
+    which enables the pprof HTTP debug server), each with a boolean
+    value. The logs-max-total-size-mb and error-logs-max-files are ints,
+    the redis-usage-queue-retention-seconds is an int, and pprof.addr
+    is a host:port string; none are named here. A partial or
+    role-swapped bundle conflates which observability behavior is
+    claimed and fails closed; absence leaves the named gate unresolved
+    rather than defaulting. The values are bound, not judged: whether
+    they satisfy the unchanged-observability matrix row is a
+    qualification decision, not an identity gate.
+    """
+    if "observability" not in bundle:
+        return
+    supplied = bundle["observability"]
+    if not isinstance(supplied, dict) or not supplied:
+        raise PrevalidationError("observed observability must be a non-empty object")
+    if tuple(sorted(supplied)) != tuple(sorted(OBSERVABILITY_ROLES)):
+        raise PrevalidationError("observed observability must name exactly the observability roles")
+    for role, value in supplied.items():
+        if not isinstance(value, bool):
+            raise PrevalidationError("observed observability value must be a boolean for " + role)
+
+
 def _checked_disabled_providers(bundle):
     """Check the claimed disabled-provider set, where supplied, by shape.
 
@@ -470,7 +518,7 @@ def _checked_manifest_candidate(manifest):
 
 # Closed-schema protocol keys; each is validated by its own checker, so
 # the open-ended secret-substring screen does not apply to the key itself.
-NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store", "policy", "quota_cooling", "cooldown", "routing", "management", "server", "client", "disabled_providers")
+NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store", "policy", "quota_cooling", "cooldown", "routing", "management", "server", "client", "observability", "disabled_providers")
 
 
 def _check_secret_key(key, label, named_bundle=False):
@@ -634,6 +682,11 @@ def prevalidate(manifest, observed):
     # four top-level client booleans; absence leaves the gate
     # unresolved.
     _checked_client(bundle)
+
+    # The claimed observability policy, where supplied, must name
+    # exactly the five top-level observability booleans; absence
+    # leaves the gate unresolved.
+    _checked_observability(bundle)
 
     # The claimed disabled-provider set, where supplied, must name
     # secret-screened providers with boolean values; absence leaves

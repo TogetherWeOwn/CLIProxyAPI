@@ -779,6 +779,82 @@ class PrevalidationTests(unittest.TestCase):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
             prevalidation.prevalidate(self.manifest, observed)
 
+    def test_matching_observability_still_hold(self):
+        observed = make_observed(
+            self.manifest,
+            observability={
+                "logs_debug": False,
+                "logs_logging_to_file": False,
+                "logs_request_log": False,
+                "usage_usage_statistics_enabled": False,
+                "pprof_enable": False,
+            },
+        )
+        result = prevalidation.prevalidate(self.manifest, observed)
+        self.assertTrue(result["identity_match"])
+        self.assertEqual(result["qualification"], "HOLD")
+
+    def test_partial_observability_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            observability={"logs_debug": False},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the observability roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_unknown_observability_role_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            observability={
+                "logs_debug": False,
+                "logs_logging_to_file": False,
+                "logs_request_log": False,
+                "usage_usage_statistics_enabled": False,
+                "pprof_enable": False,
+                "quota_auto_reset": False,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the observability roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_observability_string_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            observability={
+                "logs_debug": "on",
+                "logs_logging_to_file": False,
+                "logs_request_log": False,
+                "usage_usage_statistics_enabled": False,
+                "pprof_enable": False,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_observability_digest_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            observability={
+                "logs_debug": "sha256:" + "5" * 64,
+                "logs_logging_to_file": False,
+                "logs_request_log": False,
+                "usage_usage_statistics_enabled": False,
+                "pprof_enable": False,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_empty_observability_fails_closed(self):
+        observed = make_observed(self.manifest, observability={})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_non_object_observability_fails_closed(self):
+        observed = make_observed(self.manifest, observability=["logs_debug"])
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
     def test_matching_disabled_providers_still_hold(self):
         observed = make_observed(
             self.manifest,
