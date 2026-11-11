@@ -28,27 +28,32 @@ tiers:
     - "README.md"
     - "README_CN.md"
     - "README_JA.md"
-    - "docs/**"
+    - "docs/**/*.md"
     - "LICENSE"
     # Static non-sensitive fixtures (images and logos only).
-    - "assets/**"
+    - "assets/**/*.png"
+    - "assets/**/*.svg"
+    - "assets/**/*.jpg"
+    - "assets/**/*.jpeg"
+    - "assets/**/*.gif"
+    - "assets/**/*.ico"
+    - "assets/**/*.webp"
     # Additive unit and integration tests only. Content triggers still
     # apply: deleting tests, weakening assertions, or lowering gates
     # escalates to sensitive. Tests under sensitive paths stay
     # sensitive because sensitive wins on overlap.
     - "**/*_test.go"
-    - "test/**"
+    - "test/**/*_test.go"
   ordinary:
     # Audited modules only, justified in the PR body: compile-time
     # metadata only, no untrusted input, sensitive output, permissions,
     # persistence, or trust-boundary effect.
     - "internal/buildinfo/**"
-    - "internal/constant/**"
   sensitive:
-    # This risk map and ownership routing.
+    # This risk map and ownership routing. GitHub loads CODEOWNERS
+    # from root, .github/, or docs/, so match CODEOWNERS anywhere.
     - ".github/review-tiers.yml"
-    - "CODEOWNERS"
-    - ".github/CODEOWNERS"
+    - "**/CODEOWNERS"
     # CI, workflows, and the scripts they run.
     - ".github/workflows/**"
     - ".github/scripts/**"
@@ -68,9 +73,10 @@ tiers:
     - "docker-compose.cluster.yml"
     - ".dockerignore"
     # Agent and tool-permission files.
-    - "AGENTS.md"
-    - "CLAUDE.md"
+    - "**/AGENTS.md"
+    - "**/CLAUDE.md"
     - ".claude/**"
+    - "**/.claude/**"
     # Auth, sessions, credentials, and local auth material.
     - "internal/auth/**"
     - "internal/access/**"
