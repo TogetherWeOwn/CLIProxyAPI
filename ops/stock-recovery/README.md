@@ -243,7 +243,12 @@ roles and fails closed. An optional `authoritative_store` bundle, where
 supplied, must name exactly one supported store backend (file, git,
 objectstore, postgres — mirroring the auth source kinds) with a digest
 value identifying its canonical scope; naming two backends conflates which
-store wins and fails closed. Optional
+store wins and fails closed. An optional `policy` bundle, where supplied,
+must name exactly the three cloak booleans mirrored from
+`config.example.yaml` (`disable_codex_cloaking`,
+`disable_claude_cloak_mode`, `disable_cloaking_model_list`) with boolean
+values; a partial or role-swapped bundle conflates which provider's
+cloaking is claimed and fails closed. Optional
 host-only identities are validated only
 where supplied; absence leaves the named gate unresolved rather than
 defaulting. A match is still BOUND/HOLD with execution not authorized, so it

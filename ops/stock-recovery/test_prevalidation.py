@@ -317,6 +317,74 @@ class PrevalidationTests(unittest.TestCase):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
             prevalidation.prevalidate(self.manifest, observed)
 
+    def test_matching_policy_still_hold(self):
+        observed = make_observed(
+            self.manifest,
+            policy={
+                "disable_codex_cloaking": True,
+                "disable_claude_cloak_mode": False,
+                "disable_cloaking_model_list": True,
+            },
+        )
+        result = prevalidation.prevalidate(self.manifest, observed)
+        self.assertTrue(result["identity_match"])
+        self.assertEqual(result["qualification"], "HOLD")
+
+    def test_partial_policy_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            policy={"disable_codex_cloaking": True},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the cloak policy roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_unknown_policy_role_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            policy={
+                "disable_codex_cloaking": True,
+                "disable_claude_cloak_mode": False,
+                "disable_cloaking_model_list": True,
+                "quota_auto_reset": False,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the cloak policy roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_policy_string_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            policy={
+                "disable_codex_cloaking": "off",
+                "disable_claude_cloak_mode": False,
+                "disable_cloaking_model_list": True,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_policy_digest_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            policy={
+                "disable_codex_cloaking": "sha256:" + "5" * 64,
+                "disable_claude_cloak_mode": False,
+                "disable_cloaking_model_list": True,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_empty_policy_fails_closed(self):
+        observed = make_observed(self.manifest, policy={})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_non_object_policy_fails_closed(self):
+        observed = make_observed(self.manifest, policy=["disable_codex_cloaking"])
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
     def test_non_object_observed_fails_closed(self):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be an object"):
             prevalidation.prevalidate(self.manifest, ["not", "an", "object"])

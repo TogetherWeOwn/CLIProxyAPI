@@ -76,6 +76,16 @@ SUPPORTED_STORE_BACKENDS = (
     "postgres",
 )
 
+# Mirrors the cloak booleans in config.example.yaml
+# (disable-codex-cloaking, disable-claude-cloak-mode,
+# disable-cloaking-model-list); the qualification matrix requires the
+# disabled-provider/cloak/quota policy to be unchanged.
+POLICY_ROLES = (
+    "disable_codex_cloaking",
+    "disable_claude_cloak_mode",
+    "disable_cloaking_model_list",
+)
+
 
 class PrevalidationError(ValueError):
     """An observed identity cannot be prevalidated against the packet."""
@@ -137,6 +147,30 @@ def _checked_authoritative_store(bundle):
         _require_digest(expected, "observed authoritative store digest for " + name)
 
 
+def _checked_policy(bundle):
+    """Check the claimed cloak policy, where supplied, against the roles.
+
+    The cloak policy is host-only and has no frozen packet value, so it
+    is bound by shape: a non-empty object naming exactly the three cloak
+    booleans mirrored from config.example.yaml, each with a boolean
+    value. A partial or role-swapped bundle conflates which provider's
+    cloaking is claimed and fails closed; absence leaves the named gate
+    unresolved rather than defaulting. The values are bound, not judged:
+    whether they satisfy the unchanged-cloak matrix row is a
+    qualification decision, not an identity gate.
+    """
+    if "policy" not in bundle:
+        return
+    supplied = bundle["policy"]
+    if not isinstance(supplied, dict) or not supplied:
+        raise PrevalidationError("observed policy must be a non-empty object")
+    if tuple(sorted(supplied)) != tuple(sorted(POLICY_ROLES)):
+        raise PrevalidationError("observed policy must name exactly the cloak policy roles")
+    for role, value in supplied.items():
+        if not isinstance(value, bool):
+            raise PrevalidationError("observed policy value must be a boolean for " + role)
+
+
 def _checked_manifest_candidate(manifest):
     if not isinstance(manifest, dict) or manifest.get("schema") != "stock-recovery-source/v1":
         raise PrevalidationError("unsupported source packet schema")
@@ -164,7 +198,7 @@ def _checked_manifest_candidate(manifest):
 
 # Closed-schema protocol keys; each is validated by its own checker, so
 # the open-ended secret-substring screen does not apply to the key itself.
-NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store")
+NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store", "policy")
 
 
 def _check_secret_key(key, label, named_bundle=False):
@@ -294,6 +328,10 @@ def prevalidate(manifest, observed):
     # The claimed authoritative store, where supplied, must name exactly
     # one supported backend; absence leaves the gate unresolved.
     _checked_authoritative_store(bundle)
+
+    # The claimed cloak policy, where supplied, must name exactly the
+    # three cloak booleans; absence leaves the gate unresolved.
+    _checked_policy(bundle)
 
     # Optional host-only identities are validated only where supplied;
     # absence leaves the named gate unresolved rather than defaulting.
