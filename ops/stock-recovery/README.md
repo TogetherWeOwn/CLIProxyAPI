@@ -332,7 +332,15 @@ section's model-level-cooling, disable-claude-cloak-mode and
 disable-cloaking-model-list are already bound by the quota_cooling
 and policy bundles, and session-date-pin-days is an int — none are
 named here — a partial or role-swapped bundle conflates which
-upstream claude behavior is claimed and fails closed. Optional
+upstream claude behavior is claimed and fails closed. An optional
+`plugins` bundle, where supplied, must name exactly the plugins
+boolean under the top-level `plugins` section in
+`config.example.yaml` (`enabled`, confirmed in
+`internal/config/config_types.go`) with a boolean value; the
+section's dir is a string, store-sources / store-auth are lists,
+auth-revision is an int and configs is an open per-plugin map —
+none are named here — a partial or role-swapped bundle conflates
+which plugins behavior is claimed and fails closed. Optional
 host-only identities are validated only
 where supplied; absence leaves the named gate unresolved rather than
 defaulting. A match is still BOUND/HOLD with execution not authorized, so it

@@ -982,6 +982,57 @@ class PrevalidationTests(unittest.TestCase):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
             prevalidation.prevalidate(self.manifest, observed)
 
+    def test_matching_plugins_still_hold(self):
+        observed = make_observed(
+            self.manifest,
+            plugins={"enabled": True},
+        )
+        result = prevalidation.prevalidate(self.manifest, observed)
+        self.assertTrue(result["identity_match"])
+        self.assertEqual(result["qualification"], "HOLD")
+
+    def test_role_swapped_plugins_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            plugins={"quota_auto_reset": False},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the plugins roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_unknown_plugins_role_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            plugins={"enabled": False, "quota_auto_reset": False},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the plugins roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_plugins_string_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            plugins={"enabled": "on"},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_plugins_digest_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            plugins={"enabled": "sha256:" + "5" * 64},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_empty_plugins_fails_closed(self):
+        observed = make_observed(self.manifest, plugins={})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_non_object_plugins_fails_closed(self):
+        observed = make_observed(self.manifest, plugins=["enabled"])
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
     def test_matching_disabled_providers_still_hold(self):
         observed = make_observed(
             self.manifest,

@@ -201,6 +201,15 @@ UPSTREAM_CLAUDE_ROLES = (
     "tool_search",
 )
 
+# Mirrors the plugins boolean in config.example.yaml under the
+# top-level plugins section (enabled, confirmed in
+# internal/config/config_types.go). The section's dir is a string,
+# store-sources / store-auth are lists, auth-revision is an int and
+# configs is an open per-plugin map; none are named here.
+PLUGINS_ROLES = (
+    "enabled",
+)
+
 
 class PrevalidationError(ValueError):
     """An observed identity cannot be prevalidated against the packet."""
@@ -563,6 +572,34 @@ def _checked_upstream_claude(bundle):
             raise PrevalidationError("observed upstream claude value must be a boolean for " + role)
 
 
+def _checked_plugins(bundle):
+    """Check the claimed plugins policy, where supplied, by role.
+
+    The plugins policy is host-only and has no frozen packet value, so
+    it is bound by shape: a non-empty object naming exactly the
+    plugins boolean mirrored from config.example.yaml under the
+    top-level plugins section (enabled, which toggles dynamic plugin
+    loading), with a boolean value. The section's dir is a string,
+    store-sources / store-auth are lists, auth-revision is an int and
+    configs is an open per-plugin map; none are named here. A partial
+    or role-swapped bundle conflates which plugins behavior is
+    claimed and fails closed; absence leaves the named gate
+    unresolved rather than defaulting. The values are bound, not
+    judged: whether they satisfy the unchanged-plugins matrix row is
+    a qualification decision, not an identity gate.
+    """
+    if "plugins" not in bundle:
+        return
+    supplied = bundle["plugins"]
+    if not isinstance(supplied, dict) or not supplied:
+        raise PrevalidationError("observed plugins must be a non-empty object")
+    if tuple(sorted(supplied)) != tuple(sorted(PLUGINS_ROLES)):
+        raise PrevalidationError("observed plugins must name exactly the plugins roles")
+    for role, value in supplied.items():
+        if not isinstance(value, bool):
+            raise PrevalidationError("observed plugins value must be a boolean for " + role)
+
+
 def _checked_disabled_providers(bundle):
     """Check the claimed disabled-provider set, where supplied, by shape.
 
@@ -614,7 +651,7 @@ def _checked_manifest_candidate(manifest):
 
 # Closed-schema protocol keys; each is validated by its own checker, so
 # the open-ended secret-substring screen does not apply to the key itself.
-NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store", "policy", "quota_cooling", "cooldown", "routing", "management", "server", "client", "observability", "upstream_codex", "upstream_claude", "disabled_providers")
+NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store", "policy", "quota_cooling", "cooldown", "routing", "management", "server", "client", "observability", "upstream_codex", "upstream_claude", "plugins", "disabled_providers")
 
 
 def _check_secret_key(key, label, named_bundle=False):
@@ -793,6 +830,11 @@ def prevalidate(manifest, observed):
     # exactly the top-level upstream.claude tool-search boolean;
     # absence leaves the gate unresolved.
     _checked_upstream_claude(bundle)
+
+    # The claimed plugins policy, where supplied, must name exactly
+    # the top-level plugins enabled boolean; absence leaves the gate
+    # unresolved.
+    _checked_plugins(bundle)
 
     # The claimed disabled-provider set, where supplied, must name
     # secret-screened providers with boolean values; absence leaves
