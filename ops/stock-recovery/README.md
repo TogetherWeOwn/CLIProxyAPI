@@ -259,7 +259,15 @@ quota cooling is claimed and fails closed. An optional
 provider names with boolean values (the openai-compatibility
 `disabled` flag is per-provider with config-defined names, so there is
 no closed key list to mirror); string/digest values and secret-shaped
-or malformed names fail closed. Optional
+or malformed names fail closed. An optional `cooldown` bundle, where
+supplied, must name exactly the two global-cooldown booleans under
+`routing.cooldown` in `config.example.yaml` (`disable-cooling`,
+`save-cooldown-status`) with boolean values; per-auth and per-provider
+`disable-cooling` overrides are open names like `disabled_providers`,
+so this bundle covers only the global section, and the section's
+transient-error cooldown duration is not a boolean policy identity —
+a partial or role-swapped bundle conflates which cooldown behavior is
+claimed and fails closed. Optional
 host-only identities are validated only
 where supplied; absence leaves the named gate unresolved rather than
 defaulting. A match is still BOUND/HOLD with execution not authorized, so it

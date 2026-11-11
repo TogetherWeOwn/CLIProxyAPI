@@ -95,6 +95,18 @@ QUOTA_COOLING_ROLES = (
     "claude_model_level_cooling",
 )
 
+# Mirrors the global cooldown booleans under routing.cooldown in
+# config.example.yaml (disable-cooling, save-cooldown-status). Per-auth
+# and per-provider disable-cooling overrides are provider/credential-keyed
+# open names like disabled_providers, so this bundle covers only the
+# global section, whose boolean keys form a closed list. The section's
+# transient-error-cooldown-seconds is a duration, not a boolean policy
+# identity, and is not named here.
+COOLDOWN_ROLES = (
+    "disable_cooling",
+    "save_cooldown_status",
+)
+
 
 class PrevalidationError(ValueError):
     """An observed identity cannot be prevalidated against the packet."""
@@ -205,6 +217,33 @@ def _checked_quota_cooling(bundle):
             raise PrevalidationError("observed quota cooling value must be a boolean for " + role)
 
 
+def _checked_cooldown(bundle):
+    """Check the claimed global cooldown policy, where supplied, by role.
+
+    The global cooldown policy is host-only and has no frozen packet
+    value, so it is bound by shape: a non-empty object naming exactly the
+    two cooldown booleans mirrored from routing.cooldown in
+    config.example.yaml (disable-cooling, which controls cooldown
+    scheduling globally, and save-cooldown-status, which persists
+    per-auth cooldown status), each with a boolean value. A partial or
+    role-swapped bundle conflates which cooldown behavior is claimed and
+    fails closed; absence leaves the named gate unresolved rather than
+    defaulting. The values are bound, not judged: whether they satisfy
+    the unchanged-cooldown matrix row is a qualification decision, not
+    an identity gate.
+    """
+    if "cooldown" not in bundle:
+        return
+    supplied = bundle["cooldown"]
+    if not isinstance(supplied, dict) or not supplied:
+        raise PrevalidationError("observed cooldown must be a non-empty object")
+    if tuple(sorted(supplied)) != tuple(sorted(COOLDOWN_ROLES)):
+        raise PrevalidationError("observed cooldown must name exactly the cooldown roles")
+    for role, value in supplied.items():
+        if not isinstance(value, bool):
+            raise PrevalidationError("observed cooldown value must be a boolean for " + role)
+
+
 def _checked_disabled_providers(bundle):
     """Check the claimed disabled-provider set, where supplied, by shape.
 
@@ -256,7 +295,7 @@ def _checked_manifest_candidate(manifest):
 
 # Closed-schema protocol keys; each is validated by its own checker, so
 # the open-ended secret-substring screen does not apply to the key itself.
-NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store", "policy", "quota_cooling", "disabled_providers")
+NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store", "policy", "quota_cooling", "cooldown", "disabled_providers")
 
 
 def _check_secret_key(key, label, named_bundle=False):
@@ -395,6 +434,11 @@ def prevalidate(manifest, observed):
     # exactly the two quota-cooling booleans; absence leaves the
     # gate unresolved.
     _checked_quota_cooling(bundle)
+
+    # The claimed global cooldown policy, where supplied, must name
+    # exactly the two routing.cooldown booleans; absence leaves the
+    # gate unresolved.
+    _checked_cooldown(bundle)
 
     # The claimed disabled-provider set, where supplied, must name
     # secret-screened providers with boolean values; absence leaves

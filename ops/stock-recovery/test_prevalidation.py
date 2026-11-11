@@ -440,6 +440,61 @@ class PrevalidationTests(unittest.TestCase):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
             prevalidation.prevalidate(self.manifest, observed)
 
+    def test_matching_cooldown_still_hold(self):
+        observed = make_observed(
+            self.manifest,
+            cooldown={"disable_cooling": False, "save_cooldown_status": False},
+        )
+        result = prevalidation.prevalidate(self.manifest, observed)
+        self.assertTrue(result["identity_match"])
+        self.assertEqual(result["qualification"], "HOLD")
+
+    def test_partial_cooldown_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            cooldown={"disable_cooling": True},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the cooldown roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_unknown_cooldown_role_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            cooldown={
+                "disable_cooling": False,
+                "save_cooldown_status": False,
+                "quota_auto_reset": False,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the cooldown roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_cooldown_string_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            cooldown={"disable_cooling": "off", "save_cooldown_status": False},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_cooldown_digest_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            cooldown={"disable_cooling": "sha256:" + "5" * 64, "save_cooldown_status": False},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_empty_cooldown_fails_closed(self):
+        observed = make_observed(self.manifest, cooldown={})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_non_object_cooldown_fails_closed(self):
+        observed = make_observed(self.manifest, cooldown=["disable_cooling"])
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
     def test_matching_disabled_providers_still_hold(self):
         observed = make_observed(
             self.manifest,
