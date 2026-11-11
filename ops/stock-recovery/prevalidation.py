@@ -173,6 +173,23 @@ OBSERVABILITY_ROLES = (
     "pprof_enable",
 )
 
+# Mirrors the upstream codex booleans in config.example.yaml under the
+# top-level upstream.codex section (response-steering,
+# upstream-request-compression, websocket-compression,
+# stream-bootstrap-buffering and orphan-delegation-compatibility,
+# confirmed in internal/config/config_types.go). The section's
+# upstream-request-compression-min-bytes is an int and
+# stream-bootstrap-timeout is a duration string; disable-codex-cloaking
+# and model-level-cooling are already bound by the policy and
+# quota_cooling bundles, so none are named here.
+UPSTREAM_CODEX_ROLES = (
+    "response_steering",
+    "upstream_request_compression",
+    "websocket_compression",
+    "stream_bootstrap_buffering",
+    "orphan_delegation_compatibility",
+)
+
 
 class PrevalidationError(ValueError):
     """An observed identity cannot be prevalidated against the packet."""
@@ -467,6 +484,43 @@ def _checked_observability(bundle):
             raise PrevalidationError("observed observability value must be a boolean for " + role)
 
 
+def _checked_upstream_codex(bundle):
+    """Check the claimed upstream codex policy, where supplied, by role.
+
+    The upstream codex policy is host-only and has no frozen packet
+    value, so it is bound by shape: a non-empty object naming exactly
+    the five upstream codex booleans mirrored from config.example.yaml
+    under the top-level upstream.codex section (response-steering,
+    which enables full-duplex Codex Responses WebSocket steering,
+    upstream-request-compression, which compresses Codex request
+    bodies with zstd, websocket-compression, which enables
+    permessage-deflate on Codex WebSocket connections,
+    stream-bootstrap-buffering, which holds back pre-generation frames
+    until the first generated event, and orphan-delegation-
+    compatibility, which converts orphan Codex delegation outputs into
+    standard user messages), each with a boolean value. The section's
+    upstream-request-compression-min-bytes is an int and
+    stream-bootstrap-timeout is a duration string; disable-codex-
+    cloaking and model-level-cooling are already bound by the policy
+    and quota_cooling bundles. None are named here. A partial or
+    role-swapped bundle conflates which upstream codex behavior is
+    claimed and fails closed; absence leaves the named gate unresolved
+    rather than defaulting. The values are bound, not judged: whether
+    they satisfy the unchanged-upstream-codex matrix row is a
+    qualification decision, not an identity gate.
+    """
+    if "upstream_codex" not in bundle:
+        return
+    supplied = bundle["upstream_codex"]
+    if not isinstance(supplied, dict) or not supplied:
+        raise PrevalidationError("observed upstream codex must be a non-empty object")
+    if tuple(sorted(supplied)) != tuple(sorted(UPSTREAM_CODEX_ROLES)):
+        raise PrevalidationError("observed upstream codex must name exactly the upstream codex roles")
+    for role, value in supplied.items():
+        if not isinstance(value, bool):
+            raise PrevalidationError("observed upstream codex value must be a boolean for " + role)
+
+
 def _checked_disabled_providers(bundle):
     """Check the claimed disabled-provider set, where supplied, by shape.
 
@@ -518,7 +572,7 @@ def _checked_manifest_candidate(manifest):
 
 # Closed-schema protocol keys; each is validated by its own checker, so
 # the open-ended secret-substring screen does not apply to the key itself.
-NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store", "policy", "quota_cooling", "cooldown", "routing", "management", "server", "client", "observability", "disabled_providers")
+NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store", "policy", "quota_cooling", "cooldown", "routing", "management", "server", "client", "observability", "upstream_codex", "disabled_providers")
 
 
 def _check_secret_key(key, label, named_bundle=False):
@@ -687,6 +741,11 @@ def prevalidate(manifest, observed):
     # exactly the five top-level observability booleans; absence
     # leaves the gate unresolved.
     _checked_observability(bundle)
+
+    # The claimed upstream codex policy, where supplied, must name
+    # exactly the five top-level upstream.codex booleans; absence
+    # leaves the gate unresolved.
+    _checked_upstream_codex(bundle)
 
     # The claimed disabled-provider set, where supplied, must name
     # secret-screened providers with boolean values; absence leaves

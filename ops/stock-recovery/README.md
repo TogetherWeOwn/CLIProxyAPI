@@ -311,7 +311,19 @@ logs-max-total-size-mb and error-logs-max-files are ints, the
 redis-usage-queue-retention-seconds is an int, and pprof.addr is a
 host:port string — none are named here — a partial or role-swapped
 bundle conflates which observability behavior is claimed and fails
-closed. Optional
+closed. An optional `upstream_codex` bundle, where supplied, must
+name exactly the five upstream codex booleans under the top-level
+`upstream.codex` section in `config.example.yaml`
+(`response-steering`, `upstream-request-compression`,
+`websocket-compression`, `stream-bootstrap-buffering`,
+`orphan-delegation-compatibility`, confirmed in
+`internal/config/config_types.go`) with boolean values; the section's
+upstream-request-compression-min-bytes is an int and
+stream-bootstrap-timeout is a duration string, and
+disable-codex-cloaking / model-level-cooling are already bound by the
+policy and quota_cooling bundles — none are named here — a partial or
+role-swapped bundle conflates which upstream codex behavior is
+claimed and fails closed. Optional
 host-only identities are validated only
 where supplied; absence leaves the named gate unresolved rather than
 defaulting. A match is still BOUND/HOLD with execution not authorized, so it

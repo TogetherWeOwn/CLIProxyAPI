@@ -855,6 +855,82 @@ class PrevalidationTests(unittest.TestCase):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
             prevalidation.prevalidate(self.manifest, observed)
 
+    def test_matching_upstream_codex_still_hold(self):
+        observed = make_observed(
+            self.manifest,
+            upstream_codex={
+                "response_steering": False,
+                "upstream_request_compression": False,
+                "websocket_compression": True,
+                "stream_bootstrap_buffering": False,
+                "orphan_delegation_compatibility": False,
+            },
+        )
+        result = prevalidation.prevalidate(self.manifest, observed)
+        self.assertTrue(result["identity_match"])
+        self.assertEqual(result["qualification"], "HOLD")
+
+    def test_partial_upstream_codex_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            upstream_codex={"response_steering": False},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the upstream codex roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_unknown_upstream_codex_role_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            upstream_codex={
+                "response_steering": False,
+                "upstream_request_compression": False,
+                "websocket_compression": True,
+                "stream_bootstrap_buffering": False,
+                "orphan_delegation_compatibility": False,
+                "quota_auto_reset": False,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the upstream codex roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_upstream_codex_string_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            upstream_codex={
+                "response_steering": "on",
+                "upstream_request_compression": False,
+                "websocket_compression": True,
+                "stream_bootstrap_buffering": False,
+                "orphan_delegation_compatibility": False,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_upstream_codex_digest_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            upstream_codex={
+                "response_steering": "sha256:" + "5" * 64,
+                "upstream_request_compression": False,
+                "websocket_compression": True,
+                "stream_bootstrap_buffering": False,
+                "orphan_delegation_compatibility": False,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_empty_upstream_codex_fails_closed(self):
+        observed = make_observed(self.manifest, upstream_codex={})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_non_object_upstream_codex_fails_closed(self):
+        observed = make_observed(self.manifest, upstream_codex=["response_steering"])
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
     def test_matching_disabled_providers_still_hold(self):
         observed = make_observed(
             self.manifest,
