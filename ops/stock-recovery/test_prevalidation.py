@@ -385,6 +385,61 @@ class PrevalidationTests(unittest.TestCase):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
             prevalidation.prevalidate(self.manifest, observed)
 
+    def test_matching_quota_cooling_still_hold(self):
+        observed = make_observed(
+            self.manifest,
+            quota_cooling={"codex_model_level_cooling": True, "claude_model_level_cooling": False},
+        )
+        result = prevalidation.prevalidate(self.manifest, observed)
+        self.assertTrue(result["identity_match"])
+        self.assertEqual(result["qualification"], "HOLD")
+
+    def test_partial_quota_cooling_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            quota_cooling={"codex_model_level_cooling": True},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the quota cooling roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_unknown_quota_cooling_role_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            quota_cooling={
+                "codex_model_level_cooling": True,
+                "claude_model_level_cooling": False,
+                "quota_auto_reset": False,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the quota cooling roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_quota_cooling_string_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            quota_cooling={"codex_model_level_cooling": "off", "claude_model_level_cooling": False},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_quota_cooling_digest_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            quota_cooling={"codex_model_level_cooling": "sha256:" + "5" * 64, "claude_model_level_cooling": False},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_empty_quota_cooling_fails_closed(self):
+        observed = make_observed(self.manifest, quota_cooling={})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_non_object_quota_cooling_fails_closed(self):
+        observed = make_observed(self.manifest, quota_cooling=["codex_model_level_cooling"])
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
     def test_matching_disabled_providers_still_hold(self):
         observed = make_observed(
             self.manifest,

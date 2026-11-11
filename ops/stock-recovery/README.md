@@ -248,7 +248,13 @@ must name exactly the three cloak booleans mirrored from
 `config.example.yaml` (`disable_codex_cloaking`,
 `disable_claude_cloak_mode`, `disable_cloaking_model_list`) with boolean
 values; a partial or role-swapped bundle conflates which provider's
-cloaking is claimed and fails closed. An optional
+cloaking is claimed and fails closed. An optional `quota_cooling`
+bundle, where supplied, must name exactly the two quota-cooling
+booleans mirrored from `config.example.yaml` (codex
+`model-level-cooling` and claude `model-level-cooling`, role-named
+with the provider prefix the config sections provide) with boolean
+values; a partial or role-swapped bundle conflates which provider's
+quota cooling is claimed and fails closed. An optional
 `disabled_providers` bundle, where supplied, must name secret-screened
 provider names with boolean values (the openai-compatibility
 `disabled` flag is per-provider with config-defined names, so there is
