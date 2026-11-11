@@ -32,6 +32,27 @@ class PacketError(ValueError):
     """The source packet is inconsistent, not merely unqualified."""
 
 
+def refusal_report(*, possibly_submitted, observation_available, service_unavailable):
+    """Classify a refusal; this source-only contract cannot admit any writes.
+
+    Inputs represent observations supplied by a caller, not verified runtime facts.
+    This function provides no independent reporting channel or execution authority.
+    """
+    if any(type(value) is not bool for value in
+           (possibly_submitted, observation_available, service_unavailable)):
+        raise PacketError("refusal observations must be booleans")
+    if service_unavailable and observation_available:
+        outcome = "FUNCTIONAL_FAIL"
+    elif not observation_available:
+        outcome = "UNKNOWN"
+    elif possibly_submitted:
+        outcome = "RECOVERY_NOT_PROVEN"
+    else:
+        outcome = "ABORT_UNCHANGED"
+    return {"outcome": outcome, "recovery_write_admitted": False,
+            "execution_authorized": False, "recovery_success": False}
+
+
 def checked_file(root, name):
     if not isinstance(name, str) or not name:
         raise PacketError("invalid packet path")
@@ -104,6 +125,8 @@ def verify(packet, root):
         "qualification": "HOLD",
         "service_recovery": "NOT_TESTED",
         "execution_authorized": False,
+        "recovery_write_admitted": False,
+        "recovery_success": False,
         "unresolved_bindings": list(REQUIRED_BINDINGS),
     }
 

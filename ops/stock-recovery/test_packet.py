@@ -36,6 +36,31 @@ class SourcePacketTests(unittest.TestCase):
         self.assertIs(result["execution_authorized"], False)
         self.assertEqual(result["unresolved_bindings"], list(packet.REQUIRED_BINDINGS))
 
+    def test_refusal_never_admits_recovery_writes(self):
+        result = packet.refusal_report(possibly_submitted=True, observation_available=True,
+                                       service_unavailable=False)
+        self.assertEqual(result["outcome"], "RECOVERY_NOT_PROVEN")
+        self.assertIs(result["recovery_write_admitted"], False)
+        self.assertIs(result["recovery_success"], False)
+        self.assertIs(result["execution_authorized"], False)
+
+    def test_refusal_classifies_observation_loss_and_service_failure(self):
+        for submitted, observable, unavailable, expected in (
+            (False, True, False, "ABORT_UNCHANGED"),
+            (True, False, False, "UNKNOWN"),
+            (True, False, True, "UNKNOWN"),
+            (True, True, True, "FUNCTIONAL_FAIL"),
+        ):
+            with self.subTest(expected=expected, observable=observable):
+                result = packet.refusal_report(possibly_submitted=submitted, observation_available=observable,
+                                               service_unavailable=unavailable)
+                self.assertEqual(result["outcome"], expected)
+                self.assertFalse(result["recovery_write_admitted"])
+                self.assertFalse(result["recovery_success"])
+        with self.assertRaises(packet.PacketError):
+            packet.refusal_report(possibly_submitted=None, observation_available=True,
+                                  service_unavailable=False)
+
     def test_index_digest_is_not_a_docker_image_id(self):
         self.manifest["candidate"]["docker_image_id"] = self.manifest["candidate"]["index_digest"]
         with self.assertRaisesRegex(packet.PacketError, "config digest"):

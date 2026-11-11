@@ -1,10 +1,27 @@
-# Stock journal-aware recovery source packet
+# Stock recovery source binding and refusal packet
 
-**PARTIAL / HOLD — source binding only. Not an installer, recovery approval, or
-permission to execute the retained scripts.** No runnable replacement wrapper is
-provided in this checkpoint. The legacy wrapper is retained only as inert review
-material. Adaptation and functional qualification remain mandatory before this
-packet can progress beyond draft.
+**SOURCE ONLY / HOLD — not an installer, recovery approval, or permission to
+execute the retained scripts.** No runnable replacement wrapper is provided. The
+legacy wrapper is unsafe to execute and is retained only as inert review material.
+This source packet cannot satisfy the operational automatic-recovery requirement.
+
+The evidenced stock contract cannot prove that a possibly accepted lifecycle
+request is terminal after its response is lost. A dead client, an empty local
+containment and elapsed time do not prove daemon or remote-store quiescence.
+Before mutation, missing proof requires aborting unchanged; after possible submission,
+no automatic recovery writes or retries are permitted. Latest credentials, KV and
+the complete journal must be established as one authoritative current state unit by
+backend-specific evidence; configuration identities are not that proof.
+
+`packet.refusal_report` is an offline classification contract, not an observer or
+independent reporting channel. It never admits lifecycle execution or recovery writes
+and never reports recovery success. With an available observation it classifies a
+possibly submitted operation as `RECOVERY_NOT_PROVEN`, or an unavailable service as
+`FUNCTIONAL_FAIL`; unavailable observation or persistence is `UNKNOWN`. Before
+submission it reports `ABORT_UNCHANGED`. These outcomes do not assert actual host
+state, durable publication or functional recovery. Negative controls for delayed
+daemon effects, incomplete request coverage, identity changes and incomplete
+state authority remain required before source handback.
 
 ## Lineage and limitations
 
@@ -373,10 +390,10 @@ Those one-shot diagnostic jobs are concluded and no longer run on every source
 change. The normal full Go CI remains unchanged and required on every new head;
 no SDK/core fix, test skip, continue-on-error or acceptance waiver is included.
 
-## Required wrapper adaptation — orchestration NOT IMPLEMENTED
+## Unresolved operational gates — orchestration NOT IMPLEMENTED
 
-Continue within this single detached, self-testing wrapper lineage, not a second
-installer, scheduler, daemon, journal, or state authority:
+The following are requirements for any separately authorized future operational
+work, not instructions to continue orchestration in this source-only packet:
 
 1. Prevalidate all source/helper/runbook/parameter, OCI, Compose/config, six provider
    artifact and policy identities without secrets. Unknown host-only values are
