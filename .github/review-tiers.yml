@@ -3,6 +3,9 @@
 # Classification: a PR's tier is the highest tier of any changed file.
 # Sensitive always wins on overlap. Any path not matched by any glob
 # below is sensitive (see default_tier). This file itself is sensitive.
+# The classifier must evaluate these globs with minimatch dot: true,
+# so that ** traverses dot-directories and dotfiles match (e.g.
+# **/.claude/** and **/.env*).
 #
 # Content triggers escalate any PR to sensitive regardless of path:
 # new or changed public endpoint or input parsing; auth, authz or
@@ -38,11 +41,11 @@ tiers:
     - "assets/**/*.gif"
     - "assets/**/*.ico"
     - "assets/**/*.webp"
-    # Additive unit and integration tests only. Content triggers still
-    # apply: deleting tests, weakening assertions, or lowering gates
-    # escalates to sensitive. Tests under sensitive paths stay
-    # sensitive because sensitive wins on overlap.
-    - "**/*_test.go"
+    # Additive tests under test/ only. Content triggers still apply:
+    # deleting tests, weakening assertions, or lowering gates escalates
+    # to sensitive. Tests anywhere else take their directory's tier
+    # (sensitive by default, ordinary under internal/buildinfo/**), so
+    # a test file cannot escape the sensitive default of its directory.
     - "test/**/*_test.go"
   ordinary:
     # Audited modules only, justified in the PR body: compile-time
@@ -68,7 +71,7 @@ tiers:
     - "config.example.yaml"
     - ".env.example"
     - ".env.cluster.example"
-    - ".env*"
+    - "**/.env*"
     - "docker-compose.yml"
     - "docker-compose.cluster.yml"
     - ".dockerignore"
