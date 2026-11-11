@@ -171,6 +171,30 @@ def _checked_policy(bundle):
             raise PrevalidationError("observed policy value must be a boolean for " + role)
 
 
+def _checked_disabled_providers(bundle):
+    """Check the claimed disabled-provider set, where supplied, by shape.
+
+    The openai-compatibility `disabled` flag (config.example.yaml,
+    config_types.go Disabled) is per-provider and provider names are
+    config-defined, so unlike the channel set there is no closed key
+    list to mirror. The set is bound by shape only: a non-empty object
+    naming secret-screened provider names, each with a boolean value
+    (true claims that provider is disabled). Absence leaves the named
+    gate unresolved rather than defaulting. The values are bound, not
+    judged: whether the disabled set satisfies the unchanged-disabled
+    matrix row is a qualification decision, not an identity gate.
+    """
+    if "disabled_providers" not in bundle:
+        return
+    supplied = bundle["disabled_providers"]
+    if not isinstance(supplied, dict) or not supplied or len(supplied) > 64:
+        raise PrevalidationError("observed disabled providers must be a non-empty object")
+    for name, value in supplied.items():
+        _check_secret_key(name, "observed disabled provider")
+        if not isinstance(value, bool):
+            raise PrevalidationError("observed disabled provider must be a boolean for " + name)
+
+
 def _checked_manifest_candidate(manifest):
     if not isinstance(manifest, dict) or manifest.get("schema") != "stock-recovery-source/v1":
         raise PrevalidationError("unsupported source packet schema")
@@ -198,7 +222,7 @@ def _checked_manifest_candidate(manifest):
 
 # Closed-schema protocol keys; each is validated by its own checker, so
 # the open-ended secret-substring screen does not apply to the key itself.
-NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store", "policy")
+NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store", "policy", "disabled_providers")
 
 
 def _check_secret_key(key, label, named_bundle=False):
@@ -332,6 +356,11 @@ def prevalidate(manifest, observed):
     # The claimed cloak policy, where supplied, must name exactly the
     # three cloak booleans; absence leaves the gate unresolved.
     _checked_policy(bundle)
+
+    # The claimed disabled-provider set, where supplied, must name
+    # secret-screened providers with boolean values; absence leaves
+    # the gate unresolved.
+    _checked_disabled_providers(bundle)
 
     # Optional host-only identities are validated only where supplied;
     # absence leaves the named gate unresolved rather than defaulting.

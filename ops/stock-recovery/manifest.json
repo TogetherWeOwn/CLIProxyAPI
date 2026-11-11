@@ -19,7 +19,7 @@
     "recovery_manifest_digest": "sha256:8472aae0903a964412b8e73dd11d95d7a9932d8645789f77e8e162daa401474a"
   },
   "files": {
-    "README.md": "sha256:cbea1a6881d7d054f833d9ed4ecbab7862c3c93507ebceacaeec1817ed0d841e",
+    "README.md": "sha256:8a9ec39536ac3844bbfc08cf825b73622b35aba94402ead86f443ac73ae677ed",
     "runtime_artifact.py": "sha256:8e2f70c1d3779f3a3ca8448184202a246c30c9fda663d0f7eb709f91d6c15c9f",
     "test_runtime_artifact.py": "sha256:884e98321b584f668fefb5f8b4f315a472cb93ad59fa37807e7bea63e5516787",
     "attempt.py": "sha256:12eac031dd28ad7a6e295e8791b5486c500133e5380a374981a4d8e6ad609a17",
@@ -51,8 +51,8 @@
     "test_stdout_evidence.py": "sha256:3ec3aab951d95a8c197aa85e38ca3b38565872caa5e8f6cf291883db1649ac8c",
     "source_report.py": "sha256:6c002db0e3f3a3aeca94303628b994f962ccb65869ba926a12f327395fe302c7",
     "test_source_report.py": "sha256:7b47f76fe07ccbf7d0bc39b5c4be42445954da63050bd7b626565128a6014eb3",
-    "prevalidation.py": "sha256:b9b10c7cbf3ee778437e40aad58283deaa47b6d923f0215d136df531a6500f6c",
-    "test_prevalidation.py": "sha256:e0e020ba39cec0e630befd0e4adfaf6b3fd418e511ae57605e34bd7c56f31e7a"
+    "prevalidation.py": "sha256:a83c15e3836e70399f207c2e9aab2a143fa4165c39eeff97c83938f7c96e459a",
+    "test_prevalidation.py": "sha256:3f729fd644bb22c3b2ae26a59abc014a1a8858e826d6ef463c9fc2f691ff54a7"
   },
   "unresolved_bindings": [
     "binary_source_attestation",

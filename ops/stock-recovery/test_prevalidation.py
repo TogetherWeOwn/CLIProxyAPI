@@ -385,6 +385,45 @@ class PrevalidationTests(unittest.TestCase):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
             prevalidation.prevalidate(self.manifest, observed)
 
+    def test_matching_disabled_providers_still_hold(self):
+        observed = make_observed(
+            self.manifest,
+            disabled_providers={"openrouter": True, "custom-provider": False},
+        )
+        result = prevalidation.prevalidate(self.manifest, observed)
+        self.assertTrue(result["identity_match"])
+        self.assertEqual(result["qualification"], "HOLD")
+
+    def test_empty_disabled_providers_fails_closed(self):
+        observed = make_observed(self.manifest, disabled_providers={})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_non_object_disabled_providers_fails_closed(self):
+        observed = make_observed(self.manifest, disabled_providers=["openrouter"])
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_disabled_provider_string_value_fails_closed(self):
+        observed = make_observed(self.manifest, disabled_providers={"openrouter": "true"})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_disabled_provider_digest_value_fails_closed(self):
+        observed = make_observed(self.manifest, disabled_providers={"openrouter": "sha256:" + "5" * 64})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_secret_shaped_disabled_provider_fails_closed(self):
+        observed = make_observed(self.manifest, disabled_providers={"api_key_provider": True})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must not carry secrets"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_malformed_disabled_provider_name_fails_closed(self):
+        observed = make_observed(self.manifest, disabled_providers={1: True})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "key is malformed"):
+            prevalidation.prevalidate(self.manifest, observed)
+
     def test_non_object_observed_fails_closed(self):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be an object"):
             prevalidation.prevalidate(self.manifest, ["not", "an", "object"])

@@ -248,7 +248,12 @@ must name exactly the three cloak booleans mirrored from
 `config.example.yaml` (`disable_codex_cloaking`,
 `disable_claude_cloak_mode`, `disable_cloaking_model_list`) with boolean
 values; a partial or role-swapped bundle conflates which provider's
-cloaking is claimed and fails closed. Optional
+cloaking is claimed and fails closed. An optional
+`disabled_providers` bundle, where supplied, must name secret-screened
+provider names with boolean values (the openai-compatibility
+`disabled` flag is per-provider with config-defined names, so there is
+no closed key list to mirror); string/digest values and secret-shaped
+or malformed names fail closed. Optional
 host-only identities are validated only
 where supplied; absence leaves the named gate unresolved rather than
 defaulting. A match is still BOUND/HOLD with execution not authorized, so it
