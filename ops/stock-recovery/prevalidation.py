@@ -129,6 +129,22 @@ MANAGEMENT_ROLES = (
     "disable_auto_update_panel",
 )
 
+# Mirrors the server booleans in config.example.yaml under the top-level
+# server section (commercial-mode, tls.enable,
+# response-compression.enabled, discovery.enabled and
+# discovery.auth-required). The section's host, port, trusted-proxies,
+# github-token, tls cert/key, compression min-bytes and discovery
+# service-name/type/subtypes/interfaces are strings, lists, paths or
+# ints, none named here; discovery.advertise-management is deprecated
+# and ignored, so it is not a live policy identity either.
+SERVER_ROLES = (
+    "commercial_mode",
+    "tls_enable",
+    "response_compression_enabled",
+    "discovery_enabled",
+    "discovery_auth_required",
+)
+
 
 class PrevalidationError(ValueError):
     """An observed identity cannot be prevalidated against the packet."""
@@ -324,6 +340,40 @@ def _checked_management(bundle):
             raise PrevalidationError("observed management value must be a boolean for " + role)
 
 
+def _checked_server(bundle):
+    """Check the claimed server policy, where supplied, by role.
+
+    The server policy is host-only and has no frozen packet value, so it
+    is bound by shape: a non-empty object naming exactly the five server
+    booleans mirrored from config.example.yaml under the top-level
+    server section (commercial-mode, which trims request-logging
+    overhead, tls.enable, which serves HTTPS, response-compression.
+    enabled, which compresses downstream responses, discovery.enabled,
+    which advertises the gateway over mDNS/DNS-SD, and discovery.
+    auth-required, which requires credentials for advertised client
+    calls), each with a boolean value. The section's host, port,
+    trusted-proxies, github-token, tls cert/key, compression min-bytes
+    and discovery service-name/type/subtypes/interfaces are strings,
+    lists, paths or ints; discovery.advertise-management is deprecated
+    and ignored. None are named here. A partial or role-swapped bundle
+    conflates which server behavior is claimed and fails closed;
+    absence leaves the named gate unresolved rather than defaulting.
+    The values are bound, not judged: whether they satisfy the
+    unchanged-server matrix row is a qualification decision, not an
+    identity gate.
+    """
+    if "server" not in bundle:
+        return
+    supplied = bundle["server"]
+    if not isinstance(supplied, dict) or not supplied:
+        raise PrevalidationError("observed server must be a non-empty object")
+    if tuple(sorted(supplied)) != tuple(sorted(SERVER_ROLES)):
+        raise PrevalidationError("observed server must name exactly the server roles")
+    for role, value in supplied.items():
+        if not isinstance(value, bool):
+            raise PrevalidationError("observed server value must be a boolean for " + role)
+
+
 def _checked_disabled_providers(bundle):
     """Check the claimed disabled-provider set, where supplied, by shape.
 
@@ -375,7 +425,7 @@ def _checked_manifest_candidate(manifest):
 
 # Closed-schema protocol keys; each is validated by its own checker, so
 # the open-ended secret-substring screen does not apply to the key itself.
-NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store", "policy", "quota_cooling", "cooldown", "routing", "management", "disabled_providers")
+NAMED_BUNDLE_KEYS = ("source_digests", "provider_artifacts", "compose_config", "authoritative_store", "policy", "quota_cooling", "cooldown", "routing", "management", "server", "disabled_providers")
 
 
 def _check_secret_key(key, label, named_bundle=False):
@@ -529,6 +579,11 @@ def prevalidate(manifest, observed):
     # the three top-level management booleans; absence leaves the gate
     # unresolved.
     _checked_management(bundle)
+
+    # The claimed server policy, where supplied, must name exactly the
+    # five top-level server booleans; absence leaves the gate
+    # unresolved.
+    _checked_server(bundle)
 
     # The claimed disabled-provider set, where supplied, must name
     # secret-screened providers with boolean values; absence leaves

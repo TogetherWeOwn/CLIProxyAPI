@@ -282,6 +282,16 @@ management booleans under the top-level `management` section in
 secret-key is a secret string, not a boolean policy identity, and
 base-url / panel-github-repository are strings — a partial or
 role-swapped bundle conflates which management behavior is claimed and
+fails closed. An optional `server` bundle, where supplied, must name
+exactly the five server booleans under the top-level `server` section
+in `config.example.yaml` (`commercial-mode`, `tls.enable`,
+`response-compression.enabled`, `discovery.enabled`,
+`discovery.auth-required`) with boolean values; the section's host,
+port, trusted-proxies, github-token, tls cert/key, compression
+min-bytes and discovery service-name/type/subtypes/interfaces are
+strings, lists, paths or ints, and `discovery.advertise-management` is
+deprecated and ignored — none are named here — a partial or
+role-swapped bundle conflates which server behavior is claimed and
 fails closed. Optional
 host-only identities are validated only
 where supplied; absence leaves the named gate unresolved rather than

@@ -631,6 +631,82 @@ class PrevalidationTests(unittest.TestCase):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
             prevalidation.prevalidate(self.manifest, observed)
 
+    def test_matching_server_still_hold(self):
+        observed = make_observed(
+            self.manifest,
+            server={
+                "commercial_mode": False,
+                "tls_enable": False,
+                "response_compression_enabled": True,
+                "discovery_enabled": False,
+                "discovery_auth_required": True,
+            },
+        )
+        result = prevalidation.prevalidate(self.manifest, observed)
+        self.assertTrue(result["identity_match"])
+        self.assertEqual(result["qualification"], "HOLD")
+
+    def test_partial_server_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            server={"commercial_mode": False},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the server roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_unknown_server_role_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            server={
+                "commercial_mode": False,
+                "tls_enable": False,
+                "response_compression_enabled": True,
+                "discovery_enabled": False,
+                "discovery_auth_required": True,
+                "quota_auto_reset": False,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the server roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_server_string_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            server={
+                "commercial_mode": "on",
+                "tls_enable": False,
+                "response_compression_enabled": True,
+                "discovery_enabled": False,
+                "discovery_auth_required": True,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_server_digest_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            server={
+                "commercial_mode": "sha256:" + "5" * 64,
+                "tls_enable": False,
+                "response_compression_enabled": True,
+                "discovery_enabled": False,
+                "discovery_auth_required": True,
+            },
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_empty_server_fails_closed(self):
+        observed = make_observed(self.manifest, server={})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_non_object_server_fails_closed(self):
+        observed = make_observed(self.manifest, server=["commercial_mode"])
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
     def test_matching_disabled_providers_still_hold(self):
         observed = make_observed(
             self.manifest,
