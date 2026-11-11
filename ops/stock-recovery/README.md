@@ -267,7 +267,14 @@ supplied, must name exactly the two global-cooldown booleans under
 so this bundle covers only the global section, and the section's
 transient-error cooldown duration is not a boolean policy identity —
 a partial or role-swapped bundle conflates which cooldown behavior is
-claimed and fails closed. Optional
+claimed and fails closed. An optional `routing` bundle, where
+supplied, must name exactly the three routing booleans under the
+top-level `routing` section in `config.example.yaml`
+(`session-affinity`, `session-affinity-subagents`,
+`force-model-prefix`) with boolean values; the section's strategy,
+session-affinity-ttl and session-affinity-rebind-on are strings, not
+boolean policy identities — a partial or role-swapped bundle conflates
+which routing behavior is claimed and fails closed. Optional
 host-only identities are validated only
 where supplied; absence leaves the named gate unresolved rather than
 defaulting. A match is still BOUND/HOLD with execution not authorized, so it
