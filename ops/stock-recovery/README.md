@@ -323,7 +323,16 @@ stream-bootstrap-timeout is a duration string, and
 disable-codex-cloaking / model-level-cooling are already bound by the
 policy and quota_cooling bundles — none are named here — a partial or
 role-swapped bundle conflates which upstream codex behavior is
-claimed and fails closed. Optional
+claimed and fails closed. An optional
+`upstream_claude` bundle, where supplied, must name exactly the
+upstream claude boolean under the top-level `upstream.claude`
+section in `config.example.yaml` (`tool-search`, confirmed in
+`internal/config/config_types.go`) with a boolean value; the
+section's model-level-cooling, disable-claude-cloak-mode and
+disable-cloaking-model-list are already bound by the quota_cooling
+and policy bundles, and session-date-pin-days is an int — none are
+named here — a partial or role-swapped bundle conflates which
+upstream claude behavior is claimed and fails closed. Optional
 host-only identities are validated only
 where supplied; absence leaves the named gate unresolved rather than
 defaulting. A match is still BOUND/HOLD with execution not authorized, so it

@@ -931,6 +931,57 @@ class PrevalidationTests(unittest.TestCase):
         with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
             prevalidation.prevalidate(self.manifest, observed)
 
+    def test_matching_upstream_claude_still_hold(self):
+        observed = make_observed(
+            self.manifest,
+            upstream_claude={"tool_search": True},
+        )
+        result = prevalidation.prevalidate(self.manifest, observed)
+        self.assertTrue(result["identity_match"])
+        self.assertEqual(result["qualification"], "HOLD")
+
+    def test_role_swapped_upstream_claude_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            upstream_claude={"quota_auto_reset": False},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the upstream claude roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_unknown_upstream_claude_role_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            upstream_claude={"tool_search": False, "quota_auto_reset": False},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "exactly the upstream claude roles"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_upstream_claude_string_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            upstream_claude={"tool_search": "on"},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_upstream_claude_digest_value_fails_closed(self):
+        observed = make_observed(
+            self.manifest,
+            upstream_claude={"tool_search": "sha256:" + "5" * 64},
+        )
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "must be a boolean"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_empty_upstream_claude_fails_closed(self):
+        observed = make_observed(self.manifest, upstream_claude={})
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
+    def test_non_object_upstream_claude_fails_closed(self):
+        observed = make_observed(self.manifest, upstream_claude=["tool_search"])
+        with self.assertRaisesRegex(prevalidation.PrevalidationError, "non-empty object"):
+            prevalidation.prevalidate(self.manifest, observed)
+
     def test_matching_disabled_providers_still_hold(self):
         observed = make_observed(
             self.manifest,
