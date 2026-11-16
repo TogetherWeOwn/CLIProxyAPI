@@ -38,6 +38,16 @@ You can access the following providers locally and with multiple CLI accounts th
 </table>
 
 
+## Direction (TogetherWeOwn fork)
+
+Last reviewed: 2026-11-16.
+
+This fork is a contribution and recovery source for CLIProxyAPI. Our current intent is to use the stock gateway with provider plugins rather than develop a competing product roadmap. These intentions may change and are not commitments or delivery dates.
+
+We do not intend to run a fork-built image in production, and this fork does not imply upstream endorsement. The existing upstream-derived documentation, examples, translations, and contribution process remain in place.
+
+For contributions or discussion of a proposed change to this fork, please use its [pull requests](https://github.com/TogetherWeOwn/CLIProxyAPI/pulls), following the contribution steps below.
+
 ## Sponsor
 
 [![https://www.packyapi.com/register?aff=cliproxyapi](./assets/packycode-en.png)](https://www.packyapi.com/register?aff=cliproxyapi)
