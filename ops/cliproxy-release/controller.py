@@ -105,13 +105,28 @@ def recover(host, clock, token, rollback, phase):
     return outcome
 
 
+def lease_phase(host, token):
+    """The host's record of the lease phase; an unreadable phase is unknown and stays fenced."""
+    try:
+        return host.phase(token)
+    except Exception:
+        return None
+
+
 def watchdog(host, clock, owner):
     """Independent recovery. The host grants a fencing takeover only after the armed deadline.
 
-    The claim carries the lease phase the host recorded for gate closes and backend writes.
+    Recovery then follows the lease phase the host recorded for gate closes and backend writes.
     """
-    claim = host.takeover(owner)
-    return "fixture-watchdog-idle" if claim is None else recover(host, clock, *claim)
+    try:
+        claim = host.takeover(owner)
+    except Exception:
+        host.alert(None, "fixture-watchdog-failed")
+        return "fixture-watchdog-failed"
+    if claim is None:
+        return "fixture-watchdog-idle"
+    token, rollback = claim
+    return recover(host, clock, token, rollback, lease_phase(host, token))
 
 
 class Controller:
@@ -127,21 +142,19 @@ class Controller:
             return "fixture-admission-rejected"
         manifest = json.loads(raw.decode("ascii"))["manifest"]
         rollback = manifest["rollback"]
-        # The lease grant atomically arms the watchdog with the exact rollback.
+        # The host grants the lease only when it is free and every gate is open, and the grant
+        # atomically arms the watchdog with the exact rollback. Recovery may therefore reopen
+        # any gate it closed without lifting a fence that predates the attempt.
         token = self.host.acquire(self.owner, self.clock.now() + WATCHDOG_DELAY, rollback)
         if token is None:
-            return "fixture-lease-busy"
+            return "fixture-lease-refused"
         try:
             outcome = self.cutover(token, attempt, manifest["candidate"], rollback)
         except Exception:
             outcome = None
         if outcome is None:
-            try:
-                # Recover from the host's record, not local intent; an unreadable phase stays fenced.
-                phase = self.host.phase(token)
-            except Exception:
-                phase = None
-            return recover(self.host, self.clock, token, rollback, phase)
+            # Recover from the host's record, not local intent.
+            return recover(self.host, self.clock, token, rollback, lease_phase(self.host, token))
         return unlock(self.host, token, outcome)
 
     def cutover(self, token, attempt, candidate, rollback):
@@ -150,9 +163,6 @@ class Controller:
             return "fixture-attempt-replayed"
         if host.readback(token) != rollback or host.snapshot(token) != rollback:
             return "fixture-incumbent-drift"
-        # Recovery reopens every gate, so the attempt only starts from a fully open gateway.
-        if [host.state(gate) for gate in GATES] != ["open"] * len(GATES):
-            return "fixture-gates-not-open"
         # Recheck after quiescence: a writer may have changed the incumbent during the drain.
         if not drained(host, self.clock, token) or host.readback(token) != rollback:
             return None

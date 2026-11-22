@@ -42,7 +42,7 @@ class Host:
         self.stale_ack, self.replay_ack, self.epoch = set(), set(), 0
         self.token, self.armed, self.issued, self.consumed = None, None, 0, set()
         self.corrupt, self.noop, self.stale, self.regress, self.watched = set(), set(), set(), False, []
-        self.opened, self.bool_ack = [], set()
+        self.opened, self.loose_ack, self.drained_after_apply = [], set(), False
         self.calls, self.hooks, self.violations, self.alerts = [], {}, [], []
 
     def guard(self, verb, token):
@@ -55,7 +55,7 @@ class Host:
 
     def acquire(self, owner, deadline, rollback):
         self.calls.append("acquire")
-        if self.token is not None:
+        if self.token is not None or set(self.gates.values()) != {"open"}:
             return None
         self.issued += 1
         self.token, self.acked = self.issued, set()
@@ -69,7 +69,7 @@ class Host:
         self.issued += 1
         self.token, self.acked = self.issued, set()
         self.armed["deadline"] = self.clock.now() + c.WATCHDOG_DELAY
-        return self.token, copy.deepcopy(self.armed["rollback"]), self.armed["phase"]
+        return self.token, copy.deepcopy(self.armed["rollback"])
 
     def consume(self, attempt, token):
         self.guard("consume", token)
@@ -91,14 +91,14 @@ class Host:
 
     def close(self, gate, token):
         self.guard("close", token)
-        if self.armed["phase"] == "admitted":
+        if self.armed.get("phase") == "admitted":
             self.armed["phase"] = "fenced"
         if gate not in self.no_close:
             self.gates[gate] = "closed"
 
     def drain(self, token):
         self.guard("drain", token)
-        self.epoch, self.acked = self.epoch + 1, set()
+        self.epoch, self.acked, self.drained_after_apply = self.epoch + 1, set(), True
         return self.epoch
 
     def ack(self, gate, token, drain):
@@ -107,8 +107,9 @@ class Host:
         ack = {"gate": gate, "closed": closed, "active": active, "token": token, "drain": self.epoch}
         if gate in self.no_ack:
             return None
-        if gate in self.bool_ack:
-            return ack | {"token": True}
+        if gate in self.loose_ack:
+            # Equal under loose comparison (True == 1, 0 == False) but a different JSON type.
+            return ack | {"token": True, "drain": True, "active": False, "closed": 1}
         if gate in self.stale_ack or gate in self.replay_ack:
             # An ack replayed from an earlier lease generation or an earlier drain.
             return ack | ({"token": token - 1} if gate in self.stale_ack else {"drain": self.epoch - 1, "active": 0})
@@ -123,7 +124,7 @@ class Host:
         self.armed["phase"] = "mutated"
         if bundle.keys() != self.bundle.keys():
             self.violations.append("non-release-write")
-        self.applied = copy.deepcopy(bundle)
+        self.applied, self.drained_after_apply = copy.deepcopy(bundle), False
         if p.digest(bundle) in self.noop:
             return
         self.bundle = copy.deepcopy(bundle)
@@ -142,7 +143,7 @@ class Host:
         self.guard("open", token)
         if self.bundle not in self.good:
             self.violations.append("unsafe-reopen")
-        if self.armed and self.armed["phase"] == "mutated" and not self.verified():
+        if self.armed and self.armed.get("phase") == "mutated" and not self.verified():
             self.violations.append("unverified-reopen")
         self.opened.append(gate)
         if gate not in self.no_open:
@@ -150,8 +151,9 @@ class Host:
             self.acked.discard(gate)
 
     def verified(self):
-        """After a backend write, only the last applied bundle or the exact rollback may serve."""
-        return self.bundle in (self.applied, self.armed["rollback"])
+        """After a backend write, only the last applied bundle may serve, or the exact rollback
+        once a recovery drain has run since that write."""
+        return self.bundle == self.applied or (self.drained_after_apply and self.bundle == self.armed["rollback"])
 
     def state(self, gate):
         return self.gates[gate]
@@ -166,12 +168,12 @@ class Host:
         """Frees the lease and disarms the watchdog in one transition."""
         self.guard("release", token)
         # An attempt that closed no gate must leave every gate as it found it.
-        expected = self.at_acquire if self.armed["phase"] == "admitted" else dict.fromkeys(GATES, "open")
+        expected = self.at_acquire if self.armed.get("phase") == "admitted" else dict.fromkeys(GATES, "open")
         if self.gates != expected or self.bundle not in self.good:
             self.violations.append("unsafe-unlock")
         if self.regress and self.bundle == self.good[1]:
             self.violations.append("regressed-unlock")
-        if self.armed["phase"] == "mutated" and not self.verified():
+        if self.armed.get("phase") == "mutated" and not self.verified():
             self.violations.append("unlock-wrong-bundle")
         self.token = self.armed = None
 
@@ -252,12 +254,13 @@ class ControllerTests(unittest.TestCase):
     def test_admission_is_exclusive_single_use_and_drift_checked(self):
         for setup, number, expected, calls in (
             (None, 2, "fixture-admission-rejected", []),
-            (lambda host, _: setattr(host, "token", 99), 1, "fixture-lease-busy", ["acquire"]),
+            (lambda host, _: setattr(host, "token", 99), 1, "fixture-lease-refused", ["acquire"]),
             (lambda host, _: host.consumed.add(attempt(1)), 1, "fixture-attempt-replayed", None),
             (lambda host, m: host.good.append(host.bundle) or host.bundle.update(image=p.digest("fixture-drift")), 1,
              "fixture-incumbent-drift", None),
             (lambda host, m: host.snap.update(config=p.digest("fixture-drift")), 1, "fixture-incumbent-drift", None),
-            (lambda host, m: host.gates.update({GATES[3]: "closed"}), 1, "fixture-gates-not-open", None),
+            # A fence that predates the attempt refuses the lease, so recovery can never lift it.
+            (lambda host, m: host.gates.update({GATES[3]: "closed"}), 1, "fixture-lease-refused", ["acquire"]),
         ):
             with self.subTest(expected=expected, calls=calls):
                 outcome, _, host, _ = self.run_fixture(setup, number)
@@ -275,7 +278,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(c.Controller(host, clock, "fixture-other").run(raw, attempt(1)), "fixture-attempt-replayed")
 
     def test_missing_or_late_drain_ack_restores_untouched_backend(self):
-        faults = ("no_ack", "stale_ack", "replay_ack", "bool_ack", "active", "no_close")
+        faults = ("no_ack", "stale_ack", "replay_ack", "loose_ack", "active", "no_close")
         cases = [(gate, fault) for gate in GATES for fault in faults]
         for gate, fault in cases + [(None, "late"), (None, "writer-race")]:
             def setup(host, _):
@@ -328,6 +331,20 @@ class ControllerTests(unittest.TestCase):
         outcome, _, host, _ = self.run_fixture(phase_error)
         self.assertEqual(outcome, "fixture-recovery-fenced")
         self.assertFenced(host)
+        # A phase record the watchdog cannot read after takeover is unknown, so it fences.
+        raw, clock, host, manifest = fixture()
+        host.hooks[("watch", 1)] = lambda: (_ for _ in ()).throw(Interrupted)
+        with self.assertRaises(Interrupted):
+            c.Controller(host, clock, "fixture-controller").run(raw, attempt(1))
+        del host.armed["phase"]
+        clock.time = host.armed["deadline"]
+        self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-recovery-fenced")
+        self.assertEqual((set(host.gates.values()), host.calls.count("apply")), ({"closed"}, 1))
+        host.armed["phase"] = "mutated"
+        # A failed takeover alerts instead of raising.
+        host.takeover = lambda owner: (_ for _ in ()).throw(RuntimeError)
+        self.assertEqual((c.watchdog(host, clock, "fixture-watchdog"), host.alerts[-1]),
+                         ("fixture-watchdog-failed", "fixture-watchdog-failed"))
         # An unknown host phase after a failed watch keeps the fence and writes nothing.
         outcome, _, host, _ = self.run_fixture(lambda host, _: host.hooks.update(
             {("watch", 1): lambda: (setattr(host, "regress", True), host.armed.update(phase=None))}))
@@ -386,6 +403,7 @@ class ControllerTests(unittest.TestCase):
             ("reopen-blocked", lambda host, _: host.no_open.add(GATES[0]), True, 2),
             ("writer-during-rollback-reopen", other_writer, False, 2),
             ("rollback-noop-write", lambda host, m: host.noop.add(p.digest(m["rollback"])), True, 2),
+            ("rollback-probe-stale", lambda host, m: host.stale.add((p.digest(m["rollback"]), PATHS[2])), False, 2),
             # The first close of the recovery drain, after the drain and the writer re-fence before reopen.
             ("recovery-close-error", lambda host, _: host.hooks.update(
                 {("close", 2 * n - len(PATHS) + 1): fail}), True, 1),
@@ -411,6 +429,7 @@ class ControllerTests(unittest.TestCase):
                     self.assertFalse(set(host.opened) & set(GATES[len(PATHS):]))
                 host.corrupt.clear()
                 host.noop.clear()
+                host.stale.clear()
                 host.no_ack.clear()
                 host.no_open.clear()
                 host.replay_ack.clear()
@@ -484,11 +503,9 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual((watchdog, host.alerts), (["fixture-rolled-back"], ["fixture-fence-breached"]))
         self.assertUnlocked(host)
         self.assertEqual(host.bundle, manifest["rollback"])
-        # A refused replay interrupted before unlock touches no gate and no backend file,
-        # even when an unrelated fence was already closed.
+        # A refused replay interrupted before unlock touches no gate and no backend file.
         raw, clock, host, manifest = fixture()
         self.assertEqual(c.Controller(host, clock, "fixture-controller").run(raw, attempt(1)), "fixture-released")
-        host.gates[GATES[0]] = "closed"
         host.hooks[("release", 2)] = interrupt
         calls = len(host.calls)
         with self.assertRaises(Interrupted):
@@ -496,8 +513,8 @@ class ControllerTests(unittest.TestCase):
         clock.time = host.armed["deadline"]
         self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-unchanged")
         self.assertEqual((host.violations, host.token, host.armed), ([], None, None))
-        self.assertEqual(host.calls[calls:], ["acquire", "consume", "release", "release"])
-        self.assertEqual((host.gates[GATES[0]], host.bundle), ("closed", manifest["candidate"]))
+        self.assertEqual(host.calls[calls:], ["acquire", "consume", "release", "phase", "release"])
+        self.assertEqual(host.bundle, manifest["candidate"])
 
     def test_controller_source_has_no_host_reach(self):
         with open(c.__file__, encoding="ascii") as source:
