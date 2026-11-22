@@ -1,0 +1,60 @@
+name: CLIProxy release fixture preflight
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/cliproxy-release-preflight.yml'
+      - 'ops/cliproxy-release/**'
+
+permissions: {}
+
+jobs:
+  fixture-preflight:
+    if: >-
+      github.repository == 'TogetherWeOwn/CLIProxyAPI' &&
+      (github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Validate fixture entry
+        id: entry
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          reject() { echo fixture-entry-rejected; exit 1; }
+          [[ "$GITHUB_REPOSITORY" == TogetherWeOwn/CLIProxyAPI ]] || reject
+          case "$GITHUB_EVENT_NAME" in
+            pull_request)
+              [[ "$GITHUB_BASE_REF" == main ]] || reject
+              sha="$PR_HEAD_SHA"
+              ;;
+            workflow_dispatch)
+              [[ "$GITHUB_REF" == refs/heads/main ]] || reject
+              [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/cliproxy-release-preflight.yml@refs/heads/main" ]] || reject
+              [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || reject
+              sha="$GITHUB_SHA"
+              ;;
+            *) reject ;;
+          esac
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || reject
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+      - name: Check out validated source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ steps.entry.outputs.sha }}
+          persist-credentials: false
+      - name: Prove fixture verifier
+        env:
+          EXPECTED_SHA: ${{ steps.entry.outputs.sha }}
+        run: |
+          if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+             [[ "$(git rev-parse HEAD 2>/dev/null)" != "$EXPECTED_SHA" ]]; then
+            echo fixture-checkout-rejected
+            exit 1
+          fi
+          python3 -ESB ops/cliproxy-release/test_preflight.py
