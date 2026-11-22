@@ -39,7 +39,7 @@ class Host:
         self.live = {"auth": "fixture-auth-1", "kv": "fixture-kv-1"}
         self.gates = dict.fromkeys(GATES, "open")
         self.acked, self.active, self.no_ack, self.no_close, self.no_open = set(), {}, set(), set(), set()
-        self.stale_ack = set()
+        self.stale_ack, self.replay_ack, self.epoch = set(), set(), 0
         self.token, self.armed, self.issued, self.consumed = None, None, 0, set()
         self.corrupt, self.stale, self.regress = set(), set(), False
         self.calls, self.hooks, self.violations, self.alerts = [], {}, [], []
@@ -57,15 +57,17 @@ class Host:
         if self.token is not None:
             return None
         self.issued += 1
-        self.token, self.armed = self.issued, (deadline, copy.deepcopy(rollback))
+        self.token, self.acked = self.issued, set()
+        self.armed = {"deadline": deadline, "rollback": copy.deepcopy(rollback), "mutated": False}
         return self.token
 
     def takeover(self, owner):
-        if self.armed is None or self.clock.now() < self.armed[0]:
+        if self.armed is None or self.clock.now() < self.armed["deadline"]:
             return None
         self.issued += 1
-        self.token, self.armed = self.issued, (self.clock.now() + c.WATCHDOG_DELAY, self.armed[1])
-        return self.token, copy.deepcopy(self.armed[1])
+        self.token, self.acked = self.issued, set()
+        self.armed["deadline"] = self.clock.now() + c.WATCHDOG_DELAY
+        return self.token, copy.deepcopy(self.armed["rollback"]), self.armed["mutated"]
 
     def consume(self, attempt, token):
         self.guard("consume", token)
@@ -86,22 +88,29 @@ class Host:
         if gate not in self.no_close:
             self.gates[gate] = "closed"
 
-    def ack(self, gate, token):
+    def drain(self, token):
+        self.guard("drain", token)
+        self.epoch, self.acked = self.epoch + 1, set()
+        return self.epoch
+
+    def ack(self, gate, token, drain):
         self.guard("ack", token)
         closed, active = self.gates[gate] == "closed", self.active.get(gate, 0)
+        ack = {"gate": gate, "closed": closed, "active": active, "token": token, "drain": self.epoch}
         if gate in self.no_ack:
             return None
-        if gate in self.stale_ack:
-            # An ack replayed from an earlier lease generation.
-            return {"gate": gate, "closed": closed, "active": active, "token": token - 1}
-        if closed and active == 0:
+        if gate in self.stale_ack or gate in self.replay_ack:
+            # An ack replayed from an earlier lease generation or an earlier drain.
+            return ack | ({"token": token - 1} if gate in self.stale_ack else {"drain": self.epoch - 1, "active": 0})
+        if closed and active == 0 and drain == self.epoch:
             self.acked.add(gate)
-        return {"gate": gate, "closed": closed, "active": active, "token": token}
+        return ack
 
     def apply(self, bundle, token):
         self.guard("apply", token)
-        if set(self.gates.values()) != {"closed"} or self.acked != set(GATES):
+        if set(self.gates.values()) != {"closed"} or self.acked != set(GATES) or any(self.active.values()):
             self.violations.append("unquiesced-apply")
+        self.armed["mutated"] = True
         if bundle.keys() != self.bundle.keys():
             self.violations.append("non-release-write")
         self.bundle = copy.deepcopy(bundle)
@@ -132,15 +141,12 @@ class Host:
         self.clock.time += seconds
         return not self.regress
 
-    def disarm(self, token):
-        self.guard("disarm", token)
-        self.armed = None
-
     def release(self, token):
+        """Frees the lease and disarms the watchdog in one transition."""
         self.guard("release", token)
-        if self.armed or set(self.gates.values()) != {"open"} or self.bundle not in self.good:
+        if set(self.gates.values()) != {"open"} or self.bundle not in self.good:
             self.violations.append("unsafe-unlock")
-        self.token = None
+        self.token = self.armed = None
 
     def alert(self, token, outcome):
         self.alerts.append(outcome)
@@ -183,7 +189,7 @@ class ControllerTests(unittest.TestCase):
     def assertWatchdogRecovers(self, clock, host, manifest, expected):
         self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-watchdog-idle")
         stale = host.token
-        clock.time = host.armed[0]
+        clock.time = host.armed["deadline"]
         self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), expected)
         self.assertUnlocked(host)
         self.assertEqual(host.bundle, manifest["rollback"])
@@ -198,10 +204,10 @@ class ControllerTests(unittest.TestCase):
         self.assertUnlocked(host)
         self.assertEqual(host.bundle, manifest["candidate"])
         n = len(GATES)
-        self.assertEqual(host.calls[:4 + 2 * n], ["acquire", "consume", "readback", "snapshot"]
-                         + ["close"] * n + ["ack"] * n)
-        self.assertEqual(host.calls[4 + 2 * n:], ["apply", "readback", "health"] + ["fresh"] * len(PATHS)
-                         + ["open"] * n + ["watch", "disarm", "release"])
+        self.assertEqual(host.calls[:5 + 2 * n], ["acquire", "consume", "readback", "snapshot"]
+                         + ["close"] * n + ["drain"] + ["ack"] * n)
+        self.assertEqual(host.calls[5 + 2 * n:], ["readback", "apply", "readback", "health"] + ["fresh"] * len(PATHS)
+                         + ["open"] * n + ["watch", "release"])
 
     def test_admission_is_exclusive_single_use_and_drift_checked(self):
         for setup, number, expected, calls in (
@@ -220,7 +226,7 @@ class ControllerTests(unittest.TestCase):
                 if calls is not None:
                     self.assertEqual(host.calls, calls)
                 else:
-                    self.assertEqual((host.token, host.armed, host.calls[-2:]), (None, None, ["disarm", "release"]))
+                    self.assertEqual((host.token, host.armed, host.calls[-1]), (None, None, "release"))
         raw, clock, host, _ = fixture()
         controller = c.Controller(host, clock, "fixture-controller")
         self.assertEqual(controller.run(raw, attempt(1)), "fixture-released")
@@ -228,10 +234,15 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(c.Controller(host, clock, "fixture-other").run(raw, attempt(1)), "fixture-attempt-replayed")
 
     def test_missing_or_late_drain_ack_restores_untouched_backend(self):
-        cases = [(gate, fault) for gate in GATES for fault in ("no_ack", "stale_ack", "active", "no_close")]
-        for gate, fault in cases + [(None, "late")]:
+        faults = ("no_ack", "stale_ack", "replay_ack", "active", "no_close")
+        cases = [(gate, fault) for gate in GATES for fault in faults]
+        for gate, fault in cases + [(None, "late"), (None, "writer-race")]:
             def setup(host, _):
-                if fault == "active":
+                if fault == "writer-race":
+                    # A writer changes the incumbent after the drift check and finishes before its ack.
+                    host.good.append(host.bundle)
+                    host.hooks[("close", 1)] = lambda: host.bundle.update(config=p.digest("fixture-writer"))
+                elif fault == "active":
                     host.active[gate] = 1
                 elif fault == "late":
                     host.hooks[("ack", len(GATES))] = lambda: setattr(host.clock, "time", 1000 + c.DRAIN_LIMIT + 1)
@@ -242,7 +253,7 @@ class ControllerTests(unittest.TestCase):
                 self.assertEqual(outcome, "fixture-restored")
                 self.assertNotIn("apply", host.calls)
                 self.assertUnlocked(host)
-                self.assertEqual(host.bundle, manifest["rollback"])
+                self.assertEqual(host.bundle == manifest["rollback"], fault != "writer-race")
 
     def test_failed_candidate_rolls_back_exactly_and_keeps_live_state(self):
         def unhealthy(host, m):
@@ -265,19 +276,30 @@ class ControllerTests(unittest.TestCase):
                 self.assertEqual(host.calls.count("ack"), 2 * len(GATES))
 
     def test_unsafe_rollback_or_reopen_keeps_lease_until_watchdog_readback(self):
-        def failed_apply():
+        def fail():
             raise RuntimeError
-        rolled_back = "fixture-rolled-back"
-        cases = (
-            ("rollback-partial-write", lambda host, m: host.corrupt.add(p.digest(m["rollback"])), 2, rolled_back),
-            ("rollback-apply-error", lambda host, _: host.hooks.update({("apply", 2): failed_apply}), 2, rolled_back),
-            ("recovery-drain-ack-missing", lambda host, _: host.hooks.update(
-                {("ack", len(GATES) + 1): lambda: host.no_ack.add(GATES[0])}), 1, "fixture-rolled-back"),
-            ("reopen-blocked", lambda host, _: host.no_open.add(GATES[0]), 2, "fixture-restored"),
+
+        def replayed_recovery_ack(host):
+            # A direct request is active after reopen, and an earlier drain's ack is replayed.
+            host.active[GATES[2]] = 1
+            host.replay_ack.add(GATES[2])
+        n = len(GATES)
+        cases = (  # name, fault, candidate healthy, applies
+            ("rollback-partial-write", lambda host, m: host.corrupt.add(p.digest(m["rollback"])), False, 2),
+            ("rollback-apply-error", lambda host, _: host.hooks.update({("apply", 2): fail}), False, 2),
+            ("recovery-ack-missing", lambda host, _: host.hooks.update(
+                {("ack", n + 1): lambda: host.no_ack.add(GATES[0])}), False, 1),
+            ("reopen-blocked", lambda host, _: host.no_open.add(GATES[0]), True, 2),
+            ("recovery-close-error", lambda host, _: host.hooks.update({("close", n + 1): fail}), True, 1),
+            ("recovery-readback-error", lambda host, _: host.hooks.update({("readback", 4): fail}), True, 1),
+            ("recovery-ack-replayed", lambda host, _: host.hooks.update(
+                {("drain", 2): lambda: replayed_recovery_ack(host)}), True, 1),
         )
-        for name, fault, applies, recovered in cases:
+        for name, fault, candidate_healthy, applies in cases:
             def setup(host, m, fault=fault):
-                if name != "reopen-blocked":
+                if candidate_healthy:
+                    host.regress = True
+                else:
                     host.good.remove(m["candidate"])
                 fault(host, m)
                 host.hooks[("apply", 1)] = lambda: refresh(host)
@@ -289,32 +311,38 @@ class ControllerTests(unittest.TestCase):
                 host.corrupt.clear()
                 host.no_ack.clear()
                 host.no_open.clear()
-                self.assertWatchdogRecovers(clock, host, manifest, recovered)
+                host.replay_ack.clear()
+                host.active.clear()
+                self.assertWatchdogRecovers(clock, host, manifest, "fixture-rolled-back")
                 self.assertEqual(host.live, LIVE)
+        # A release failure leaves the lease and watchdog armed for recovery.
+        outcome, clock, host, manifest = self.run_fixture(
+            lambda host, m: (host.good.remove(m["candidate"]), host.hooks.update({("release", 1): fail})))
+        self.assertEqual((outcome, host.alerts), ("fixture-recovery-fenced", ["fixture-recovery-fenced"]))
+        self.assertIsNotNone(host.armed)
+        self.assertWatchdogRecovers(clock, host, manifest, "fixture-rolled-back")
 
     def test_watchdog_recovers_interrupts_and_fences_stale_controller(self):
+        def interrupt():
+            raise Interrupted
         for verb, count, recovered in (
             ("consume", 1, "fixture-restored"), ("close", 3, "fixture-restored"),
             ("ack", len(GATES), "fixture-restored"), ("apply", 1, "fixture-restored"),
             ("health", 1, "fixture-rolled-back"), ("open", 4, "fixture-rolled-back"),
-            ("watch", 1, "fixture-rolled-back"), ("disarm", 1, "fixture-rolled-back"),
+            ("watch", 1, "fixture-rolled-back"), ("release", 1, "fixture-rolled-back"),
         ):
-            def setup(host, _):
-                def interrupt():
-                    raise Interrupted
-                host.hooks[(verb, count)] = interrupt
             with self.subTest(verb=verb):
                 raw, clock, host, manifest = fixture()
-                setup(host, manifest)
+                host.hooks[(verb, count)] = interrupt
                 with self.assertRaises(Interrupted):
                     c.Controller(host, clock, "fixture-controller").run(raw, attempt(1))
-                self.assertNotIn("release", host.calls)
                 self.assertIsNotNone(host.token)
+                self.assertIsNotNone(host.armed)
                 self.assertWatchdogRecovers(clock, host, manifest, recovered)
         watchdog = []
 
         def takeover(host):
-            host.clock.time = host.armed[0]
+            host.clock.time = host.armed["deadline"]
             watchdog.append(c.watchdog(host, host.clock, "fixture-watchdog"))
         outcome, _, host, manifest = self.run_fixture(
             lambda host, _: host.hooks.update({("health", 1): lambda: takeover(host)}))
@@ -322,6 +350,16 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual((watchdog, host.alerts), (["fixture-rolled-back"], ["fixture-recovery-fenced"]))
         self.assertUnlocked(host)
         self.assertEqual(host.bundle, manifest["rollback"])
+        # A refused replay interrupted before unlock is restored, never rolled back.
+        raw, clock, host, manifest = fixture()
+        self.assertEqual(c.Controller(host, clock, "fixture-controller").run(raw, attempt(1)), "fixture-released")
+        host.hooks[("release", 2)] = interrupt
+        with self.assertRaises(Interrupted):
+            c.Controller(host, clock, "fixture-other").run(raw, attempt(1))
+        clock.time = host.armed["deadline"]
+        self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-restored")
+        self.assertUnlocked(host)
+        self.assertEqual((host.bundle, host.calls.count("apply")), (manifest["candidate"], 1))
 
     def test_controller_source_has_no_host_reach(self):
         with open(c.__file__, encoding="ascii") as source:

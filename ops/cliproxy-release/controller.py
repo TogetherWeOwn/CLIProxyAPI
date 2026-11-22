@@ -19,12 +19,19 @@ WATCHDOG_DELAY = 3600
 
 
 def drained(host, clock, token):
-    """Close every gate, then require a fresh, lease-bound quiescence ack from each."""
-    deadline = clock.now() + DRAIN_LIMIT
+    """Close every gate, then require an ack bound to this lease and this drain from each."""
+    deadline, closed = clock.now() + DRAIN_LIMIT, True
     for gate in GATES:
-        host.close(gate, token)
-    acks = [host.ack(gate, token) for gate in GATES]
-    expected = [{"gate": gate, "closed": True, "active": 0, "token": token} for gate in GATES]
+        try:
+            host.close(gate, token)
+        except Exception:
+            # Keep fencing the remaining gates even if one close fails.
+            closed = False
+    if not closed:
+        return False
+    drain = host.drain(token)
+    acks = [host.ack(gate, token, drain) for gate in GATES]
+    expected = [{"gate": gate, "closed": True, "active": 0, "token": token, "drain": drain} for gate in GATES]
     return acks == expected and clock.now() <= deadline
 
 
@@ -42,22 +49,26 @@ def reopened(host, token):
 
 
 def unlock(host, token, outcome):
-    host.disarm(token)
+    # Releasing the lease also disarms the watchdog in one host transition.
     host.release(token)
     return outcome
 
 
-def recover(host, clock, token, rollback):
-    """Restore the exact rollback and keep the lease and fence unless readback proves it."""
+def recover(host, clock, token, rollback, mutated):
+    """Reopen an untouched backend. Otherwise fence first, then restore the exact rollback.
+
+    The lease, watchdog and fence stay in place unless recovery readback proves the result.
+    """
     try:
-        outcome = "fixture-restored"
-        if host.readback(token) != rollback:
-            outcome = "fixture-rolled-back" if drained(host, clock, token) else None
-            if outcome:
+        if not mutated:
+            if reopened(host, token):
+                return unlock(host, token, "fixture-restored")
+        elif drained(host, clock, token):
+            if host.readback(token) != rollback:
                 # Only release-owned files are written, so live auth and KV stay current.
                 host.apply(rollback, token)
-        if outcome and healthy(host, token, rollback) and reopened(host, token):
-            return unlock(host, token, outcome)
+            if healthy(host, token, rollback) and reopened(host, token):
+                return unlock(host, token, "fixture-rolled-back")
     except Exception:
         pass
     host.alert(token, "fixture-recovery-fenced")
@@ -65,14 +76,18 @@ def recover(host, clock, token, rollback):
 
 
 def watchdog(host, clock, owner):
-    """Independent recovery. The host grants a fencing takeover only after the armed deadline."""
+    """Independent recovery. The host grants a fencing takeover only after the armed deadline.
+
+    The claim says whether any backend write began under the lease.
+    """
     claim = host.takeover(owner)
     return "fixture-watchdog-idle" if claim is None else recover(host, clock, *claim)
 
 
 class Controller:
     def __init__(self, host, clock, owner):
-        self.host, self.clock, self.owner, self.used = host, clock, owner, False
+        self.host, self.clock, self.owner = host, clock, owner
+        self.used = self.mutated = False
 
     def run(self, raw, attempt):
         if self.used:
@@ -91,7 +106,7 @@ class Controller:
         except Exception:
             outcome = None
         if outcome is None:
-            return recover(self.host, self.clock, token, rollback)
+            return recover(self.host, self.clock, token, rollback, self.mutated)
         return unlock(self.host, token, outcome)
 
     def cutover(self, token, attempt, candidate, rollback):
@@ -100,8 +115,10 @@ class Controller:
             return "fixture-attempt-replayed"
         if host.readback(token) != rollback or host.snapshot(token) != rollback:
             return "fixture-incumbent-drift"
-        if not drained(host, self.clock, token):
+        # Recheck after quiescence: a writer may have changed the incumbent during the drain.
+        if not drained(host, self.clock, token) or host.readback(token) != rollback:
             return None
+        self.mutated = True
         host.apply(candidate, token)
         if healthy(host, token, candidate) and reopened(host, token):
             if host.watch(token, WATCH_SECONDS) is True:
