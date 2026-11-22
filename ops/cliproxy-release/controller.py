@@ -61,24 +61,32 @@ def reopened(host, token, bundle):
 
 
 def unlock(host, token, outcome):
-    # Releasing the lease also disarms the watchdog in one host transition.
-    host.release(token)
-    return outcome
-
-
-def recover(host, clock, token, rollback, mutated):
-    """Reopen an untouched backend. Otherwise fence first, then restore the exact rollback.
-
-    The lease, watchdog and fence stay in place unless recovery readback proves the result.
-    """
+    """Release the lease, which also disarms the watchdog in one host transition."""
     try:
-        # An unknown mutation state matches neither branch and stays fenced.
-        if mutated is False:
+        host.release(token)
+        return outcome
+    except Exception:
+        # The armed watchdog still owns recovery; an unconfirmed release is never a success.
+        host.alert(token, "fixture-unlock-failed")
+        return "fixture-unlock-failed"
+
+
+def recover(host, clock, token, rollback, phase):
+    """Recover from the lease phase: admitted, fenced (gates closed) or mutated (backend written).
+
+    An admitted attempt touched nothing. A fenced one reopens an untouched backend. A mutated
+    one fences first and restores the exact rollback. The lease, watchdog and fence stay in
+    place unless recovery readback proves the result. An unknown phase stays fenced.
+    """
+    if phase == "admitted":
+        return unlock(host, token, "fixture-unchanged")
+    try:
+        if phase == "fenced":
             # An undrained writer may change the backend; serve it only if healthy and unchanged.
             current = host.readback(token)
             if healthy(host, token, current) and reopened(host, token, current):
                 return unlock(host, token, "fixture-restored")
-        elif mutated is True and drained(host, clock, token):
+        elif phase == "mutated" and drained(host, clock, token):
             if host.readback(token) != rollback:
                 # Only release-owned files are written, so live auth and KV stay current.
                 host.apply(rollback, token)
@@ -94,7 +102,7 @@ def recover(host, clock, token, rollback, mutated):
 def watchdog(host, clock, owner):
     """Independent recovery. The host grants a fencing takeover only after the armed deadline.
 
-    The claim says whether any backend write began under the lease.
+    The claim carries the lease phase the host recorded for gate closes and backend writes.
     """
     claim = host.takeover(owner)
     return "fixture-watchdog-idle" if claim is None else recover(host, clock, *claim)
@@ -103,7 +111,7 @@ def watchdog(host, clock, owner):
 class Controller:
     def __init__(self, host, clock, owner):
         self.host, self.clock, self.owner = host, clock, owner
-        self.used = self.mutated = False
+        self.used, self.phase = False, "admitted"
 
     def run(self, raw, attempt):
         if self.used:
@@ -122,13 +130,8 @@ class Controller:
         except Exception:
             outcome = None
         if outcome is None:
-            return recover(self.host, self.clock, token, rollback, self.mutated)
-        try:
-            return unlock(self.host, token, outcome)
-        except Exception:
-            # The armed watchdog still owns recovery; an unconfirmed release is never a success.
-            self.host.alert(token, "fixture-unlock-failed")
-            return "fixture-unlock-failed"
+            return recover(self.host, self.clock, token, rollback, self.phase)
+        return unlock(self.host, token, outcome)
 
     def cutover(self, token, attempt, candidate, rollback):
         host = self.host
@@ -136,10 +139,14 @@ class Controller:
             return "fixture-attempt-replayed"
         if host.readback(token) != rollback or host.snapshot(token) != rollback:
             return "fixture-incumbent-drift"
+        # Recovery reopens every gate, so the attempt only starts from a fully open gateway.
+        if [host.state(gate) for gate in GATES] != ["open"] * len(GATES):
+            return "fixture-gates-not-open"
+        self.phase = "fenced"
         # Recheck after quiescence: a writer may have changed the incumbent during the drain.
         if not drained(host, self.clock, token) or host.readback(token) != rollback:
             return None
-        self.mutated = True
+        self.phase = "mutated"
         host.apply(candidate, token)
         if healthy(host, token, candidate) and reopened(host, token, candidate):
             if host.watch(token, WATCH_SECONDS) is True:

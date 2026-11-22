@@ -58,7 +58,8 @@ class Host:
             return None
         self.issued += 1
         self.token, self.acked = self.issued, set()
-        self.armed = {"deadline": deadline, "rollback": copy.deepcopy(rollback), "mutated": False}
+        self.armed = {"deadline": deadline, "rollback": copy.deepcopy(rollback), "phase": "admitted"}
+        self.at_acquire = dict(self.gates)
         return self.token
 
     def takeover(self, owner):
@@ -67,7 +68,7 @@ class Host:
         self.issued += 1
         self.token, self.acked = self.issued, set()
         self.armed["deadline"] = self.clock.now() + c.WATCHDOG_DELAY
-        return self.token, copy.deepcopy(self.armed["rollback"]), self.armed["mutated"]
+        return self.token, copy.deepcopy(self.armed["rollback"]), self.armed["phase"]
 
     def consume(self, attempt, token):
         self.guard("consume", token)
@@ -85,6 +86,8 @@ class Host:
 
     def close(self, gate, token):
         self.guard("close", token)
+        if self.armed["phase"] == "admitted":
+            self.armed["phase"] = "fenced"
         if gate not in self.no_close:
             self.gates[gate] = "closed"
 
@@ -110,7 +113,7 @@ class Host:
         self.guard("apply", token)
         if set(self.gates.values()) != {"closed"} or self.acked != set(GATES) or any(self.active.values()):
             self.violations.append("unquiesced-apply")
-        self.armed["mutated"] = True
+        self.armed["phase"] = "mutated"
         if bundle.keys() != self.bundle.keys():
             self.violations.append("non-release-write")
         self.applied = copy.deepcopy(bundle)
@@ -132,7 +135,7 @@ class Host:
         self.guard("open", token)
         if self.bundle not in self.good:
             self.violations.append("unsafe-reopen")
-        if self.armed and self.armed["mutated"] and self.bundle != self.applied:
+        if self.armed and self.armed["phase"] == "mutated" and self.bundle != self.applied:
             self.violations.append("unverified-reopen")
         if gate not in self.no_open:
             self.gates[gate] = "open"
@@ -150,11 +153,13 @@ class Host:
     def release(self, token):
         """Frees the lease and disarms the watchdog in one transition."""
         self.guard("release", token)
-        if set(self.gates.values()) != {"open"} or self.bundle not in self.good:
+        # An attempt that closed no gate must leave every gate as it found it.
+        expected = self.at_acquire if self.armed["phase"] == "admitted" else dict.fromkeys(GATES, "open")
+        if self.gates != expected or self.bundle not in self.good:
             self.violations.append("unsafe-unlock")
         if self.regress and self.bundle == self.good[1]:
             self.violations.append("regressed-unlock")
-        if self.armed and self.armed["mutated"] and self.bundle != self.applied:
+        if self.armed["phase"] == "mutated" and self.bundle != self.applied:
             self.violations.append("unlock-wrong-bundle")
         self.token = self.armed = None
 
@@ -237,6 +242,7 @@ class ControllerTests(unittest.TestCase):
             (lambda host, m: host.good.append(host.bundle) or host.bundle.update(image=p.digest("fixture-drift")), 1,
              "fixture-incumbent-drift", None),
             (lambda host, m: host.snap.update(config=p.digest("fixture-drift")), 1, "fixture-incumbent-drift", None),
+            (lambda host, m: host.gates.update({GATES[3]: "closed"}), 1, "fixture-gates-not-open", None),
         ):
             with self.subTest(expected=expected, calls=calls):
                 outcome, _, host, _ = self.run_fixture(setup, number)
@@ -375,7 +381,7 @@ class ControllerTests(unittest.TestCase):
         host.hooks[("apply", 1)] = interrupt_apply
         with self.assertRaises(Interrupted):
             c.Controller(host, clock, "fixture-controller").run(raw, attempt(1))
-        clock.time, host.armed["mutated"] = host.armed["deadline"], None
+        clock.time, host.armed["phase"] = host.armed["deadline"], None
         self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-recovery-fenced")
         self.assertEqual((set(host.gates.values()), host.calls.count("apply")), ({"closed"}, 1))
         self.assertIsNotNone(host.token)
@@ -387,7 +393,7 @@ class ControllerTests(unittest.TestCase):
         # A release failure leaves the lease and watchdog armed for recovery.
         outcome, clock, host, manifest = self.run_fixture(
             lambda host, m: (host.good.remove(m["candidate"]), host.hooks.update({("release", 1): fail})))
-        self.assertEqual((outcome, host.alerts), ("fixture-recovery-fenced", ["fixture-recovery-fenced"]))
+        self.assertEqual((outcome, host.alerts), ("fixture-unlock-failed", ["fixture-unlock-failed"]))
         self.assertIsNotNone(host.armed)
         self.assertWatchdogRecovers(clock, host, manifest, "fixture-rolled-back")
 
@@ -395,7 +401,7 @@ class ControllerTests(unittest.TestCase):
         def interrupt():
             raise Interrupted
         for verb, count, recovered in (
-            ("consume", 1, "fixture-restored"), ("close", 3, "fixture-restored"),
+            ("consume", 1, "fixture-unchanged"), ("close", 3, "fixture-restored"),
             ("ack", len(GATES), "fixture-restored"), ("apply", 1, "fixture-restored"),
             ("health", 1, "fixture-rolled-back"), ("open", 4, "fixture-rolled-back"),
             ("watch", 1, "fixture-rolled-back"), ("release", 1, "fixture-rolled-back"),
@@ -420,16 +426,20 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual((watchdog, host.alerts), (["fixture-rolled-back"], ["fixture-fence-breached"]))
         self.assertUnlocked(host)
         self.assertEqual(host.bundle, manifest["rollback"])
-        # A refused replay interrupted before unlock is restored, never rolled back.
+        # A refused replay interrupted before unlock touches no gate and no backend file,
+        # even when an unrelated fence was already closed.
         raw, clock, host, manifest = fixture()
         self.assertEqual(c.Controller(host, clock, "fixture-controller").run(raw, attempt(1)), "fixture-released")
+        host.gates[GATES[0]] = "closed"
         host.hooks[("release", 2)] = interrupt
+        calls = len(host.calls)
         with self.assertRaises(Interrupted):
             c.Controller(host, clock, "fixture-other").run(raw, attempt(1))
         clock.time = host.armed["deadline"]
-        self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-restored")
-        self.assertUnlocked(host)
-        self.assertEqual((host.bundle, host.calls.count("apply")), (manifest["candidate"], 1))
+        self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-unchanged")
+        self.assertEqual((host.violations, host.token, host.armed), ([], None, None))
+        self.assertEqual(host.calls[calls:], ["acquire", "consume", "release", "release"])
+        self.assertEqual((host.gates[GATES[0]], host.bundle), ("closed", manifest["candidate"]))
 
     def test_controller_source_has_no_host_reach(self):
         with open(c.__file__, encoding="ascii") as source:
