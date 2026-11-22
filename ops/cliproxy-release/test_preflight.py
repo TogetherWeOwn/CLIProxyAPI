@@ -67,8 +67,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_each_bundle_identity_is_bound(self):
         for side in ("candidate", "rollback"):
-            original = envelope()["manifest"][side]
-            for field in original.keys() - {"plugins", "platform"}:
+            for field in envelope()["manifest"][side].keys() - {"plugins", "platform"}:
                 with self.subTest(side=side, field=field):
                     data = envelope()
                     data["manifest"][side][field] = p.digest("fixture-substitution")
@@ -85,12 +84,12 @@ class PreflightTests(unittest.TestCase):
 
     def test_refuse_malformed_and_partial_input(self):
         valid = p.canonical(envelope())
+        invalid_literals = (b"1.0", b"100000000000", b"NaN")
         for raw in (
             b"", valid[:-1], valid + b"{}", b"\xff", b" " * p.MAX_BYTES + valid,
             valid.replace(b'"version":1', b'"version":1,"versi\\u006fn":1'),
-            valid.replace(b'"version":1', b'"version":1.0'),
-            valid.replace(b'"version":1', b'"version":100000000000'),
             b"[" * 2000 + b"]" * 2000,
+            *(valid.replace(b'"version":1', b'"version":' + literal) for literal in invalid_literals),
         ):
             self.assertEqual(p.verify(raw, attempt(1)), "fixture-envelope-rejected")
         with patch.object(p.json, "loads", side_effect=RecursionError):
@@ -108,51 +107,50 @@ class PreflightTests(unittest.TestCase):
             data = envelope()
             data["manifest"]["candidate"].update(change)
             self.assertEqual(self.verdict(data), "fixture-manifest-rejected")
-        for change in (
+        plugin_changes = (
             {"filename": "../fixture-provider.so"}, {"filename": "fixture-é.so"},
-            {"abi": "fixture-abi-3"}, {"library": "fixture-invalid"}, {"registrations": ["invalid"]},
+            {"abi": "fixture-abi-3"}, {"library": "fixture-invalid"}, {"registrations": ["invalid"]}, {"extra": None},
             {"registrations": [f"fixture-route-{n:02}" for n in range(17)]},
             {"registrations": ["fixture-route", "fixture-route"]},
             {"disabled_providers": ["fixture-z", "fixture-a"]},
-        ):
-            data = envelope()
-            data["manifest"]["candidate"]["plugins"][0].update(change)
-            self.assertEqual(self.verdict(data), "fixture-manifest-rejected")
-        data = envelope()
-        del data["staging_receipt"]["claims"]["checks"]["rollback_rehearsal"]
-        self.assertEqual(self.verdict(data), "fixture-staging-rejected")
-        data = envelope()
-        data["release_approval"]["extra"] = data["release_approval"]["claims"]
-        self.assertEqual(self.verdict(data), "fixture-acceptance-rejected")
+        )
+        missing_abi = {field: value for field, value in plugin.items() if field != "abi"}
+        for invalid in (missing_abi, *(plugin | change for change in plugin_changes)):
+            manifest = envelope()["manifest"]
+            manifest["candidate"]["plugins"] = [invalid]
+            self.assertEqual(self.verdict(signed_envelope(manifest, 1)), "fixture-manifest-rejected")
 
     def test_refuse_stale_invalid_or_wrong_issuer_evidence(self):
         staging_cases = ({"workflow": p.digest("fixture-other-workflow")}, {"artifact": "fixture-invalid"},
                          {"issued": -1, "expires": 201})
+        common_cases = ({"expires": p.FIXTURE_NOW}, {"issued": p.FIXTURE_NOW + 1}, {"expires": 451},
+                        {"issuer": "fixture-foreign"}, {"issued": [[[0]]]}, {"extra": None})
         for name, key, expected, extra in (
             ("staging_receipt", p.STAGING_KEY, "fixture-staging-rejected", staging_cases),
             ("release_approval", p.ACCEPTANCE_KEY, "fixture-acceptance-rejected", ({"issued": 99}, {"decision": "BLOCK"})),
         ):
-            for changed in ({"expires": p.FIXTURE_NOW}, {"issued": p.FIXTURE_NOW + 1},
-                            {"expires": 451}, {"issuer": "fixture-foreign"}, {"issued": [[[0]]]}, *extra):
-                with self.subTest(record=name, changed=changed):
-                    data = envelope()
-                    claims = data[name]["claims"] | changed
-                    data[name] = record(key, claims)
-                    self.assertEqual(self.verdict(data), expected)
             data = envelope()
-            data[name]["seal"] = "é" * 64
-            self.assertEqual(self.verdict(data), expected)
+            original, claims = data[name], data[name]["claims"]
+            missing_issued = {field: value for field, value in claims.items() if field != "issued"}
+            for invalid in (missing_issued, *(claims | change for change in (*common_cases, *extra))):
+                data[name] = record(key, invalid)
+                self.assertEqual(self.verdict(data), expected)
+            for invalid in ({"claims": claims}, original | {"seal": "é" * 64}, original | {"extra": None}):
+                data[name] = invalid
+                self.assertEqual(self.verdict(data), expected)
         data = envelope()
         data["release_approval"]["claims"]["expires"] += 1
         self.assertEqual(self.verdict(data), "fixture-acceptance-rejected")
         data = envelope()
         data["release_approval"] = record(p.STAGING_KEY, data["release_approval"]["claims"])
         self.assertEqual(self.verdict(data), "fixture-acceptance-rejected")
-        data = envelope()
-        claims = data["staging_receipt"]["claims"]
-        claims["checks"]["rollback_rehearsal"] = False
-        data["staging_receipt"] = record(p.STAGING_KEY, claims)
-        self.assertEqual(self.verdict(data), "fixture-staging-rejected")
+        for checks in ({}, {"rollback_rehearsal": False}):
+            data = envelope()
+            claims = data["staging_receipt"]["claims"]
+            del claims["checks"]["rollback_rehearsal"]
+            claims["checks"].update(checks)
+            data["staging_receipt"] = record(p.STAGING_KEY, claims)
+            self.assertEqual(self.verdict(data), "fixture-staging-rejected")
 
     def test_refuse_cross_attempt_replay_and_receipt_substitution(self):
         second = envelope(2)
@@ -172,6 +170,9 @@ class PreflightTests(unittest.TestCase):
         claims = data["staging_receipt"]["claims"] | {"artifact": p.digest("fixture-other-artifact")}
         data["staging_receipt"] = record(p.STAGING_KEY, claims)
         self.assertEqual(self.verdict(data), "fixture-acceptance-rejected")
+        claims["attempt"] = "fixture-invalid"
+        data["staging_receipt"] = record(p.STAGING_KEY, claims)
+        self.assertEqual(p.verify(p.canonical(data), "fixture-invalid"), "fixture-staging-rejected")
 
 
 if __name__ == "__main__":
