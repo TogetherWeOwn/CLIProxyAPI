@@ -41,7 +41,7 @@ class Host:
         self.acked, self.active, self.no_ack, self.no_close, self.no_open = set(), {}, set(), set(), set()
         self.stale_ack, self.replay_ack, self.epoch = set(), set(), 0
         self.token, self.armed, self.issued, self.consumed = None, None, 0, set()
-        self.corrupt, self.stale, self.regress, self.watched = set(), set(), False, []
+        self.corrupt, self.noop, self.stale, self.regress, self.watched = set(), set(), set(), False, []
         self.calls, self.hooks, self.violations, self.alerts = [], {}, [], []
 
     def guard(self, verb, token):
@@ -113,6 +113,8 @@ class Host:
         self.armed["mutated"] = True
         if bundle.keys() != self.bundle.keys():
             self.violations.append("non-release-write")
+        if p.digest(bundle) in self.noop:
+            return
         self.bundle = copy.deepcopy(bundle)
         if p.digest(bundle) in self.corrupt:
             self.bundle["config"] = p.digest("fixture-partial-write")
@@ -147,6 +149,8 @@ class Host:
         self.guard("release", token)
         if set(self.gates.values()) != {"open"} or self.bundle not in self.good:
             self.violations.append("unsafe-unlock")
+        if self.regress and self.bundle == self.good[1]:
+            self.violations.append("regressed-unlock")
         self.token = self.armed = None
 
     def alert(self, token, outcome):
@@ -183,7 +187,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(host.violations, [])
         self.assertIsNotNone(host.token)
         self.assertIsNotNone(host.armed)
-        self.assertIn("closed", host.gates.values())
+        self.assertEqual(set(host.gates.values()), {"closed"})
         self.assertEqual(host.alerts, ["fixture-recovery-fenced"])
         self.assertNotIn("release", host.calls)
 
@@ -293,6 +297,7 @@ class ControllerTests(unittest.TestCase):
             ("recovery-ack-missing", lambda host, _: host.hooks.update(
                 {("ack", n + 1): lambda: host.no_ack.add(GATES[0])}), False, 1),
             ("reopen-blocked", lambda host, _: host.no_open.add(GATES[0]), True, 2),
+            ("rollback-noop-write", lambda host, m: host.noop.add(p.digest(m["rollback"])), True, 2),
             ("recovery-close-error", lambda host, _: host.hooks.update({("close", n + 1): fail}), True, 1),
             ("recovery-readback-error", lambda host, _: host.hooks.update({("readback", 4): fail}), True, 1),
             ("recovery-ack-replayed", lambda host, _: host.hooks.update(
@@ -312,6 +317,7 @@ class ControllerTests(unittest.TestCase):
                 self.assertFenced(host)
                 self.assertEqual(host.calls.count("apply"), applies)
                 host.corrupt.clear()
+                host.noop.clear()
                 host.no_ack.clear()
                 host.no_open.clear()
                 host.replay_ack.clear()

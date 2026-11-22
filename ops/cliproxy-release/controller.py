@@ -18,16 +18,21 @@ WATCH_SECONDS = 1800
 WATCHDOG_DELAY = 3600
 
 
-def drained(host, clock, token):
-    """Close every gate, then require an ack bound to this lease and this drain from each."""
-    deadline, closed = clock.now() + DRAIN_LIMIT, True
+def fenced(host, token):
+    """Close every gate, continuing past failures so one fault cannot leave others open."""
+    closed = True
     for gate in GATES:
         try:
             host.close(gate, token)
         except Exception:
-            # Keep fencing the remaining gates even if one close fails.
             closed = False
-    if not closed:
+    return closed
+
+
+def drained(host, clock, token):
+    """Close every gate, then require an ack bound to this lease and this drain from each."""
+    deadline = clock.now() + DRAIN_LIMIT
+    if not fenced(host, token):
         return False
     drain = host.drain(token)
     acks = [host.ack(gate, token, drain) for gate in GATES]
@@ -71,6 +76,7 @@ def recover(host, clock, token, rollback, mutated):
                 return unlock(host, token, "fixture-rolled-back")
     except Exception:
         pass
+    fenced(host, token)
     host.alert(token, "fixture-recovery-fenced")
     return "fixture-recovery-fenced"
 
