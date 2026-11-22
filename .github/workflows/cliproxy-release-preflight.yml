@@ -58,3 +58,4 @@ jobs:
             exit 1
           fi
           python3 -ESB ops/cliproxy-release/test_preflight.py
+          python3 -ESB ops/cliproxy-release/test_controller.py
