@@ -271,6 +271,15 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-recovery-fenced")
         self.assertEqual(set(host.gates.values()), {"closed"})
         self.assertEqual((host.bundle["config"], host.calls.count("apply")), (p.digest("fixture-bad"), 0))
+        # An undrained writer that finishes during reopen is detected and fenced again.
+        def late_write(host, _):
+            host.no_ack.add(GATES[-1])
+            host.hooks[("open", len(GATES))] = lambda: host.bundle.update(config=p.digest("fixture-bad"))
+        outcome, _, host, _ = self.run_fixture(late_write)
+        self.assertEqual(outcome, "fixture-recovery-fenced")
+        self.assertEqual(host.violations, ["unsafe-reopen"])  # the fake flags the racing final open
+        host.violations.clear()
+        self.assertFenced(host)
 
     def test_failed_candidate_rolls_back_exactly_and_keeps_live_state(self):
         def unhealthy(host, m):
