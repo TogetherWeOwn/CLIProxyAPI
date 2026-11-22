@@ -19,15 +19,14 @@ WATCHDOG_DELAY = 3600
 
 
 def fenced(host, token):
-    """Close every gate, continuing past failures, then verify every gate reads back closed."""
-    closed = True
+    """Close every gate, continuing past failures, then judge only by every gate's readback."""
     for gate in GATES:
         try:
             host.close(gate, token)
         except Exception:
-            closed = False
+            pass
     try:
-        return closed and all(host.state(gate) == "closed" for gate in GATES)
+        return [host.state(gate) for gate in GATES] == ["closed"] * len(GATES)
     except Exception:
         return False
 
@@ -50,10 +49,15 @@ def healthy(host, token, bundle):
     return all(host.fresh(path, token) is True for path in PATHS)
 
 
-def reopened(host, token):
-    for gate in reversed(GATES):
-        host.open(gate, token)
-    return all(host.state(gate) == "open" for gate in GATES)
+def reopened(host, token, bundle):
+    """Reopen request paths while writers stay fenced, recheck, then reopen writers last."""
+    for path in PATHS:
+        host.open(path, token)
+    if host.readback(token) != bundle:
+        return False
+    for writer in WRITERS:
+        host.open(writer, token)
+    return [host.state(gate) for gate in GATES] == ["open"] * len(GATES) and host.readback(token) == bundle
 
 
 def unlock(host, token, outcome):
@@ -72,13 +76,13 @@ def recover(host, clock, token, rollback, mutated):
         if mutated is False:
             # An undrained writer may change the backend; serve it only if healthy and unchanged.
             current = host.readback(token)
-            if healthy(host, token, current) and reopened(host, token) and host.readback(token) == current:
+            if healthy(host, token, current) and reopened(host, token, current):
                 return unlock(host, token, "fixture-restored")
         elif mutated is True and drained(host, clock, token):
             if host.readback(token) != rollback:
                 # Only release-owned files are written, so live auth and KV stay current.
                 host.apply(rollback, token)
-            if healthy(host, token, rollback) and reopened(host, token):
+            if healthy(host, token, rollback) and reopened(host, token, rollback):
                 return unlock(host, token, "fixture-rolled-back")
     except Exception:
         pass
@@ -119,7 +123,12 @@ class Controller:
             outcome = None
         if outcome is None:
             return recover(self.host, self.clock, token, rollback, self.mutated)
-        return unlock(self.host, token, outcome)
+        try:
+            return unlock(self.host, token, outcome)
+        except Exception:
+            # The armed watchdog still owns recovery; an unconfirmed release is never a success.
+            self.host.alert(token, "fixture-unlock-failed")
+            return "fixture-unlock-failed"
 
     def cutover(self, token, attempt, candidate, rollback):
         host = self.host
@@ -132,7 +141,7 @@ class Controller:
             return None
         self.mutated = True
         host.apply(candidate, token)
-        if healthy(host, token, candidate) and reopened(host, token):
+        if healthy(host, token, candidate) and reopened(host, token, candidate):
             if host.watch(token, WATCH_SECONDS) is True:
                 return "fixture-released"
         return None

@@ -113,6 +113,7 @@ class Host:
         self.armed["mutated"] = True
         if bundle.keys() != self.bundle.keys():
             self.violations.append("non-release-write")
+        self.applied = copy.deepcopy(bundle)
         if p.digest(bundle) in self.noop:
             return
         self.bundle = copy.deepcopy(bundle)
@@ -131,6 +132,8 @@ class Host:
         self.guard("open", token)
         if self.bundle not in self.good:
             self.violations.append("unsafe-reopen")
+        if self.armed and self.armed["mutated"] and self.bundle != self.applied:
+            self.violations.append("unverified-reopen")
         if gate not in self.no_open:
             self.gates[gate] = "open"
             self.acked.discard(gate)
@@ -151,6 +154,8 @@ class Host:
             self.violations.append("unsafe-unlock")
         if self.regress and self.bundle == self.good[1]:
             self.violations.append("regressed-unlock")
+        if self.armed and self.armed["mutated"] and self.bundle != self.applied:
+            self.violations.append("unlock-wrong-bundle")
         self.token = self.armed = None
 
     def alert(self, token, outcome):
@@ -159,6 +164,13 @@ class Host:
 
 def refresh(host):
     host.live.update(LIVE)
+
+
+def other_write(host, base, readback):
+    """A writer installs a different, healthy bundle just after the request paths reopen."""
+    other = dict(base, config=p.digest("fixture-other-writer"))
+    host.good.append(other)
+    host.hooks[("readback", readback)] = lambda: setattr(host, "bundle", copy.deepcopy(other))
 
 
 def fixture(number=1):
@@ -214,7 +226,8 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(host.calls[:5 + 2 * n], ["acquire", "consume", "readback", "snapshot"]
                          + ["close"] * n + ["drain"] + ["ack"] * n)
         self.assertEqual(host.calls[5 + 2 * n:], ["readback", "apply", "readback", "health"] + ["fresh"] * len(PATHS)
-                         + ["open"] * n + ["watch", "release"])
+                         + ["open"] * len(PATHS) + ["readback"] + ["open"] * (n - len(PATHS))
+                         + ["readback", "watch", "release"])
 
     def test_admission_is_exclusive_single_use_and_drift_checked(self):
         for setup, number, expected, calls in (
@@ -271,14 +284,12 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-recovery-fenced")
         self.assertEqual(set(host.gates.values()), {"closed"})
         self.assertEqual((host.bundle["config"], host.calls.count("apply")), (p.digest("fixture-bad"), 0))
-        # An undrained writer that finishes during reopen is detected and fenced again.
+        # An undrained writer that finishes once request paths reopen is caught before writers reopen.
         def late_write(host, _):
             host.no_ack.add(GATES[-1])
-            host.hooks[("open", len(GATES))] = lambda: host.bundle.update(config=p.digest("fixture-bad"))
+            host.hooks[("readback", 4)] = lambda: host.bundle.update(config=p.digest("fixture-bad"))
         outcome, _, host, _ = self.run_fixture(late_write)
         self.assertEqual(outcome, "fixture-recovery-fenced")
-        self.assertEqual(host.violations, ["unsafe-reopen"])  # the fake flags the racing final open
-        host.violations.clear()
         self.assertFenced(host)
 
     def test_failed_candidate_rolls_back_exactly_and_keeps_live_state(self):
@@ -286,7 +297,8 @@ class ControllerTests(unittest.TestCase):
             host.good.remove(m["candidate"])
         cases = [("unhealthy", unhealthy),
                  ("partial-write", lambda host, m: host.corrupt.add(p.digest(m["candidate"]))),
-                 ("regression", lambda host, _: setattr(host, "regress", True))]
+                 ("regression", lambda host, _: setattr(host, "regress", True)),
+                 ("writer-during-reopen", lambda host, m: other_write(host, m["candidate"], 4))]
         cases += [(path, lambda host, m, path=path: host.stale.add((p.digest(m["candidate"]), path)))
                   for path in PATHS]
         for name, fault in cases:
@@ -308,6 +320,9 @@ class ControllerTests(unittest.TestCase):
         def interrupt_apply():
             raise Interrupted
 
+        def other_writer(host, m):
+            other_write(host, m["rollback"], 6)
+
         def replayed_recovery_ack(host):
             # A direct request is active after reopen, and an earlier drain's ack is replayed.
             host.active[GATES[2]] = 1
@@ -319,9 +334,10 @@ class ControllerTests(unittest.TestCase):
             ("recovery-ack-missing", lambda host, _: host.hooks.update(
                 {("ack", n + 1): lambda: host.no_ack.add(GATES[0])}), False, 1),
             ("reopen-blocked", lambda host, _: host.no_open.add(GATES[0]), True, 2),
+            ("writer-during-rollback-reopen", other_writer, False, 2),
             ("rollback-noop-write", lambda host, m: host.noop.add(p.digest(m["rollback"])), True, 2),
             ("recovery-close-error", lambda host, _: host.hooks.update({("close", n + 1): fail}), True, 1),
-            ("recovery-readback-error", lambda host, _: host.hooks.update({("readback", 4): fail}), True, 1),
+            ("recovery-readback-error", lambda host, _: host.hooks.update({("readback", 6): fail}), True, 1),
             ("recovery-ack-replayed", lambda host, _: host.hooks.update(
                 {("drain", 2): lambda: replayed_recovery_ack(host)}), True, 1),
         )
@@ -363,6 +379,11 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-recovery-fenced")
         self.assertEqual((set(host.gates.values()), host.calls.count("apply")), ({"closed"}, 1))
         self.assertIsNotNone(host.token)
+        # An unconfirmed release after a clean watch alerts and leaves recovery to the watchdog.
+        outcome, clock, host, manifest = self.run_fixture(lambda host, _: host.hooks.update({("release", 1): fail}))
+        self.assertEqual((outcome, host.alerts), ("fixture-unlock-failed", ["fixture-unlock-failed"]))
+        self.assertIsNotNone(host.armed)
+        self.assertWatchdogRecovers(clock, host, manifest, "fixture-rolled-back")
         # A release failure leaves the lease and watchdog armed for recovery.
         outcome, clock, host, manifest = self.run_fixture(
             lambda host, m: (host.good.remove(m["candidate"]), host.hooks.update({("release", 1): fail})))
