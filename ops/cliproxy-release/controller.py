@@ -39,7 +39,9 @@ def drained(host, clock, token):
     drain = host.drain(token)
     acks = [host.ack(gate, token, drain) for gate in GATES]
     expected = [{"gate": gate, "closed": True, "active": 0, "token": token, "drain": drain} for gate in GATES]
-    return acks == expected and clock.now() <= deadline
+    # Canonical JSON keeps a boolean from standing in for an integer lease or drain id.
+    return [preflight.canonical(ack) for ack in acks] == [preflight.canonical(ack) for ack in expected] and (
+        clock.now() <= deadline)
 
 
 def healthy(host, token, bundle):
@@ -57,7 +59,7 @@ def reopened(host, token, bundle):
         return False
     for path in PATHS:
         host.open(path, token)
-    if host.readback(token) != bundle:
+    if [host.state(path) for path in PATHS] != ["open"] * len(PATHS) or host.readback(token) != bundle:
         return False
     for writer in WRITERS:
         host.open(writer, token)

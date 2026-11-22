@@ -42,7 +42,7 @@ class Host:
         self.stale_ack, self.replay_ack, self.epoch = set(), set(), 0
         self.token, self.armed, self.issued, self.consumed = None, None, 0, set()
         self.corrupt, self.noop, self.stale, self.regress, self.watched = set(), set(), set(), False, []
-        self.opened = []
+        self.opened, self.bool_ack = [], set()
         self.calls, self.hooks, self.violations, self.alerts = [], {}, [], []
 
     def guard(self, verb, token):
@@ -107,6 +107,8 @@ class Host:
         ack = {"gate": gate, "closed": closed, "active": active, "token": token, "drain": self.epoch}
         if gate in self.no_ack:
             return None
+        if gate in self.bool_ack:
+            return ack | {"token": True}
         if gate in self.stale_ack or gate in self.replay_ack:
             # An ack replayed from an earlier lease generation or an earlier drain.
             return ack | ({"token": token - 1} if gate in self.stale_ack else {"drain": self.epoch - 1, "active": 0})
@@ -273,7 +275,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(c.Controller(host, clock, "fixture-other").run(raw, attempt(1)), "fixture-attempt-replayed")
 
     def test_missing_or_late_drain_ack_restores_untouched_backend(self):
-        faults = ("no_ack", "stale_ack", "replay_ack", "active", "no_close")
+        faults = ("no_ack", "stale_ack", "replay_ack", "bool_ack", "active", "no_close")
         cases = [(gate, fault) for gate in GATES for fault in faults]
         for gate, fault in cases + [(None, "late"), (None, "writer-race")]:
             def setup(host, _):
@@ -325,6 +327,11 @@ class ControllerTests(unittest.TestCase):
             host.hooks[("phase", 1)] = fail
         outcome, _, host, _ = self.run_fixture(phase_error)
         self.assertEqual(outcome, "fixture-recovery-fenced")
+        self.assertFenced(host)
+        # An unknown host phase after a failed watch keeps the fence and writes nothing.
+        outcome, _, host, _ = self.run_fixture(lambda host, _: host.hooks.update(
+            {("watch", 1): lambda: (setattr(host, "regress", True), host.armed.update(phase=None))}))
+        self.assertEqual((outcome, host.calls.count("apply")), ("fixture-recovery-fenced", 1))
         self.assertFenced(host)
         # A healthy but different bundle at the final restore readback is not unlocked.
         def final_swap(host, m):
@@ -399,6 +406,9 @@ class ControllerTests(unittest.TestCase):
                 self.assertEqual(outcome, "fixture-recovery-fenced")
                 self.assertFenced(host)
                 self.assertEqual(host.calls.count("apply"), applies)
+                if name == "reopen-blocked":
+                    # Writers stay fenced while a request path fails to reopen.
+                    self.assertFalse(set(host.opened) & set(GATES[len(PATHS):]))
                 host.corrupt.clear()
                 host.noop.clear()
                 host.no_ack.clear()
