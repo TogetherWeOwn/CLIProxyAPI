@@ -77,6 +77,10 @@ class Host:
         self.consumed.add(attempt)
         return unused
 
+    def phase(self, token):
+        self.guard("phase", token)
+        return self.armed["phase"]
+
     def readback(self, token):
         self.guard("readback", token)
         return copy.deepcopy(self.bundle)
@@ -238,8 +242,9 @@ class ControllerTests(unittest.TestCase):
         n = len(GATES)
         self.assertEqual(host.calls[:5 + 2 * n], ["acquire", "consume", "readback", "snapshot"]
                          + ["close"] * n + ["drain"] + ["ack"] * n)
+        w = n - len(PATHS)
         self.assertEqual(host.calls[5 + 2 * n:], ["readback", "apply", "readback", "health"] + ["fresh"] * len(PATHS)
-                         + ["open"] * len(PATHS) + ["readback"] + ["open"] * (n - len(PATHS))
+                         + ["close"] * w + ["open"] * len(PATHS) + ["readback"] + ["open"] * w
                          + ["readback", "watch", "release"])
 
     def test_admission_is_exclusive_single_use_and_drift_checked(self):
@@ -284,8 +289,15 @@ class ControllerTests(unittest.TestCase):
                     getattr(host, fault).add(gate)
             with self.subTest(gate=gate, fault=fault):
                 outcome, _, host, manifest = self.run_fixture(setup)
-                self.assertEqual(outcome, "fixture-restored")
                 self.assertNotIn("apply", host.calls)
+                if fault == "no_close" and gate not in PATHS:
+                    # Request paths never reopen beside a writer gate that cannot close.
+                    self.assertEqual((outcome, host.alerts), ("fixture-fence-breached", ["fixture-fence-breached"]))
+                    self.assertEqual([g for g in GATES if host.gates[g] == "open"], [gate])
+                    self.assertEqual((host.violations, host.bundle), ([], manifest["rollback"]))
+                    self.assertIsNotNone(host.armed)
+                    continue
+                self.assertEqual(outcome, "fixture-restored")
                 self.assertUnlocked(host)
                 self.assertEqual(host.bundle == manifest["rollback"], fault != "writer-race")
         # An unhealthy writer change stays fenced, even for the watchdog, and is never overwritten.
@@ -303,6 +315,22 @@ class ControllerTests(unittest.TestCase):
             host.no_ack.add(GATES[-1])
             host.hooks[("readback", 4)] = lambda: host.bundle.update(config=p.digest("fixture-bad"))
         outcome, _, host, _ = self.run_fixture(late_write)
+        self.assertEqual(outcome, "fixture-recovery-fenced")
+        self.assertFenced(host)
+        # An unreadable host phase is unknown, so the controller keeps the fence.
+        def phase_error(host, _):
+            def fail():
+                raise RuntimeError
+            host.no_ack.add(GATES[0])
+            host.hooks[("phase", 1)] = fail
+        outcome, _, host, _ = self.run_fixture(phase_error)
+        self.assertEqual(outcome, "fixture-recovery-fenced")
+        self.assertFenced(host)
+        # A healthy but different bundle at the final restore readback is not unlocked.
+        def final_swap(host, m):
+            host.no_ack.add(GATES[0])
+            other_write(host, m["rollback"], 5)
+        outcome, _, host, _ = self.run_fixture(final_swap)
         self.assertEqual(outcome, "fixture-recovery-fenced")
         self.assertFenced(host)
 
@@ -351,7 +379,9 @@ class ControllerTests(unittest.TestCase):
             ("reopen-blocked", lambda host, _: host.no_open.add(GATES[0]), True, 2),
             ("writer-during-rollback-reopen", other_writer, False, 2),
             ("rollback-noop-write", lambda host, m: host.noop.add(p.digest(m["rollback"])), True, 2),
-            ("recovery-close-error", lambda host, _: host.hooks.update({("close", n + 1): fail}), True, 1),
+            # The first close of the recovery drain, after the drain and the writer re-fence before reopen.
+            ("recovery-close-error", lambda host, _: host.hooks.update(
+                {("close", 2 * n - len(PATHS) + 1): fail}), True, 1),
             ("recovery-readback-error", lambda host, _: host.hooks.update({("readback", 6): fail}), True, 1),
             ("recovery-ack-replayed", lambda host, _: host.hooks.update(
                 {("drain", 2): lambda: replayed_recovery_ack(host)}), True, 1),

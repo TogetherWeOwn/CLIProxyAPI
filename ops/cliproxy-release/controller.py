@@ -50,7 +50,11 @@ def healthy(host, token, bundle):
 
 
 def reopened(host, token, bundle):
-    """Reopen request paths while writers stay fenced, recheck, then reopen writers last."""
+    """Reopen request paths only while every writer reads back fenced, recheck, then reopen writers."""
+    for writer in WRITERS:
+        host.close(writer, token)
+    if [host.state(writer) for writer in WRITERS] != ["closed"] * len(WRITERS):
+        return False
     for path in PATHS:
         host.open(path, token)
     if host.readback(token) != bundle:
@@ -111,7 +115,7 @@ def watchdog(host, clock, owner):
 class Controller:
     def __init__(self, host, clock, owner):
         self.host, self.clock, self.owner = host, clock, owner
-        self.used, self.phase = False, "admitted"
+        self.used = False
 
     def run(self, raw, attempt):
         if self.used:
@@ -130,7 +134,12 @@ class Controller:
         except Exception:
             outcome = None
         if outcome is None:
-            return recover(self.host, self.clock, token, rollback, self.phase)
+            try:
+                # Recover from the host's record, not local intent; an unreadable phase stays fenced.
+                phase = self.host.phase(token)
+            except Exception:
+                phase = None
+            return recover(self.host, self.clock, token, rollback, phase)
         return unlock(self.host, token, outcome)
 
     def cutover(self, token, attempt, candidate, rollback):
@@ -142,11 +151,9 @@ class Controller:
         # Recovery reopens every gate, so the attempt only starts from a fully open gateway.
         if [host.state(gate) for gate in GATES] != ["open"] * len(GATES):
             return "fixture-gates-not-open"
-        self.phase = "fenced"
         # Recheck after quiescence: a writer may have changed the incumbent during the drain.
         if not drained(host, self.clock, token) or host.readback(token) != rollback:
             return None
-        self.phase = "mutated"
         host.apply(candidate, token)
         if healthy(host, token, candidate) and reopened(host, token, candidate):
             if host.watch(token, WATCH_SECONDS) is True:
