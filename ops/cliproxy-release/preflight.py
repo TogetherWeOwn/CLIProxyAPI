@@ -6,7 +6,7 @@ import json
 import re
 
 MAX_BYTES = 16 * 1024
-FIXTURE_NOW = 1000
+FIXTURE_NOW = 200
 MAX_LIFETIME = 300
 STAGING_ISSUER = "fixture-staging-issuer"
 ACCEPTANCE_ISSUER = "fixture-acceptance-issuer"
@@ -118,6 +118,7 @@ def verify(raw, expected_attempt):
         require(manifest["workflow"] == digest("fixture-preflight-workflow-v1"))
         verify_bundle(manifest["candidate"])
         verify_bundle(manifest["rollback"])
+        require(manifest["candidate"] != manifest["rollback"])
         manifest_digest = digest(manifest)
     except InvalidFixture:
         return "fixture-manifest-rejected"

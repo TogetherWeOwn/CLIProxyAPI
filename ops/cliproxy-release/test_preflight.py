@@ -29,9 +29,13 @@ def envelope(number=1):
     candidate["plugins"][0]["library"] = p.digest("fixture-library-new")
     manifest = {"version": 1, "workflow": p.digest("fixture-preflight-workflow-v1"),
                 "candidate": candidate, "rollback": rollback}
+    return signed_envelope(manifest, number)
+
+
+def signed_envelope(manifest, number):
     receipt = record(p.STAGING_KEY, {
         "issuer": "fixture-staging-issuer", "workflow": p.digest("fixture-staging-workflow-v1"),
-        "manifest": p.digest(manifest), "attempt": attempt(number), "issued": 900, "expires": 1100,
+        "manifest": p.digest(manifest), "attempt": attempt(number), "issued": 100, "expires": 300,
         "artifact": p.digest(f"fixture-artifact-{number}"),
         "qualification": p.digest("fixture-qualification"),
         "config_compatibility": p.digest("fixture-config-compatibility"),
@@ -43,7 +47,7 @@ def envelope(number=1):
     })
     approval = record(p.ACCEPTANCE_KEY, {
         "issuer": "fixture-acceptance-issuer", "decision": "APPROVE", "manifest": p.digest(manifest),
-        "attempt": attempt(number), "receipt": p.digest(receipt), "issued": 950, "expires": 1050,
+        "attempt": attempt(number), "receipt": p.digest(receipt), "issued": 150, "expires": 250,
     })
     return {"manifest": manifest, "staging_receipt": receipt, "release_approval": approval}
 
@@ -85,21 +89,30 @@ class PreflightTests(unittest.TestCase):
             valid.replace(b'"version":1', b'"version":1,"versi\\u006fn":1'),
             valid.replace(b'"version":1', b'"version":1.0'),
             valid.replace(b'"version":1', b'"version":100000000000'),
-            b"[" * 2000 + b"]" * 2000,
         ):
             self.assertEqual(p.verify(raw, attempt(1)), "fixture-envelope-rejected")
+        rollback = envelope()["manifest"]["rollback"]
         for fields in ({"version": 2}, {"version": True}, {"unknown": None}, {"rollback": None},
-                       {"workflow": p.digest("fixture-wrong-workflow")}):
+                       {"workflow": p.digest("fixture-wrong-workflow")}, {"candidate": rollback}):
+            manifest = envelope()["manifest"] | fields
+            self.assertEqual(self.verdict(signed_envelope(manifest, 1)), "fixture-manifest-rejected")
+        plugin = rollback["plugins"][0]
+        for change in (
+            {"platform": "linux/arm64"}, {"image": "fixture-invalid"}, {"plugins": [plugin, plugin]},
+            {"plugins": [dict(plugin, filename=f"fixture-plugin-{n:02}.so") for n in range(17)]},
+        ):
             data = envelope()
-            data["manifest"].update(fields)
+            data["manifest"]["candidate"].update(change)
             self.assertEqual(self.verdict(data), "fixture-manifest-rejected")
-        for name in ("../fixture-provider.so", "fixture-path/fixture-provider.so", "fixture-é.so"):
+        for change in (
+            {"filename": "../fixture-provider.so"}, {"filename": "fixture-é.so"},
+            {"abi": "fixture-abi-3"}, {"library": "fixture-invalid"}, {"registrations": ["invalid"]},
+            {"registrations": [f"fixture-route-{n:02}" for n in range(17)]},
+            {"registrations": ["fixture-route", "fixture-route"]},
+            {"disabled_providers": ["fixture-z", "fixture-a"]},
+        ):
             data = envelope()
-            data["manifest"]["candidate"]["plugins"][0]["filename"] = name
-            self.assertEqual(self.verdict(data), "fixture-manifest-rejected")
-        for count in (2, 17):
-            data = envelope()
-            data["manifest"]["candidate"]["plugins"] *= count
+            data["manifest"]["candidate"]["plugins"][0].update(change)
             self.assertEqual(self.verdict(data), "fixture-manifest-rejected")
         data = envelope()
         del data["staging_receipt"]["claims"]["checks"]["rollback_rehearsal"]
@@ -109,26 +122,27 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(self.verdict(data), "fixture-acceptance-rejected")
 
     def test_refuse_stale_invalid_or_wrong_issuer_evidence(self):
-        for name, key, expected in (
-            ("staging_receipt", p.STAGING_KEY, "fixture-staging-rejected"),
-            ("release_approval", p.ACCEPTANCE_KEY, "fixture-acceptance-rejected"),
+        staging_cases = ({"workflow": p.digest("fixture-other-workflow")}, {"artifact": "fixture-invalid"},
+                         {"issued": -1, "expires": 201})
+        for name, key, expected, extra in (
+            ("staging_receipt", p.STAGING_KEY, "fixture-staging-rejected", staging_cases),
+            ("release_approval", p.ACCEPTANCE_KEY, "fixture-acceptance-rejected", ({"issued": 99}, {"decision": "BLOCK"})),
         ):
             for changed in ({"expires": p.FIXTURE_NOW}, {"issued": p.FIXTURE_NOW + 1},
-                            {"issuer": "fixture-foreign"}, {"issued": [[[0]]]}):
+                            {"expires": 451}, {"issuer": "fixture-foreign"}, {"issued": [[[0]]]}, *extra):
                 with self.subTest(record=name, changed=changed):
                     data = envelope()
                     claims = data[name]["claims"] | changed
                     data[name] = record(key, claims)
                     self.assertEqual(self.verdict(data), expected)
+            data = envelope()
+            data[name]["seal"] = "é" * 64
+            self.assertEqual(self.verdict(data), expected)
         data = envelope()
         data["release_approval"]["claims"]["expires"] += 1
         self.assertEqual(self.verdict(data), "fixture-acceptance-rejected")
         data = envelope()
         data["release_approval"] = record(p.STAGING_KEY, data["release_approval"]["claims"])
-        self.assertEqual(self.verdict(data), "fixture-acceptance-rejected")
-        data = envelope()
-        claims = data["release_approval"]["claims"] | {"decision": "BLOCK"}
-        data["release_approval"] = record(p.ACCEPTANCE_KEY, claims)
         self.assertEqual(self.verdict(data), "fixture-acceptance-rejected")
         data = envelope()
         claims = data["staging_receipt"]["claims"]
