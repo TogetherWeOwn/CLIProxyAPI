@@ -42,6 +42,7 @@ class Host:
         self.stale_ack, self.replay_ack, self.epoch = set(), set(), 0
         self.token, self.armed, self.issued, self.consumed = None, None, 0, set()
         self.corrupt, self.noop, self.stale, self.regress, self.watched = set(), set(), set(), False, []
+        self.opened = []
         self.calls, self.hooks, self.violations, self.alerts = [], {}, [], []
 
     def guard(self, verb, token):
@@ -135,11 +136,16 @@ class Host:
         self.guard("open", token)
         if self.bundle not in self.good:
             self.violations.append("unsafe-reopen")
-        if self.armed and self.armed["phase"] == "mutated" and self.bundle != self.applied:
+        if self.armed and self.armed["phase"] == "mutated" and not self.verified():
             self.violations.append("unverified-reopen")
+        self.opened.append(gate)
         if gate not in self.no_open:
             self.gates[gate] = "open"
             self.acked.discard(gate)
+
+    def verified(self):
+        """After a backend write, only the last applied bundle or the exact rollback may serve."""
+        return self.bundle in (self.applied, self.armed["rollback"])
 
     def state(self, gate):
         return self.gates[gate]
@@ -159,7 +165,7 @@ class Host:
             self.violations.append("unsafe-unlock")
         if self.regress and self.bundle == self.good[1]:
             self.violations.append("regressed-unlock")
-        if self.armed["phase"] == "mutated" and self.bundle != self.applied:
+        if self.armed["phase"] == "mutated" and not self.verified():
             self.violations.append("unlock-wrong-bundle")
         self.token = self.armed = None
 
@@ -223,6 +229,8 @@ class ControllerTests(unittest.TestCase):
         self.assertGreater(c.WATCHDOG_DELAY, c.DRAIN_LIMIT + c.WATCH_SECONDS)
         outcome, clock, host, manifest = self.run_fixture()
         self.assertEqual(outcome, "fixture-released")
+        # Request paths reopen before any writer.
+        self.assertEqual(host.opened, list(PATHS) + list(GATES[len(PATHS):]))
         self.assertEqual(c.WATCH_SECONDS, 1800)
         self.assertEqual((host.watched, clock.now()), ([c.WATCH_SECONDS], 1000 + c.WATCH_SECONDS))
         self.assertUnlocked(host)
@@ -304,7 +312,8 @@ class ControllerTests(unittest.TestCase):
         cases = [("unhealthy", unhealthy),
                  ("partial-write", lambda host, m: host.corrupt.add(p.digest(m["candidate"]))),
                  ("regression", lambda host, _: setattr(host, "regress", True)),
-                 ("writer-during-reopen", lambda host, m: other_write(host, m["candidate"], 4))]
+                 ("writer-during-reopen", lambda host, m: other_write(host, m["candidate"], 4)),
+                 ("writer-after-writers-reopen", lambda host, m: other_write(host, m["candidate"], 5))]
         cases += [(path, lambda host, m, path=path: host.stale.add((p.digest(m["candidate"]), path)))
                   for path in PATHS]
         for name, fault in cases:
@@ -414,6 +423,15 @@ class ControllerTests(unittest.TestCase):
                 self.assertIsNotNone(host.token)
                 self.assertIsNotNone(host.armed)
                 self.assertWatchdogRecovers(clock, host, manifest, recovered)
+        # A backend already at the exact rollback is verified and reopened without a second write.
+        raw, clock, host, manifest = fixture()
+        host.hooks[("health", 1)] = interrupt
+        with self.assertRaises(Interrupted):
+            c.Controller(host, clock, "fixture-controller").run(raw, attempt(1))
+        host.bundle = copy.deepcopy(manifest["rollback"])
+        self.assertWatchdogRecovers(clock, host, manifest, "fixture-rolled-back")
+        # The candidate write and the refused stale probe: recovery itself wrote nothing.
+        self.assertEqual(host.calls.count("apply"), 2)
         watchdog = []
 
         def takeover(host):
