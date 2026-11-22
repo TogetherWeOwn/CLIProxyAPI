@@ -3,6 +3,7 @@
 import copy
 import json
 import unittest
+from unittest.mock import patch
 
 import preflight as p
 
@@ -89,8 +90,11 @@ class PreflightTests(unittest.TestCase):
             valid.replace(b'"version":1', b'"version":1,"versi\\u006fn":1'),
             valid.replace(b'"version":1', b'"version":1.0'),
             valid.replace(b'"version":1', b'"version":100000000000'),
+            b"[" * 2000 + b"]" * 2000,
         ):
             self.assertEqual(p.verify(raw, attempt(1)), "fixture-envelope-rejected")
+        with patch.object(p.json, "loads", side_effect=RecursionError):
+            self.assertEqual(p.verify(valid, attempt(1)), "fixture-envelope-rejected")
         rollback = envelope()["manifest"]["rollback"]
         for fields in ({"version": 2}, {"version": True}, {"unknown": None}, {"rollback": None},
                        {"workflow": p.digest("fixture-wrong-workflow")}, {"candidate": rollback}):
