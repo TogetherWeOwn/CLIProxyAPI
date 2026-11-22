@@ -334,6 +334,14 @@ class ControllerTests(unittest.TestCase):
                 host.active.clear()
                 self.assertWatchdogRecovers(clock, host, manifest, "fixture-rolled-back")
                 self.assertEqual(host.live, LIVE)
+        # A gate that silently stays open is reported as a breach, never as fenced.
+        outcome, clock, host, manifest = self.run_fixture(lambda host, _: host.hooks.update(
+            {("watch", 1): lambda: (setattr(host, "regress", True), host.no_close.add(GATES[1]))}))
+        self.assertEqual((outcome, host.alerts), ("fixture-fence-breached", ["fixture-fence-breached"]))
+        self.assertEqual([gate for gate in GATES if host.gates[gate] == "open"], [GATES[1]])
+        self.assertIsNotNone(host.token)
+        host.no_close.clear()
+        self.assertWatchdogRecovers(clock, host, manifest, "fixture-rolled-back")
         # A release failure leaves the lease and watchdog armed for recovery.
         outcome, clock, host, manifest = self.run_fixture(
             lambda host, m: (host.good.remove(m["candidate"]), host.hooks.update({("release", 1): fail})))
@@ -365,8 +373,9 @@ class ControllerTests(unittest.TestCase):
             watchdog.append(c.watchdog(host, host.clock, "fixture-watchdog"))
         outcome, _, host, manifest = self.run_fixture(
             lambda host, _: host.hooks.update({("health", 1): lambda: takeover(host)}))
-        self.assertEqual(outcome, "fixture-recovery-fenced")
-        self.assertEqual((watchdog, host.alerts), (["fixture-rolled-back"], ["fixture-recovery-fenced"]))
+        # The fenced-out controller cannot verify a fence, so it alerts conservatively.
+        self.assertEqual(outcome, "fixture-fence-breached")
+        self.assertEqual((watchdog, host.alerts), (["fixture-rolled-back"], ["fixture-fence-breached"]))
         self.assertUnlocked(host)
         self.assertEqual(host.bundle, manifest["rollback"])
         # A refused replay interrupted before unlock is restored, never rolled back.

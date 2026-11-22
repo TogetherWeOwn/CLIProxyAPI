@@ -19,14 +19,17 @@ WATCHDOG_DELAY = 3600
 
 
 def fenced(host, token):
-    """Close every gate, continuing past failures so one fault cannot leave others open."""
+    """Close every gate, continuing past failures, then verify every gate reads back closed."""
     closed = True
     for gate in GATES:
         try:
             host.close(gate, token)
         except Exception:
             closed = False
-    return closed
+    try:
+        return closed and all(host.state(gate) == "closed" for gate in GATES)
+    except Exception:
+        return False
 
 
 def drained(host, clock, token):
@@ -77,9 +80,9 @@ def recover(host, clock, token, rollback, mutated):
                 return unlock(host, token, "fixture-rolled-back")
     except Exception:
         pass
-    fenced(host, token)
-    host.alert(token, "fixture-recovery-fenced")
-    return "fixture-recovery-fenced"
+    outcome = "fixture-recovery-fenced" if fenced(host, token) else "fixture-fence-breached"
+    host.alert(token, outcome)
+    return outcome
 
 
 def watchdog(host, clock, owner):
