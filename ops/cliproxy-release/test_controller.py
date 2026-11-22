@@ -305,6 +305,9 @@ class ControllerTests(unittest.TestCase):
         def fail():
             raise RuntimeError
 
+        def interrupt_apply():
+            raise Interrupted
+
         def replayed_recovery_ack(host):
             # A direct request is active after reopen, and an earlier drain's ack is replayed.
             host.active[GATES[2]] = 1
@@ -351,6 +354,15 @@ class ControllerTests(unittest.TestCase):
         self.assertIsNotNone(host.token)
         host.no_close.clear()
         self.assertWatchdogRecovers(clock, host, manifest, "fixture-rolled-back")
+        # An unknown mutation state in a watchdog claim never reopens or rolls back.
+        raw, clock, host, manifest = fixture()
+        host.hooks[("apply", 1)] = interrupt_apply
+        with self.assertRaises(Interrupted):
+            c.Controller(host, clock, "fixture-controller").run(raw, attempt(1))
+        clock.time, host.armed["mutated"] = host.armed["deadline"], None
+        self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-recovery-fenced")
+        self.assertEqual((set(host.gates.values()), host.calls.count("apply")), ({"closed"}, 1))
+        self.assertIsNotNone(host.token)
         # A release failure leaves the lease and watchdog armed for recovery.
         outcome, clock, host, manifest = self.run_fixture(
             lambda host, m: (host.good.remove(m["candidate"]), host.hooks.update({("release", 1): fail})))

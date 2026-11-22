@@ -68,12 +68,13 @@ def recover(host, clock, token, rollback, mutated):
     The lease, watchdog and fence stay in place unless recovery readback proves the result.
     """
     try:
-        if not mutated:
+        # An unknown mutation state matches neither branch and stays fenced.
+        if mutated is False:
             # An undrained writer may change the backend; serve it only if healthy and unchanged.
             current = host.readback(token)
             if healthy(host, token, current) and reopened(host, token) and host.readback(token) == current:
                 return unlock(host, token, "fixture-restored")
-        elif drained(host, clock, token):
+        elif mutated is True and drained(host, clock, token):
             if host.readback(token) != rollback:
                 # Only release-owned files are written, so live auth and KV stay current.
                 host.apply(rollback, token)
