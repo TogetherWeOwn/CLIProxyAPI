@@ -66,7 +66,8 @@ def recover(host, clock, token, rollback, mutated):
     """
     try:
         if not mutated:
-            if reopened(host, token):
+            # A writer may have changed the backend before quiescence; serve it only if healthy.
+            if healthy(host, token, host.readback(token)) and reopened(host, token):
                 return unlock(host, token, "fixture-restored")
         elif drained(host, clock, token):
             if host.readback(token) != rollback:

@@ -261,6 +261,16 @@ class ControllerTests(unittest.TestCase):
                 self.assertNotIn("apply", host.calls)
                 self.assertUnlocked(host)
                 self.assertEqual(host.bundle == manifest["rollback"], fault != "writer-race")
+        # An unhealthy writer change stays fenced, even for the watchdog, and is never overwritten.
+        def bad_write(host, _):
+            host.hooks[("close", 1)] = lambda: host.bundle.update(config=p.digest("fixture-bad"))
+        outcome, clock, host, manifest = self.run_fixture(bad_write)
+        self.assertEqual(outcome, "fixture-recovery-fenced")
+        self.assertFenced(host)
+        clock.time = host.armed["deadline"]
+        self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-recovery-fenced")
+        self.assertEqual(set(host.gates.values()), {"closed"})
+        self.assertEqual((host.bundle["config"], host.calls.count("apply")), (p.digest("fixture-bad"), 0))
 
     def test_failed_candidate_rolls_back_exactly_and_keeps_live_state(self):
         def unhealthy(host, m):
