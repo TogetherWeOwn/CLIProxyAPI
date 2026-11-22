@@ -1,0 +1,535 @@
+"""Fake adapters and focused state-machine tests for the fixture controller."""
+
+import ast
+import copy
+import unittest
+
+import controller as c
+import preflight as p
+from test_preflight import attempt, envelope
+
+LIVE = {"auth": "fixture-auth-2", "kv": "fixture-kv-2"}
+# The fake's own inventory, independent of the controller's tuples.
+PATHS = ("fixture-ingress-public", "fixture-ingress-direct", "fixture-backend-direct")
+GATES = PATHS + ("fixture-management", "fixture-config-writer", "fixture-plugin-writer", "fixture-reload")
+
+
+class Fenced(Exception):
+    pass
+
+
+class Interrupted(BaseException):
+    """Models process death: the controller must not catch it."""
+
+
+class Clock:
+    def __init__(self):
+        self.time = 1000
+
+    def now(self):
+        return self.time
+
+
+class Host:
+    """Fake host adapter that referees every safety invariant it can observe."""
+
+    def __init__(self, clock, rollback, candidate):
+        self.clock, self.bundle, self.snap = clock, copy.deepcopy(rollback), copy.deepcopy(rollback)
+        self.good = [copy.deepcopy(rollback), copy.deepcopy(candidate)]
+        self.live = {"auth": "fixture-auth-1", "kv": "fixture-kv-1"}
+        self.gates = dict.fromkeys(GATES, "open")
+        self.acked, self.active, self.no_ack, self.no_close, self.no_open = set(), {}, set(), set(), set()
+        self.stale_ack, self.replay_ack, self.epoch = set(), set(), 0
+        self.token, self.armed, self.issued, self.consumed = None, None, 0, set()
+        self.corrupt, self.noop, self.stale, self.regress, self.watched = set(), set(), set(), False, []
+        self.opened, self.loose_ack, self.drained_after_apply = [], set(), False
+        self.calls, self.hooks, self.violations, self.alerts = [], {}, [], []
+
+    def guard(self, verb, token):
+        self.calls.append(verb)
+        hook = self.hooks.pop((verb, self.calls.count(verb)), None)
+        if hook:
+            hook()
+        if token is None or token != self.token:
+            raise Fenced
+
+    def acquire(self, owner, deadline, rollback):
+        self.calls.append("acquire")
+        if self.token is not None or set(self.gates.values()) != {"open"}:
+            return None
+        self.issued += 1
+        self.token, self.acked = self.issued, set()
+        self.armed = {"deadline": deadline, "rollback": copy.deepcopy(rollback), "phase": "admitted"}
+        self.at_acquire = dict(self.gates)
+        return self.token
+
+    def takeover(self, owner):
+        if self.armed is None or self.clock.now() < self.armed["deadline"]:
+            return None
+        self.issued += 1
+        self.token, self.acked = self.issued, set()
+        self.armed["deadline"] = self.clock.now() + c.WATCHDOG_DELAY
+        return self.token, copy.deepcopy(self.armed["rollback"])
+
+    def consume(self, attempt, token):
+        self.guard("consume", token)
+        unused = attempt not in self.consumed
+        self.consumed.add(attempt)
+        return unused
+
+    def phase(self, token):
+        self.guard("phase", token)
+        return self.armed["phase"]
+
+    def readback(self, token):
+        self.guard("readback", token)
+        return copy.deepcopy(self.bundle)
+
+    def snapshot(self, token):
+        self.guard("snapshot", token)
+        return copy.deepcopy(self.snap)
+
+    def close(self, gate, token):
+        self.guard("close", token)
+        if self.armed.get("phase") == "admitted":
+            self.armed["phase"] = "fenced"
+        if gate not in self.no_close:
+            self.gates[gate] = "closed"
+
+    def drain(self, token):
+        self.guard("drain", token)
+        self.epoch, self.acked, self.drained_after_apply = self.epoch + 1, set(), True
+        return self.epoch
+
+    def ack(self, gate, token, drain):
+        self.guard("ack", token)
+        closed, active = self.gates[gate] == "closed", self.active.get(gate, 0)
+        ack = {"gate": gate, "closed": closed, "active": active, "token": token, "drain": self.epoch}
+        if gate in self.no_ack:
+            return None
+        if gate in self.loose_ack:
+            # Equal under loose comparison (True == 1, 0 == False) but a different JSON type.
+            return ack | {"token": True, "drain": True, "active": False, "closed": 1}
+        if gate in self.stale_ack or gate in self.replay_ack:
+            # An ack replayed from an earlier lease generation or an earlier drain.
+            return ack | ({"token": token - 1} if gate in self.stale_ack else {"drain": self.epoch - 1, "active": 0})
+        if closed and active == 0 and drain == self.epoch:
+            self.acked.add(gate)
+        return ack
+
+    def apply(self, bundle, token):
+        self.guard("apply", token)
+        if set(self.gates.values()) != {"closed"} or self.acked != set(GATES) or any(self.active.values()):
+            self.violations.append("unquiesced-apply")
+        self.armed["phase"] = "mutated"
+        if bundle.keys() != self.bundle.keys():
+            self.violations.append("non-release-write")
+        self.applied, self.drained_after_apply = copy.deepcopy(bundle), False
+        if p.digest(bundle) in self.noop:
+            return
+        self.bundle = copy.deepcopy(bundle)
+        if p.digest(bundle) in self.corrupt:
+            self.bundle["config"] = p.digest("fixture-partial-write")
+
+    def health(self, token):
+        self.guard("health", token)
+        return self.bundle in self.good
+
+    def fresh(self, path, token):
+        self.guard("fresh", token)
+        return self.bundle in self.good and (p.digest(self.bundle), path) not in self.stale
+
+    def open(self, gate, token):
+        self.guard("open", token)
+        if self.bundle not in self.good:
+            self.violations.append("unsafe-reopen")
+        if self.armed and self.armed.get("phase") == "mutated" and not self.verified():
+            self.violations.append("unverified-reopen")
+        self.opened.append(gate)
+        if gate not in self.no_open:
+            self.gates[gate] = "open"
+            self.acked.discard(gate)
+
+    def verified(self):
+        """After a backend write, only the last applied bundle may serve, or the exact rollback
+        once a recovery drain has run since that write."""
+        return self.bundle == self.applied or (self.drained_after_apply and self.bundle == self.armed["rollback"])
+
+    def state(self, gate):
+        return self.gates[gate]
+
+    def watch(self, token, seconds):
+        self.guard("watch", token)
+        self.clock.time += seconds
+        self.watched.append(seconds)
+        return not self.regress
+
+    def release(self, token):
+        """Frees the lease and disarms the watchdog in one transition."""
+        self.guard("release", token)
+        # An attempt that closed no gate must leave every gate as it found it.
+        expected = self.at_acquire if self.armed.get("phase") == "admitted" else dict.fromkeys(GATES, "open")
+        if self.gates != expected or self.bundle not in self.good:
+            self.violations.append("unsafe-unlock")
+        if self.regress and self.bundle == self.good[1]:
+            self.violations.append("regressed-unlock")
+        if self.armed.get("phase") == "mutated" and not self.verified():
+            self.violations.append("unlock-wrong-bundle")
+        self.token = self.armed = None
+
+    def alert(self, token, outcome):
+        self.alerts.append(outcome)
+
+
+def refresh(host):
+    host.live.update(LIVE)
+
+
+def other_write(host, base, readback):
+    """A writer installs a different, healthy bundle just after the request paths reopen."""
+    other = dict(base, config=p.digest("fixture-other-writer"))
+    host.good.append(other)
+    host.hooks[("readback", readback)] = lambda: setattr(host, "bundle", copy.deepcopy(other))
+
+
+def fixture(number=1):
+    data = envelope(number)
+    manifest = data["manifest"]
+    clock = Clock()
+    return p.canonical(data), clock, Host(clock, manifest["rollback"], manifest["candidate"]), manifest
+
+
+class ControllerTests(unittest.TestCase):
+    def run_fixture(self, setup=None, number=1):
+        raw, clock, host, manifest = fixture()
+        if setup:
+            setup(host, manifest)
+        outcome = c.Controller(host, clock, "fixture-controller").run(raw, attempt(number))
+        return outcome, clock, host, manifest
+
+    def assertUnlocked(self, host):
+        self.assertEqual(host.violations, [])
+        self.assertEqual((host.token, host.armed), (None, None))
+        self.assertEqual(set(host.gates.values()), {"open"})
+        self.assertIn(host.bundle, host.good)
+
+    def assertFenced(self, host):
+        # Lease ownership and the armed watchdog survive until recovery readback succeeds.
+        self.assertEqual(host.violations, [])
+        self.assertIsNotNone(host.token)
+        self.assertIsNotNone(host.armed)
+        self.assertEqual(set(host.gates.values()), {"closed"})
+        self.assertEqual(host.alerts, ["fixture-recovery-fenced"])
+        self.assertNotIn("release", host.calls)
+
+    def assertWatchdogRecovers(self, clock, host, manifest, expected):
+        self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-watchdog-idle")
+        stale = host.token
+        clock.time = host.armed["deadline"]
+        self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), expected)
+        self.assertUnlocked(host)
+        self.assertEqual(host.bundle, manifest["rollback"])
+        with self.assertRaises(Fenced):
+            host.apply(manifest["candidate"], stale)
+        self.assertEqual(host.bundle, manifest["rollback"])
+
+    def test_release_drains_everything_before_one_apply(self):
+        self.assertGreater(c.WATCHDOG_DELAY, c.DRAIN_LIMIT + c.WATCH_SECONDS)
+        outcome, clock, host, manifest = self.run_fixture()
+        self.assertEqual(outcome, "fixture-released")
+        # Request paths reopen before any writer.
+        self.assertEqual(host.opened, list(PATHS) + list(GATES[len(PATHS):]))
+        self.assertEqual(c.WATCH_SECONDS, 1800)
+        self.assertEqual((host.watched, clock.now()), ([c.WATCH_SECONDS], 1000 + c.WATCH_SECONDS))
+        self.assertUnlocked(host)
+        self.assertEqual(host.bundle, manifest["candidate"])
+        n = len(GATES)
+        self.assertEqual(host.calls[:5 + 2 * n], ["acquire", "consume", "readback", "snapshot"]
+                         + ["close"] * n + ["drain"] + ["ack"] * n)
+        w = n - len(PATHS)
+        self.assertEqual(host.calls[5 + 2 * n:], ["readback", "apply", "readback", "health"] + ["fresh"] * len(PATHS)
+                         + ["close"] * w + ["open"] * len(PATHS) + ["readback"] + ["open"] * w
+                         + ["readback", "watch", "release"])
+
+    def test_admission_is_exclusive_single_use_and_drift_checked(self):
+        for setup, number, expected, calls in (
+            (None, 2, "fixture-admission-rejected", []),
+            (lambda host, _: setattr(host, "token", 99), 1, "fixture-lease-refused", ["acquire"]),
+            (lambda host, _: host.consumed.add(attempt(1)), 1, "fixture-attempt-replayed", None),
+            (lambda host, m: host.good.append(host.bundle) or host.bundle.update(image=p.digest("fixture-drift")), 1,
+             "fixture-incumbent-drift", None),
+            (lambda host, m: host.snap.update(config=p.digest("fixture-drift")), 1, "fixture-incumbent-drift", None),
+            # A fence that predates the attempt refuses the lease, so recovery can never lift it.
+            (lambda host, m: host.gates.update({GATES[3]: "closed"}), 1, "fixture-lease-refused", ["acquire"]),
+        ):
+            with self.subTest(expected=expected, calls=calls):
+                outcome, _, host, _ = self.run_fixture(setup, number)
+                self.assertEqual(outcome, expected)
+                self.assertFalse({"close", "apply", "open"} & set(host.calls))
+                self.assertEqual(host.violations, [])
+                if calls is not None:
+                    self.assertEqual(host.calls, calls)
+                else:
+                    self.assertEqual((host.token, host.armed, host.calls[-1]), (None, None, "release"))
+        raw, clock, host, _ = fixture()
+        controller = c.Controller(host, clock, "fixture-controller")
+        self.assertEqual(controller.run(raw, attempt(1)), "fixture-released")
+        self.assertEqual(controller.run(raw, attempt(1)), "fixture-controller-reused")
+        self.assertEqual(c.Controller(host, clock, "fixture-other").run(raw, attempt(1)), "fixture-attempt-replayed")
+
+    def test_missing_or_late_drain_ack_restores_untouched_backend(self):
+        faults = ("no_ack", "stale_ack", "replay_ack", "loose_ack", "active", "no_close")
+        cases = [(gate, fault) for gate in GATES for fault in faults]
+        for gate, fault in cases + [(None, "late"), (None, "writer-race")]:
+            def setup(host, _):
+                if fault == "writer-race":
+                    # A writer changes the incumbent after the drift check and finishes before its ack.
+                    host.good.append(host.bundle)
+                    host.hooks[("close", 1)] = lambda: host.bundle.update(config=p.digest("fixture-writer"))
+                elif fault == "active":
+                    host.active[gate] = 1
+                elif fault == "late":
+                    host.hooks[("ack", len(GATES))] = lambda: setattr(host.clock, "time", 1000 + c.DRAIN_LIMIT + 1)
+                else:
+                    getattr(host, fault).add(gate)
+            with self.subTest(gate=gate, fault=fault):
+                outcome, _, host, manifest = self.run_fixture(setup)
+                self.assertNotIn("apply", host.calls)
+                if fault == "no_close" and gate not in PATHS:
+                    # Request paths never reopen beside a writer gate that cannot close.
+                    self.assertEqual((outcome, host.alerts), ("fixture-fence-breached", ["fixture-fence-breached"]))
+                    self.assertEqual([g for g in GATES if host.gates[g] == "open"], [gate])
+                    self.assertEqual((host.violations, host.bundle), ([], manifest["rollback"]))
+                    self.assertIsNotNone(host.armed)
+                    continue
+                self.assertEqual(outcome, "fixture-restored")
+                self.assertUnlocked(host)
+                self.assertEqual(host.bundle == manifest["rollback"], fault != "writer-race")
+        # An unhealthy writer change stays fenced, even for the watchdog, and is never overwritten.
+        def bad_write(host, _):
+            host.hooks[("close", 1)] = lambda: host.bundle.update(config=p.digest("fixture-bad"))
+        outcome, clock, host, manifest = self.run_fixture(bad_write)
+        self.assertEqual(outcome, "fixture-recovery-fenced")
+        self.assertFenced(host)
+        clock.time = host.armed["deadline"]
+        self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-recovery-fenced")
+        self.assertEqual(set(host.gates.values()), {"closed"})
+        self.assertEqual((host.bundle["config"], host.calls.count("apply")), (p.digest("fixture-bad"), 0))
+        # An undrained writer that finishes once request paths reopen is caught before writers reopen.
+        def late_write(host, _):
+            host.no_ack.add(GATES[-1])
+            host.hooks[("readback", 4)] = lambda: host.bundle.update(config=p.digest("fixture-bad"))
+        outcome, _, host, _ = self.run_fixture(late_write)
+        self.assertEqual(outcome, "fixture-recovery-fenced")
+        self.assertFenced(host)
+        # An unreadable host phase is unknown, so the controller keeps the fence.
+        def phase_error(host, _):
+            def fail():
+                raise RuntimeError
+            host.no_ack.add(GATES[0])
+            host.hooks[("phase", 1)] = fail
+        outcome, _, host, _ = self.run_fixture(phase_error)
+        self.assertEqual(outcome, "fixture-recovery-fenced")
+        self.assertFenced(host)
+        # A phase record the watchdog cannot read after takeover is unknown, so it fences.
+        raw, clock, host, manifest = fixture()
+        host.hooks[("watch", 1)] = lambda: (_ for _ in ()).throw(Interrupted)
+        with self.assertRaises(Interrupted):
+            c.Controller(host, clock, "fixture-controller").run(raw, attempt(1))
+        del host.armed["phase"]
+        clock.time = host.armed["deadline"]
+        self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-recovery-fenced")
+        self.assertEqual((set(host.gates.values()), host.calls.count("apply")), ({"closed"}, 1))
+        host.armed["phase"] = "mutated"
+        # A failed takeover alerts instead of raising.
+        host.takeover = lambda owner: (_ for _ in ()).throw(RuntimeError)
+        self.assertEqual((c.watchdog(host, clock, "fixture-watchdog"), host.alerts[-1]),
+                         ("fixture-watchdog-failed", "fixture-watchdog-failed"))
+        # An unknown host phase after a failed watch keeps the fence and writes nothing.
+        outcome, _, host, _ = self.run_fixture(lambda host, _: host.hooks.update(
+            {("watch", 1): lambda: (setattr(host, "regress", True), host.armed.update(phase=None))}))
+        self.assertEqual((outcome, host.calls.count("apply")), ("fixture-recovery-fenced", 1))
+        self.assertFenced(host)
+        # A healthy but different bundle at the final restore readback is not unlocked.
+        def final_swap(host, m):
+            host.no_ack.add(GATES[0])
+            other_write(host, m["rollback"], 5)
+        outcome, _, host, _ = self.run_fixture(final_swap)
+        self.assertEqual(outcome, "fixture-recovery-fenced")
+        self.assertFenced(host)
+
+    def test_failed_candidate_rolls_back_exactly_and_keeps_live_state(self):
+        def unhealthy(host, m):
+            host.good.remove(m["candidate"])
+        cases = [("unhealthy", unhealthy),
+                 ("partial-write", lambda host, m: host.corrupt.add(p.digest(m["candidate"]))),
+                 ("regression", lambda host, _: setattr(host, "regress", True)),
+                 ("writer-during-reopen", lambda host, m: other_write(host, m["candidate"], 4)),
+                 ("writer-after-writers-reopen", lambda host, m: other_write(host, m["candidate"], 5))]
+        cases += [(path, lambda host, m, path=path: host.stale.add((p.digest(m["candidate"]), path)))
+                  for path in PATHS]
+        for name, fault in cases:
+            def setup(host, m, fault=fault):
+                fault(host, m)
+                host.hooks[("apply", 1)] = lambda: refresh(host)
+            with self.subTest(name=name):
+                outcome, _, host, manifest = self.run_fixture(setup)
+                self.assertEqual(outcome, "fixture-rolled-back")
+                self.assertUnlocked(host)
+                self.assertEqual((host.bundle, host.live), (manifest["rollback"], LIVE))
+                self.assertEqual(host.calls.count("apply"), 2)
+                self.assertEqual(host.calls.count("ack"), 2 * len(GATES))
+
+    def test_unsafe_rollback_or_reopen_keeps_lease_until_watchdog_readback(self):
+        def fail():
+            raise RuntimeError
+
+        def interrupt_apply():
+            raise Interrupted
+
+        def other_writer(host, m):
+            other_write(host, m["rollback"], 6)
+
+        def replayed_recovery_ack(host):
+            # A direct request is active after reopen, and an earlier drain's ack is replayed.
+            host.active[GATES[2]] = 1
+            host.replay_ack.add(GATES[2])
+        n = len(GATES)
+        cases = (  # name, fault, candidate healthy, applies
+            ("rollback-partial-write", lambda host, m: host.corrupt.add(p.digest(m["rollback"])), False, 2),
+            ("rollback-apply-error", lambda host, _: host.hooks.update({("apply", 2): fail}), False, 2),
+            ("recovery-ack-missing", lambda host, _: host.hooks.update(
+                {("ack", n + 1): lambda: host.no_ack.add(GATES[0])}), False, 1),
+            ("reopen-blocked", lambda host, _: host.no_open.add(GATES[0]), True, 2),
+            ("writer-during-rollback-reopen", other_writer, False, 2),
+            ("rollback-noop-write", lambda host, m: host.noop.add(p.digest(m["rollback"])), True, 2),
+            ("rollback-probe-stale", lambda host, m: host.stale.add((p.digest(m["rollback"]), PATHS[2])), False, 2),
+            # The first close of the recovery drain, after the drain and the writer re-fence before reopen.
+            ("recovery-close-error", lambda host, _: host.hooks.update(
+                {("close", 2 * n - len(PATHS) + 1): fail}), True, 1),
+            ("recovery-readback-error", lambda host, _: host.hooks.update({("readback", 6): fail}), True, 1),
+            ("recovery-ack-replayed", lambda host, _: host.hooks.update(
+                {("drain", 2): lambda: replayed_recovery_ack(host)}), True, 1),
+        )
+        for name, fault, candidate_healthy, applies in cases:
+            def setup(host, m, fault=fault):
+                if candidate_healthy:
+                    host.regress = True
+                else:
+                    host.good.remove(m["candidate"])
+                fault(host, m)
+                host.hooks[("apply", 1)] = lambda: refresh(host)
+            with self.subTest(name=name):
+                outcome, clock, host, manifest = self.run_fixture(setup)
+                self.assertEqual(outcome, "fixture-recovery-fenced")
+                self.assertFenced(host)
+                self.assertEqual(host.calls.count("apply"), applies)
+                if name == "reopen-blocked":
+                    # Writers stay fenced while a request path fails to reopen.
+                    self.assertFalse(set(host.opened) & set(GATES[len(PATHS):]))
+                host.corrupt.clear()
+                host.noop.clear()
+                host.stale.clear()
+                host.no_ack.clear()
+                host.no_open.clear()
+                host.replay_ack.clear()
+                host.active.clear()
+                self.assertWatchdogRecovers(clock, host, manifest, "fixture-rolled-back")
+                self.assertEqual(host.live, LIVE)
+        # A gate that silently stays open is reported as a breach, never as fenced.
+        outcome, clock, host, manifest = self.run_fixture(lambda host, _: host.hooks.update(
+            {("watch", 1): lambda: (setattr(host, "regress", True), host.no_close.add(GATES[1]))}))
+        self.assertEqual((outcome, host.alerts), ("fixture-fence-breached", ["fixture-fence-breached"]))
+        self.assertEqual([gate for gate in GATES if host.gates[gate] == "open"], [GATES[1]])
+        self.assertIsNotNone(host.token)
+        host.no_close.clear()
+        self.assertWatchdogRecovers(clock, host, manifest, "fixture-rolled-back")
+        # An unknown mutation state in a watchdog claim never reopens or rolls back.
+        raw, clock, host, manifest = fixture()
+        host.hooks[("apply", 1)] = interrupt_apply
+        with self.assertRaises(Interrupted):
+            c.Controller(host, clock, "fixture-controller").run(raw, attempt(1))
+        clock.time, host.armed["phase"] = host.armed["deadline"], None
+        self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-recovery-fenced")
+        self.assertEqual((set(host.gates.values()), host.calls.count("apply")), ({"closed"}, 1))
+        self.assertIsNotNone(host.token)
+        # An unconfirmed release after a clean watch alerts and leaves recovery to the watchdog.
+        outcome, clock, host, manifest = self.run_fixture(lambda host, _: host.hooks.update({("release", 1): fail}))
+        self.assertEqual((outcome, host.alerts), ("fixture-unlock-failed", ["fixture-unlock-failed"]))
+        self.assertIsNotNone(host.armed)
+        self.assertWatchdogRecovers(clock, host, manifest, "fixture-rolled-back")
+        # A release failure leaves the lease and watchdog armed for recovery.
+        outcome, clock, host, manifest = self.run_fixture(
+            lambda host, m: (host.good.remove(m["candidate"]), host.hooks.update({("release", 1): fail})))
+        self.assertEqual((outcome, host.alerts), ("fixture-unlock-failed", ["fixture-unlock-failed"]))
+        self.assertIsNotNone(host.armed)
+        self.assertWatchdogRecovers(clock, host, manifest, "fixture-rolled-back")
+
+    def test_watchdog_recovers_interrupts_and_fences_stale_controller(self):
+        def interrupt():
+            raise Interrupted
+        for verb, count, recovered in (
+            ("consume", 1, "fixture-unchanged"), ("close", 3, "fixture-restored"),
+            ("ack", len(GATES), "fixture-restored"), ("apply", 1, "fixture-restored"),
+            ("health", 1, "fixture-rolled-back"), ("open", 4, "fixture-rolled-back"),
+            ("watch", 1, "fixture-rolled-back"), ("release", 1, "fixture-rolled-back"),
+        ):
+            with self.subTest(verb=verb):
+                raw, clock, host, manifest = fixture()
+                host.hooks[(verb, count)] = interrupt
+                with self.assertRaises(Interrupted):
+                    c.Controller(host, clock, "fixture-controller").run(raw, attempt(1))
+                self.assertIsNotNone(host.token)
+                self.assertIsNotNone(host.armed)
+                self.assertWatchdogRecovers(clock, host, manifest, recovered)
+        # A backend already at the exact rollback is verified and reopened without a second write.
+        raw, clock, host, manifest = fixture()
+        host.hooks[("health", 1)] = interrupt
+        with self.assertRaises(Interrupted):
+            c.Controller(host, clock, "fixture-controller").run(raw, attempt(1))
+        host.bundle = copy.deepcopy(manifest["rollback"])
+        self.assertWatchdogRecovers(clock, host, manifest, "fixture-rolled-back")
+        # The candidate write and the refused stale probe: recovery itself wrote nothing.
+        self.assertEqual(host.calls.count("apply"), 2)
+        watchdog = []
+
+        def takeover(host):
+            host.clock.time = host.armed["deadline"]
+            watchdog.append(c.watchdog(host, host.clock, "fixture-watchdog"))
+        outcome, _, host, manifest = self.run_fixture(
+            lambda host, _: host.hooks.update({("health", 1): lambda: takeover(host)}))
+        # The fenced-out controller cannot verify a fence, so it alerts conservatively.
+        self.assertEqual(outcome, "fixture-fence-breached")
+        self.assertEqual((watchdog, host.alerts), (["fixture-rolled-back"], ["fixture-fence-breached"]))
+        self.assertUnlocked(host)
+        self.assertEqual(host.bundle, manifest["rollback"])
+        # A refused replay interrupted before unlock touches no gate and no backend file.
+        raw, clock, host, manifest = fixture()
+        self.assertEqual(c.Controller(host, clock, "fixture-controller").run(raw, attempt(1)), "fixture-released")
+        host.hooks[("release", 2)] = interrupt
+        calls = len(host.calls)
+        with self.assertRaises(Interrupted):
+            c.Controller(host, clock, "fixture-other").run(raw, attempt(1))
+        clock.time = host.armed["deadline"]
+        self.assertEqual(c.watchdog(host, clock, "fixture-watchdog"), "fixture-unchanged")
+        self.assertEqual((host.violations, host.token, host.armed), ([], None, None))
+        self.assertEqual(host.calls[calls:], ["acquire", "consume", "release", "phase", "release"])
+        self.assertEqual(host.bundle, manifest["candidate"])
+
+    def test_controller_source_has_no_host_reach(self):
+        with open(c.__file__, encoding="ascii") as source:
+            tree = ast.parse(source.read())
+        nodes = list(ast.walk(tree))
+        imports = {alias.name for node in nodes if isinstance(node, ast.Import) for alias in node.names}
+        self.assertEqual(imports, {"json", "preflight"})
+        self.assertFalse([node for node in nodes if isinstance(node, ast.ImportFrom)])
+        names = {node.id for node in nodes if isinstance(node, ast.Name)}
+        self.assertFalse(names & {"open", "eval", "exec", "compile", "__import__", "getattr", "globals", "__name__"})
+
+
+if __name__ == "__main__":
+    # Hosted logs report a fixed verdict without test data or exception details.
+    result = unittest.defaultTestLoader.loadTestsFromTestCase(ControllerTests).run(unittest.TestResult())
+    passed = result.testsRun > 0 and result.wasSuccessful() and not (result.skipped or result.expectedFailures)
+    print("fixture-controller-pass" if passed else "fixture-controller-fail")
+    raise SystemExit(0 if passed else 1)
