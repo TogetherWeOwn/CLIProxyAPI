@@ -41,7 +41,7 @@ class Host:
         self.acked, self.active, self.no_ack, self.no_close, self.no_open = set(), {}, set(), set(), set()
         self.stale_ack, self.replay_ack, self.epoch = set(), set(), 0
         self.token, self.armed, self.issued, self.consumed = None, None, 0, set()
-        self.corrupt, self.stale, self.regress = set(), set(), False
+        self.corrupt, self.stale, self.regress, self.watched = set(), set(), False, []
         self.calls, self.hooks, self.violations, self.alerts = [], {}, [], []
 
     def guard(self, verb, token):
@@ -139,6 +139,7 @@ class Host:
     def watch(self, token, seconds):
         self.guard("watch", token)
         self.clock.time += seconds
+        self.watched.append(seconds)
         return not self.regress
 
     def release(self, token):
@@ -199,8 +200,10 @@ class ControllerTests(unittest.TestCase):
 
     def test_release_drains_everything_before_one_apply(self):
         self.assertGreater(c.WATCHDOG_DELAY, c.DRAIN_LIMIT + c.WATCH_SECONDS)
-        outcome, _, host, manifest = self.run_fixture()
+        outcome, clock, host, manifest = self.run_fixture()
         self.assertEqual(outcome, "fixture-released")
+        self.assertEqual(c.WATCH_SECONDS, 1800)
+        self.assertEqual((host.watched, clock.now()), ([c.WATCH_SECONDS], 1000 + c.WATCH_SECONDS))
         self.assertUnlocked(host)
         self.assertEqual(host.bundle, manifest["candidate"])
         n = len(GATES)
