@@ -49,6 +49,20 @@ def request(path, payload=None):
     return OPENER.open(target, timeout=4)
 
 
+def completed(events):
+    if not events or events[-1] != b"[DONE]":
+        return False
+    text = []
+    finishes = []
+    for event in events[:-1]:
+        for choice in json.loads(event)["choices"]:
+            if choice["index"] == 0:
+                text.append(choice["delta"].get("content") or "")
+                if choice["finish_reason"] is not None:
+                    finishes.append(choice["finish_reason"])
+    return "".join(text) == "stage-complete" and finishes == ["stop"]
+
+
 def check():
     deadline = time.monotonic() + 12
     while True:
@@ -64,8 +78,11 @@ def check():
     with request("/v1/chat/completions", {
         "model": CLIENT_MODEL, "stream": True, "messages": [{"role": "user", "content": "fixture"}],
     }) as response:
-        events = [line.strip() for line in response if line.startswith(b"data:")]
-    if not events or events[-1] != b"data: [DONE]" or not any(b"stage-complete" in event for event in events[:-1]):
+        body = response.read(256 * 1024 + 1)
+        if len(body) > 256 * 1024:
+            raise RuntimeError("unexpected stream size")
+        events = [line.removeprefix(b"data:").strip() for line in body.splitlines() if line.startswith(b"data:")]
+    if not completed(events):
         raise RuntimeError("missing Meta content or stream terminal")
 
 

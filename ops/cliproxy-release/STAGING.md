@@ -13,8 +13,11 @@ Create the ZIP with these file entries and no directory entries.
   full OCI image ID `image`, the Linux amd64 Docker image config digest
   `docker_config` (both with `sha256:`), the binary checksum `executable`
   (hex only), and the Meta SemVer `meta` (for example `0.2.9`).
-- `baseline.oci.tar.zst` is the rollback image. Include
-  `candidate.oci.tar.zst` when the candidate has a different image ID.
+- `baseline.oci.tar` is the rollback image. Include
+  `candidate.oci.tar` when the candidate has a different image ID.
+  Each is an uncompressed OCI tar with Docker's compatibility
+  `manifest.json` for the same Linux amd64 image (as emitted by `docker save`).
+  The workflow verifies both manifest representations before import.
 - `baseline/*.so` and `candidate/*.so` are the complete Linux amd64 plugin
   sets, each with a single `meta-v<version>.so`.
 
@@ -25,8 +28,7 @@ incumbent process with the baseline image, original config bytes and original
 plugin set on the same state mount. Both directions must pass executable
 readback, registration, health and a Meta stream with final content and a
 terminal event. On a disposable local machine with the exact images already
-loaded, pass `--preloaded BUNDLE.zip` to `staging.py` and omit both OCI archives
-from the ZIP.
+loaded, pass `--preloaded BUNDLE.zip` to `staging.py` to verify the same archive identities and skip Docker import.
 
 This workflow covers isolated staging. Production requires its own protected
 deployment binding, request and writer drain, verified rollback on that

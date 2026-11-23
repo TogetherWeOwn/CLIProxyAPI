@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tarfile
 import sys
 import tempfile
 import time
@@ -15,11 +16,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import zlib
 
 DIGEST = r"[0-9a-f]{64}"
 VERSION = r"[0-9]+\.[0-9]+\.[0-9]+"
 MAX_BYTES = 768 * 1024 * 1024
-ARCHIVES = {"baseline": "baseline.oci.tar.zst", "candidate": "candidate.oci.tar.zst"}
+ARCHIVES = {"baseline": "baseline.oci.tar", "candidate": "candidate.oci.tar"}
+OCI_INDEX = "application/vnd.oci.image.index.v1+json"
+OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 CONFIG = b"""host: "127.0.0.1"
 port: 19237
 auth-dir: /state/auths
@@ -86,7 +90,7 @@ def unique_keys(pairs):
     return result
 
 
-def unpack(bundle, root, *, preloaded):
+def unpack(bundle, root):
     """Extract only exact OCI archive and flat library paths into a fresh directory."""
     if bundle.stat().st_size > MAX_BYTES:
         raise StagingError("staging bundle exceeds size limit")
@@ -117,9 +121,9 @@ def unpack(bundle, root, *, preloaded):
         required = {ARCHIVES["baseline"]}
         if release["candidate"]["image"] != release["baseline"]["image"]:
             required.add(ARCHIVES["candidate"])
-        if (names & set(ARCHIVES.values())) != (set() if preloaded else required):
+        if (names & set(ARCHIVES.values())) != required:
             raise StagingError("staging image archive set mismatch")
-        if all(release["candidate"][key] == release["baseline"][key] for key in ("image", "meta")):
+        if all(release["candidate"][key] == release["baseline"][key] for key in ("docker_config", "meta")):
             raise StagingError("candidate and baseline have identical identities")
         for entry in files:
             if entry.filename != "release.json":
@@ -128,6 +132,67 @@ def unpack(bundle, root, *, preloaded):
                 with archive.open(entry) as source, dest.open("xb") as output:
                     shutil.copyfileobj(source, output)
     return release
+
+
+def blob_path(digest):
+    if type(digest) is not str or not re.fullmatch("sha256:" + DIGEST, digest):
+        raise StagingError("invalid OCI descriptor digest")
+    return "blobs/sha256/" + digest.removeprefix("sha256:")
+
+
+def verify_image(path, spec):
+    """Link the OCI root digest to the exact platform config Docker will run."""
+    with tarfile.open(path, "r:") as archive:
+        members = {}
+        for entry in archive:
+            if entry.isdir() and entry.name in {"blobs", "blobs/sha256"}:
+                continue
+            if (not entry.isfile() or entry.name in members or len(members) >= 64
+                    or (entry.name not in {"index.json", "manifest.json", "oci-layout"}
+                        and not re.fullmatch("blobs/sha256/" + DIGEST, entry.name))):
+                raise StagingError("invalid image archive member")
+            members[entry.name] = entry
+
+        def read_json(name):
+            entry = members[name]
+            if entry.size > 64 * 1024:
+                raise StagingError("image metadata exceeds size limit")
+            data = archive.extractfile(entry).read()
+            if name.startswith("blobs/") and hashlib.sha256(data).hexdigest() != name.rsplit("/", 1)[1]:
+                raise StagingError("image metadata digest mismatch")
+            return json.loads(data, object_pairs_hook=unique_keys)
+
+        roots = read_json("index.json")["manifests"]
+        if len(roots) != 1 or roots[0]["digest"] != spec["image"]:
+            raise StagingError("OCI root digest mismatch")
+        descriptor = roots[0]
+        if descriptor["mediaType"] == OCI_INDEX:
+            children = read_json(blob_path(descriptor["digest"]))["manifests"]
+            platform = [child for child in children
+                        if child.get("platform") == {"os": "linux", "architecture": "amd64"}]
+            if len(platform) != 1:
+                raise StagingError("ambiguous OCI platform manifest")
+            descriptor = platform[0]
+        if descriptor["mediaType"] != OCI_MANIFEST:
+            raise StagingError("unsupported OCI image manifest")
+        manifest = read_json(blob_path(descriptor["digest"]))
+        if manifest["config"]["digest"] != spec["docker_config"]:
+            raise StagingError("OCI image and Docker config digest mismatch")
+        config_path = blob_path(spec["docker_config"])
+        config = read_json(config_path)
+        if (config["os"], config["architecture"]) != ("linux", "amd64"):
+            raise StagingError("unsupported image config platform")
+
+        # Hosted Docker may use the classic store, which loads this same
+        # platform image through Docker's compatibility manifest.
+        layers = [blob_path(layer["digest"]) for layer in manifest["layers"]]
+        docker = read_json("manifest.json")
+        if len(docker) != 1 or docker[0]["Config"] != config_path or docker[0]["Layers"] != layers:
+            raise StagingError("Docker archive manifest does not match the OCI image")
+        for layer in layers:
+            with archive.extractfile(members[layer]) as payload:
+                if hashlib.file_digest(payload, "sha256").hexdigest() != layer.rsplit("/", 1)[1]:
+                    raise StagingError("OCI layer digest mismatch")
 
 
 def command(*argv, timeout=30, combine=False):
@@ -207,8 +272,10 @@ def rehearse(gateway, release):
         gateway.switch("baseline", release["baseline"], CONFIG)
         snapshot = gateway.config.read_bytes()
         try:
+            print("candidate: starting isolated gateway", flush=True)
             gateway.switch("candidate", release["candidate"], snapshot)
         finally:
+            print("rollback: restarting baseline gateway", flush=True)
             gateway.switch("baseline", release["baseline"], snapshot)
             if gateway.config.read_bytes() != snapshot:
                 raise StagingError("rollback config readback mismatch")
@@ -225,9 +292,18 @@ def main():
     with tempfile.TemporaryDirectory(prefix="cliproxy-stage-") as temp:
         root = Path(temp)
         bundle = Path(args[1]) if preloaded else download(root)
-        release = unpack(bundle, root, preloaded=preloaded)
-        for image in sorted(root.glob("*.oci.tar.zst")):
-            command("docker", "image", "load", "--quiet", "--input", str(image), timeout=180)
+        release = unpack(bundle, root)
+        print("validating image archives", flush=True)
+        baseline = root / ARCHIVES["baseline"]
+        candidate = root / ARCHIVES["candidate"]
+        verify_image(baseline, release["baseline"])
+        verify_image(candidate if candidate.exists() else baseline, release["candidate"])
+        if not preloaded:
+            for path in (baseline, candidate):
+                if path.exists():
+                    print(f"importing {path.name}", flush=True)
+                    command("docker", "image", "load", "--quiet", "--input", str(path), timeout=180)
+        print("baseline: starting isolated gateway", flush=True)
         rehearse(Gateway(root), release)
 
 
@@ -236,6 +312,6 @@ if __name__ == "__main__":
         main()
     except StagingError as error:
         sys.exit(str(error))
-    except (OSError, ValueError, KeyError, RuntimeError, zipfile.BadZipFile, subprocess.SubprocessError,
-            http.client.HTTPException):
+    except (OSError, ValueError, KeyError, TypeError, IndexError, EOFError, RuntimeError,
+            zipfile.BadZipFile, tarfile.TarError, zlib.error, subprocess.SubprocessError, http.client.HTTPException):
         sys.exit("staging failed during bundle preparation, container operation or smoke test")
