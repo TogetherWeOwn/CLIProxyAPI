@@ -1,0 +1,49 @@
+name: CLIProxy production restart
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Release action
+        required: true
+        type: choice
+        options: [deploy, rollback]
+      bundle_sha256:
+        description: SHA-256 of the approved staged bundle
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: cliproxy-production
+  cancel-in-progress: false
+
+jobs:
+  restart:
+    if: >-
+      github.repository == 'TogetherWeOwn/CLIProxyAPI' &&
+      github.ref == 'refs/heads/main' &&
+      github.workflow_sha == github.sha &&
+      vars.CLIPROXY_PRODUCTION_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: cliproxy-production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Restart the approved gateway pair
+        env:
+          RELEASE_ACTION: ${{ inputs.operation }}
+          BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+          LIFECYCLE_HOST: ${{ secrets.CLIPROXY_LIFECYCLE_HOST }}
+          LIFECYCLE_HOST_KEY: ${{ secrets.CLIPROXY_LIFECYCLE_HOST_KEY }}
+          LIFECYCLE_SSH_KEY: ${{ secrets.CLIPROXY_LIFECYCLE_SSH_KEY }}
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          python3 -IB ops/cliproxy-release/production.py dispatch
+          printf 'Completed %s for bundle %s.\n' "$RELEASE_ACTION" "$BUNDLE_SHA256" >> "$GITHUB_STEP_SUMMARY"

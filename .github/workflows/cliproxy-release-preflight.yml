@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/cliproxy-release-preflight.yml'
       - '.github/workflows/deploy-cliproxy-staging.yml'
+      - '.github/workflows/deploy-cliproxy-production.yml'
       - 'ops/cliproxy-release/**'
 
 permissions: {}
@@ -61,3 +62,10 @@ jobs:
           python3 -ESB ops/cliproxy-release/test_preflight.py
           python3 -ESB ops/cliproxy-release/test_controller.py
           python3 -ESB ops/cliproxy-release/test_staging.py
+
+      - name: Rehearse gated restart and rollback
+        run: |
+          gate="$(mktemp "$RUNNER_TEMP/cliproxy-gate.XXXXXXXX")"
+          trap 'rm -- "$gate"' EXIT
+          GO111MODULE=off GOTOOLCHAIN=local go build -o "$gate" ops/cliproxy-release/gate/main.go
+          CLIPROXY_FIXTURE_GATE="$gate" python3 -ESB ops/cliproxy-release/test_production.py
