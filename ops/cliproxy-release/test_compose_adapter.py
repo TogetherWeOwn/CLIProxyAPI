@@ -1,22 +1,25 @@
 """Real Compose replacements with private synthetic images, services and mounts."""
 
 from contextlib import contextmanager
+from dataclasses import asdict
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from compose_adapter import ComposeAdapter, Mount, Phase, docker, file_digest, location
-from production import Gate, ReleaseError, UnixHTTP, restart
+from production import Adapter, Gate, ReleaseError, UnixHTTP, adapter_fence, read_json, restart
 from staging_probe import check
-from test_production import DIGEST, eventually, local_port
+from test_production import DIGEST, eventually
 
 GATE = os.environ.get("CLIPROXY_FIXTURE_GATE")
 BACKEND = os.environ.get("CLIPROXY_FIXTURE_COMPOSE_BACKEND")
@@ -40,8 +43,34 @@ def probe(root, phase):
     check(lambda *args: request(root, *args), "synthetic-" + phase, "synthetic")
 
 
+def bound_adapter(root, *, site=False):
+    binding = read_json(root / "binding.json")
+    phases = {name: Phase(**dict(spec, directory=Path(spec["directory"])))
+              for name, spec in binding["phases"].items()}
+    mounts = [Mount(Path(spec["source"]), spec["target"], spec["writable"], tuple(spec["identity"]))
+              for spec in binding["mounts"]]
+
+    def check_quiescence(digest, phase, state):
+        # This applies only to these isolated fixture containers and mounts.
+        return digest == DIGEST and phase in phases and state["closed"] and state["active"] == 0
+
+    def read_registration(container, _started_at):
+        # The synthetic process writes one file named for this specific
+        # container. Each fixture replacement creates a fresh container.
+        return (root / "probe" / ("registration-" + container[:12])).read_bytes()
+
+    return ComposeAdapter(
+        digest=DIGEST, phases=phases, project=binding["project"], project_directory=root, service="gateway",
+        executable="/gateway", state_mounts=mounts, config_target="/config.yaml", plugins_target="/plugins",
+        pending=root / "pending.json", gate=Gate(root / "gate.sock"),
+        check_quiescence=check_quiescence if site else None,
+        probe=(sys.executable, "-ESB", __file__, "probe", str(root)),
+        read_registration=read_registration if binding["file_logging"] else None,
+    )
+
+
 class Fixture:
-    def __init__(self, root, stack, mode):
+    def __init__(self, root, stack, mode, *, file_logging=False, compose_conflict=False):
         self.root = root
         self.project = "compose-proof-" + hashlib.sha256(os.fsencode(root)).hexdigest()[:16]
         self.phases = {}
@@ -49,15 +78,7 @@ class Fixture:
         self.journal = root / "journal.json"
         self.pending = root / "pending.json"
         self.gate = Gate(root / "gate.sock")
-        # The landed gate fixture covers real ingress to the backend. Here its
-        # control socket lets the actual controller fence the Compose transaction.
-        target = f"127.0.0.1:{local_port()}"
-        child = subprocess.Popen(
-            [GATE, "-control", str(self.gate.socket_path), "-listen", "127.0.0.1:0", "-target", target],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        stack.addCleanup(self.stop, child)
-        eventually(lambda: self.gate.read()["closed"])
+        self.start_gate(stack)
         self.gate.change(self.gate.read(), False)
         for name in ("oauth", "kv", "probe"):
             state = root / name
@@ -67,25 +88,45 @@ class Fixture:
             (root / name / "state").write_text("original", encoding="ascii")
         executable = Path(BACKEND).read_bytes()
         for phase, version in (("baseline", "0.2.7"), ("candidate", "0.2.9")):
-            self.make_phase(stack, phase, version, mode if phase == "candidate" else "normal", executable)
+            self.make_phase(stack, phase, version, mode if phase == "candidate" else "normal", executable,
+                            file_logging, compose_conflict and phase == "candidate")
+        (root / "binding.json").write_text(json.dumps({
+            "phases": {name: asdict(spec) for name, spec in self.phases.items()},
+            "project": self.project, "mounts": [asdict(mount) for mount in self.binds], "file_logging": file_logging,
+        }, default=os.fspath), encoding="ascii")
+        wrapper = root / "adapter"
+        entry = shlex.join((sys.executable, "-ESB", __file__, "adapter", str(root)))
+        wrapper.write_text(f'#!/bin/sh\nexec {entry} "$@"\n', encoding="ascii")
+        wrapper.chmod(0o700)
+        self.runner = Adapter(wrapper)
         baseline = self.phases["baseline"]
         keeper = root / "keeper.json"
         keeper.write_text(json.dumps({"services": {"keeper": {
             "image": baseline.image, "network_mode": "none", "command": ["/gateway", "keeper"],
+            "container_name": f"{self.project}-keeper",
         }}}), encoding="ascii")
         stack.addCleanup(self.cleanup)
         self.compose(keeper, "up", "-d", "--no-build", "--pull", "never")
         self.keeper = self.compose(keeper, "ps", "-q", "keeper").strip()
-        self.adapter = self.bound_adapter(self.check_quiescence)
+        self.adapter = bound_adapter(root, site=True)
         self.compose(baseline.directory / "compose.yaml", "up", "-d", "--no-build", "--pull", "never")
         eventually(lambda: self.phase() == b"baseline")
+
+    def start_gate(self, stack):
+        child = subprocess.Popen(
+            [GATE, "-control", str(self.gate.socket_path), "-listen", "127.0.0.1:0", "-target", "127.0.0.1:1"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        stack.addCleanup(self.stop, child)
+        eventually(lambda: self.gate.read()["closed"])
+        self.gate_process = child
 
     @staticmethod
     def stop(child):
         child.terminate()
         child.wait(timeout=5)
 
-    def make_phase(self, stack, phase, version, mode, executable):
+    def make_phase(self, stack, phase, version, mode, executable, file_logging, compose_conflict):
         archive = self.root / (phase + ".tar")
         with tarfile.open(archive, "w") as tar:
             for name, contents, permissions in (("gateway", executable, 0o755), ("phase", phase.encode(), 0o444)):
@@ -102,7 +143,8 @@ class Fixture:
         directory = self.root / phase
         directory.mkdir()
         config = directory / "config.yaml"
-        config.write_text(f"{phase} {version} {mode}", encoding="ascii")
+        destination = "file" if file_logging else "stdout"
+        config.write_text(f"{phase} {version} {mode} {destination}", encoding="ascii")
         plugins = directory / "plugins"
         plugins.mkdir()
         plugin = plugins / f"meta-v{version}.so"
@@ -110,29 +152,19 @@ class Fixture:
         mounts = [*self.binds, Mount(config, "/config.yaml", False, location(config)),
                   Mount(plugins, "/plugins", False, location(plugins))]
         compose = directory / "compose.yaml"
-        compose.write_text(json.dumps({"services": {"gateway": {
+        service = {
             "image": image, "command": ["/gateway"], "network_mode": "none",
-            "restart": "no", "stop_grace_period": "1s",
+            "restart": "no", "stop_grace_period": "1s", "user": f"{os.getuid()}:{os.getgid()}",
             "volumes": [{"type": "bind", "source": str(mount.source), "target": mount.target,
                          "read_only": not mount.writable, "bind": {"create_host_path": False}} for mount in mounts],
-        }}}), encoding="ascii")
+        }
+        if compose_conflict:
+            service["container_name"] = f"{self.project}-keeper"
+        compose.write_text(json.dumps({"services": {"gateway": service}}), encoding="ascii")
         self.phases[phase] = Phase(
             directory, file_digest(compose, 65536), file_digest(config, 65536),
             {plugin.name: file_digest(plugin, 65536)}, image, hashlib.sha256(executable).hexdigest(), version,
         )
-
-    def bound_adapter(self, check_quiescence=None):
-        return ComposeAdapter(
-            digest=DIGEST, phases=self.phases, project=self.project, project_directory=self.root, service="gateway",
-            executable="/gateway", state_mounts=self.binds, config_target="/config.yaml", plugins_target="/plugins",
-            pending=self.pending, gate=self.gate, check_quiescence=check_quiescence,
-            probe=(sys.executable, "-ESB", __file__, "probe", str(self.root)),
-        )
-
-    def check_quiescence(self, digest, phase, state):
-        # This assertion applies only to our namespace with no network, no
-        # host writers, and no requests through the gate's synthetic listener.
-        return digest == DIGEST and phase in self.phases and state["closed"] and state["active"] == 0
 
     def compose(self, file, *args):
         return docker("compose", "--project-name", self.project, "--project-directory", str(self.root),
@@ -148,17 +180,17 @@ class Fixture:
             return response.read()
 
     def restart(self, action):
-        restart(self.gate, self.adapter, self.journal, action, DIGEST)
+        restart(self.gate, self.runner, self.journal, action, DIGEST)
 
 
 @unittest.skipUnless(GATE and BACKEND, "build the fixture gate and Compose backend")
 class ComposeTests(unittest.TestCase):
-    def fixture(self, mode="normal"):
+    def fixture(self, mode="normal", **options):
         directory = self.enterContext(tempfile.TemporaryDirectory(prefix="compose-proof-", dir="/tmp"))
-        return Fixture(Path(directory), self, mode)
+        return Fixture(Path(directory), self, mode, **options)
 
     def test_switch_and_stopped_rollback_preserve_state_and_keeper(self):
-        host = self.fixture()
+        host = self.fixture(file_logging=True)
         baseline = host.adapter.container()["Id"]
         host.adapter("incumbent", DIGEST, "baseline")
         with self.assertRaisesRegex(ReleaseError, "not the expected phase"):
@@ -185,22 +217,54 @@ class ComposeTests(unittest.TestCase):
         initial = host.gate.read()
         baseline = host.adapter.container()["Id"]
         (host.phases["baseline"].directory / "plugins" / "unbound.so").touch()
-        with self.assertRaisesRegex(ReleaseError, "release files"):
+        with self.assertRaisesRegex(ReleaseError, "binding refused prepared"):
             host.restart("deploy")
         self.assertEqual(host.gate.read(), initial)
         self.assertEqual(host.adapter.container()["Id"], baseline)
 
-    def test_unbound_verifier_and_uncertain_switch_fail_closed(self):
+    def test_unbound_verifier_and_stale_fence_refuse_switch(self):
         host = self.fixture()
         baseline = host.adapter.container()["Id"]
         closed = host.gate.change(host.gate.read(), True)
         with self.assertRaisesRegex(ReleaseError, "verifier is unbound"):
-            host.bound_adapter()("switch", DIGEST, "candidate")
-        host.pending.write_text("{}", encoding="ascii")
-        with self.assertRaisesRegex(ReleaseError, "needs reconciliation"):
-            host.adapter("switch", DIGEST, "candidate")
+            bound_adapter(host.root)("switch", DIGEST, "candidate", fence=closed)
+        host.runner("quiescent", DIGEST, "candidate", fence=closed)
+        host.stop(host.gate_process)
+        host.start_gate(self)
+        replacement = host.gate.read()
+        self.assertNotEqual(replacement["generation"], closed["generation"])
+        with self.assertRaisesRegex(ReleaseError, "binding refused switch"):
+            host.runner("switch", DIGEST, "candidate", fence=closed)
         self.assertEqual(host.adapter.container()["Id"], baseline)
-        self.assertEqual(host.gate.read(), closed)
+        self.assertFalse(host.pending.exists())
+        self.assertEqual(host.gate.read(), replacement)
+
+    def test_failed_compose_up_retains_pending_operation(self):
+        host = self.fixture(compose_conflict=True)
+        with self.assertRaisesRegex(ReleaseError, "binding refused quiescent"):
+            host.restart("deploy")
+        self.assertEqual(read_json(host.pending), {"digest": DIGEST, "phase": "candidate"})
+        self.assertTrue(host.gate.read()["closed"])
+        self.assertEqual(host.compose(host.root / "keeper.json", "ps", "-q", "keeper").strip(), host.keeper)
+
+    def test_ready_refuses_gateway_stopped_after_the_probe(self):
+        host = self.fixture()
+        host.gate.change(host.gate.read(), True)
+        baseline = host.adapter.container()["Id"]
+        verify_phase = Phase.verify
+        reads = 0
+
+        def verify_and_stop(phase):
+            nonlocal reads
+            verify_phase(phase)
+            reads += 1
+            if reads == 2:
+                docker("container", "stop", "--time", "1", baseline)
+
+        with patch.object(Phase, "verify", verify_and_stop):
+            with self.assertRaisesRegex(ReleaseError, "readiness does not match"):
+                host.adapter("ready", DIGEST, "baseline")
+        self.assertTrue(host.gate.read()["closed"])
 
     def test_gateway_health_has_deadline_before_reopening(self):
         host = self.fixture(mode="hang")
@@ -217,5 +281,9 @@ class ComposeTests(unittest.TestCase):
 if __name__ == "__main__":
     if len(sys.argv) == 6 and sys.argv[1] == "probe":
         probe(Path(sys.argv[2]), sys.argv[5])
+    elif len(sys.argv) == 6 and sys.argv[1] == "adapter":
+        verb, digest, phase = sys.argv[3:]
+        fence = adapter_fence() if verb in ("quiescent", "switch") else None
+        bound_adapter(Path(sys.argv[2]), site=True)(verb, digest, phase, fence=fence)
     else:
         unittest.main()

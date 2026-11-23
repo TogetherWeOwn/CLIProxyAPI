@@ -92,7 +92,7 @@ class ComposeAdapter:
 
     def __init__(self, *, digest, phases, project, project_directory, service, executable,
                  state_mounts, config_target, plugins_target, pending, gate,
-                 check_quiescence=None, probe=None, writable_release_files=False):
+                 check_quiescence=None, probe=None, read_registration=None, writable_release_files=False):
         if (not matches(DIGEST, digest) or set(phases) != {"baseline", "candidate"}
                 or not matches(NAME, project) or not matches(NAME, service)
                 or not state_mounts or not project_directory.is_absolute()):
@@ -104,6 +104,7 @@ class ComposeAdapter:
         self.config_target, self.plugins_target = config_target, plugins_target
         self.pending, self.gate = pending, gate
         self.check_quiescence, self.probe = check_quiescence, probe
+        self.read_registration = read_registration or self.docker_registration
         self.writable_release_files = writable_release_files
 
     def compose(self, phase, *args, **kwargs):
@@ -156,6 +157,8 @@ class ComposeAdapter:
         return mounts, set(net["name"] for net in networks.values()) or {"none"}
 
     def prepared(self, phase):
+        if not self.probe:
+            raise ReleaseError("private gateway probe is unbound")
         self.plan(phase)
         identity = docker("image", "inspect", "--format", "{{.Id}} {{.Os}}/{{.Architecture}}", phase.image)
         if identity.strip() != f"{phase.image} linux/amd64".encode("ascii"):
@@ -195,7 +198,7 @@ class ComposeAdapter:
         for mount in mounts:
             mount.verify()
         if item["State"]["Running"]:
-            inodes = docker("exec", "--user", "0", item["Id"], "stat", "-c", "%d:%i", "--",
+            inodes = docker("exec", item["Id"], "stat", "-c", "%d:%i", "--",
                             *(mount.target for mount in mounts)).splitlines()
             if inodes != [f"{dev}:{ino}".encode("ascii") for dev, ino in (m.identity for m in mounts)]:
                 raise ReleaseError("running gateway has stale bind mounts")
@@ -213,25 +216,27 @@ class ComposeAdapter:
             raise ReleaseError("running gateway networks do not match the phase")
         self.check_mounts(item, mounts, exact=True)
         if item["State"]["Running"]:
-            executable = docker("exec", "--user", "0", item["Id"], "sha256sum", "/proc/1/exe").split()
+            executable = docker("exec", item["Id"], "sha256sum", "/proc/1/exe").split()
             if not executable or executable[0].decode("ascii") != phase.executable:
                 raise ReleaseError("running gateway executable does not match the phase")
         return item
 
-    def quiescent(self, phase):
+    def quiescent(self, phase, fence):
         if self.pending.exists():
             raise ReleaseError("previous Compose operation needs reconciliation")
         if self.check_quiescence is None:
             raise ReleaseError("host quiescence verifier is unbound")
-        state = self.gate.read()
-        if not state["closed"] or state["active"] or self.check_quiescence(self.digest, phase, state.copy()) is not True:
+        if not fence or fence.get("closed") is not True:
+            raise ReleaseError("controller gate fence is required")
+        state = self.gate.require(fence, empty=True)
+        if self.check_quiescence(self.digest, phase, state.copy()) is not True:
             raise ReleaseError("host quiescence could not be verified")
-        return self.gate.require(state, empty=True)
+        return self.gate.require(fence, empty=True)
 
-    def switch(self, phase_name, phase):
+    def switch(self, phase_name, phase, fence):
         self.plan(phase)
         self.check_mounts(self.container(), self.state_mounts, exact=False)
-        closed = self.quiescent(phase_name)
+        closed = self.quiescent(phase_name, fence)
         # A timeout or failed Compose client can leave daemon work in flight.
         # Keep the marker until a synchronous success, even across a crash.
         save_json(self.pending, {"digest": self.digest, "phase": phase_name})
@@ -240,23 +245,27 @@ class ComposeAdapter:
                      "--force-recreate", "--scale", f"{self.service}=1", self.service, timeout=50)
         self.pending.unlink()
 
+    @staticmethod
+    def docker_registration(container, started_at):
+        return docker("container", "logs", "--since", started_at, "--tail", "2000", container, logs=True)
+
     def ready(self, phase_name, phase):
         item = self.incumbent(phase)
         state = item["State"]
         if not state["Running"] or self.probe is None or self.pending.exists():
             raise ReleaseError("gateway readiness is unavailable")
         command(*self.probe, item["Id"], self.digest, phase_name, timeout=25)
-        logs = docker("container", "logs", "--since", state["StartedAt"], "--tail", "2000", item["Id"], logs=True)
-        current = self.container()
+        logs = self.read_registration(item["Id"], state["StartedAt"])
         phase.verify()
         for mount in self.state_mounts:
             mount.verify()
         meta = re.findall(rb"pluginhost: plugin registered plugin_id=meta [^\r\n]*? version=([^\s]+)", logs)
+        current = self.container()
         if (meta != [phase.meta.encode("ascii")] or current["Id"] != item["Id"]
-                or not current["State"]["Running"] or current["State"]["StartedAt"] != state["StartedAt"]):
+                or current["State"]["Status"] != "running" or current["State"]["StartedAt"] != state["StartedAt"]):
             raise ReleaseError("running gateway readiness does not match the phase")
 
-    def __call__(self, verb, digest, phase_name):
+    def __call__(self, verb, digest, phase_name, *, fence=None):
         if digest != self.digest or phase_name not in self.phases:
             raise ReleaseError("release is not bound to this Compose adapter")
         phase = self.phases[phase_name]
@@ -266,9 +275,9 @@ class ComposeAdapter:
             case "incumbent":
                 self.incumbent(phase)
             case "quiescent":
-                self.quiescent(phase_name)
+                self.quiescent(phase_name, fence)
             case "switch":
-                self.switch(phase_name, phase)
+                self.switch(phase_name, phase, fence)
             case "ready":
                 self.ready(phase_name, phase)
             case _:

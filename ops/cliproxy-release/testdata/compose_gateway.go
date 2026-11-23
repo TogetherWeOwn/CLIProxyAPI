@@ -3,6 +3,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -15,18 +16,25 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	switch filepath.Base(os.Args[0]) {
 	case "sha256sum":
 		data, err := os.ReadFile(os.Args[len(os.Args)-1])
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		fmt.Printf("%x  %s\n", sha256.Sum256(data), os.Args[len(os.Args)-1])
 	case "stat":
 		for _, path := range os.Args[4:] {
 			var info syscall.Stat_t
 			if err := syscall.Stat(path, &info); err != nil {
-				log.Fatal(err)
+				return err
 			}
 			fmt.Printf("%d:%d\n", info.Dev, info.Ino)
 		}
@@ -36,26 +44,38 @@ func main() {
 				time.Sleep(time.Hour)
 			}
 		}
-		run()
+		return serve()
 	}
+	return nil
 }
 
-func run() {
+func serve() error {
 	data, err := os.ReadFile("/config.yaml")
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fields := strings.Fields(string(data))
 	phase, version, mode := fields[0], fields[1], fields[2]
 	library, err := os.ReadFile("/plugins/meta-v" + version + ".so")
 	if err != nil || string(library) != phase {
-		log.Fatal("wrong synthetic library")
+		return errors.New("wrong synthetic library")
 	}
 	identity, err := os.ReadFile("/phase")
 	if err != nil || string(identity) != phase {
-		log.Fatal("wrong synthetic image")
+		return errors.New("wrong synthetic image")
 	}
-	log.Printf("pluginhost: plugin registered plugin_id=meta plugin_name=Meta version=%s", version)
+	registration := fmt.Sprintf("pluginhost: plugin registered plugin_id=meta plugin_name=Meta version=%s", version)
+	if fields[3] == "file" {
+		name, err := os.Hostname()
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile("/probe/registration-"+name, []byte(registration+"\n"), 0o600); err != nil {
+			return err
+		}
+	} else {
+		log.Print(registration)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -85,14 +105,14 @@ func run() {
 	})
 	socket := "/probe/backend.sock"
 	if err := os.Remove(socket); err != nil && !os.IsNotExist(err) {
-		log.Fatal(err)
+		return err
 	}
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if err := os.Chmod(socket, 0o666); err != nil {
-		log.Fatal(err)
+		return err
 	}
-	log.Fatal(http.Serve(listener, mux))
+	return http.Serve(listener, mux)
 }

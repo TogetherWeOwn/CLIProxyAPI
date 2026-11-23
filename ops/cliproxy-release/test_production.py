@@ -196,7 +196,7 @@ class BindingFixture:
         self.proxy("public", self.paths[0], self.data_port)
         self.proxy("direct", self.paths[1], self.data_port)
 
-    def __call__(self, verb, digest, phase):
+    def __call__(self, verb, digest, phase, *, fence=None):
         assert digest == DIGEST
         if verb == "quiescent" and not self.writer_clear:
             raise ReleaseError("fixture writer still active")
