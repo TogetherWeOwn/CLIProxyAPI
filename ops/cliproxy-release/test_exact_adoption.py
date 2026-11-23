@@ -14,6 +14,7 @@ import sys
 import tempfile
 import stat
 import unittest
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 from adoption import transact
@@ -286,13 +287,20 @@ class ExactFixture:
         if verb != "ready":
             self.engine(verb, digest, phase, fence=fence)
             return
-        from unittest.mock import patch
         from compose_adapter import command
         with patch("compose_adapter.command", side_effect=lambda *argv, **opts:
                    self.run_probe(argv[1], reject=self.reject_ready) if argv[0] == "bound-fixture-probe" else command(*argv, **opts)):
             self.engine(verb, digest, phase)
 
     def site(self, verb, digest, binding):
+        try:
+            self.site_operation(verb, digest, binding)
+        except AssertionError as error:
+            # The production Site wrapper converts a failed adapter command
+            # into ReleaseError so that the controller can run undo.
+            raise ReleaseError(f"disposable site operation failed: {verb}") from error
+
+    def site_operation(self, verb, digest, binding):
         # The disposable project and its synthetic clients are private to the
         # test. No shared host listener, client, writer or queue is in scope.
         assert digest == BUNDLE_SHA and binding == "e" * 64
@@ -357,14 +365,20 @@ class ExactTests(unittest.TestCase):
                 spec = dict(spec, image=spec["docker_config"])
             self.assertEqual(docker("image", "inspect", "--format", "{{.Id}}", spec["image"]).decode().strip(), spec["image"])
 
-            for reject_ready in (False, True):
-                with self.subTest(reject_ready=reject_ready), ExitStack() as fixture_stack:
+            for reject_at in (None, "ready", "callback"):
+                with self.subTest(reject_at=reject_at), ExitStack() as fixture_stack:
                     directory = Path(fixture_stack.enter_context(tempfile.TemporaryDirectory(prefix="adopt-phase-", dir="/tmp")))
-                    host = ExactFixture(directory, fixture_stack, spec, root / "baseline", reject_ready=reject_ready)
+                    host = ExactFixture(directory, fixture_stack, spec, root / "baseline", reject_ready=reject_at == "ready")
                     old_state = location(host.auth), location(host.auth_file), location(host.kv)
-                    if reject_ready:
+                    if reject_at:
+                        if reject_at == "callback":
+                            failed_callback = fixture_stack.enter_context(
+                                patch.object(host, "check_callback", side_effect=AssertionError("synthetic callback failure"))
+                            )
                         with self.assertRaisesRegex(ReleaseError, "failed and legacy ingress was restored"):
                             host.run()
+                        if reject_at == "callback":
+                            failed_callback.assert_called_once()
                     else:
                         host.run()
                         adopted = host.engine.incumbent(host.engine.phases["baseline"])
