@@ -21,6 +21,7 @@ GATE_SOCKET = Path("/run/cliproxy-release/gate.sock")
 DRAIN_SECONDS = 60
 UNIT = "cliproxy-release"
 SAFE_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"}
+GATE_FENCE_ENV = "CLIPROXY_RELEASE_GATE_FENCE"
 
 
 class ReleaseError(Exception):
@@ -122,18 +123,30 @@ class Gate:
         raise ReleaseError("active requests did not drain")
 
 
+def adapter_fence():
+    """Read the controller's expected fence from the installer wrapper's environment."""
+    value = os.environ.get(GATE_FENCE_ENV, "")
+    match = re.fullmatch(r"([0-9a-f]{32}):(0|[1-9][0-9]{0,19})", value)
+    if match is None or int(match[2]) >= 2**64:
+        raise ReleaseError("missing or invalid controller gate fence")
+    return {"generation": match[1], "epoch": int(match[2]), "closed": True}
+
+
 class Adapter:
     """Only an installer-owned executable can resolve the local binding."""
 
     def __init__(self, executable):
         self.executable = executable
 
-    def __call__(self, verb, digest, phase):
+    def __call__(self, verb, digest, phase, *, fence=None):
         if verb not in ("prepared", "incumbent", "quiescent", "switch", "ready") or phase not in ("baseline", "candidate"):
             raise ReleaseError("invalid lifecycle operation")
+        env = SAFE_ENV.copy()
+        if fence is not None:
+            env[GATE_FENCE_ENV] = f"{fence['generation']}:{fence['epoch']}"
         result = subprocess.run(
             [str(self.executable), verb, digest, phase],
-            check=False, env=SAFE_ENV, stdin=subprocess.DEVNULL,
+            check=False, env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             timeout=75 if verb in ("switch", "ready") else 30,
         )
@@ -180,7 +193,7 @@ def restart(gate, adapter, journal, action, digest, drain_seconds=DRAIN_SECONDS)
     closed = initial if initial["closed"] else gate.change(initial, True)
     try:
         gate.wait(closed, drain_seconds)
-        adapter("quiescent", digest, target)
+        adapter("quiescent", digest, target, fence=closed)
         if not initial["closed"]:
             adapter("incumbent", digest, source)
         if action == "deploy":
@@ -195,15 +208,15 @@ def restart(gate, adapter, journal, action, digest, drain_seconds=DRAIN_SECONDS)
         raise
 
     try:
-        adapter("switch", digest, target)
+        adapter("switch", digest, target, fence=closed)
         adapter("ready", digest, target)
     except (ReleaseError, OSError, ValueError, http.client.HTTPException, subprocess.SubprocessError):
         if action == "deploy":
             # Quiescent includes checking that a failed/timed-out restart has
             # stopped changing the target before a second switch can start.
-            adapter("quiescent", digest, source)
+            adapter("quiescent", digest, source, fence=closed)
             gate.require(closed, empty=True)
-            adapter("switch", digest, source)
+            adapter("switch", digest, source, fence=closed)
             adapter("ready", digest, source)
             gate.change(gate.require(closed, empty=True), False)
             save_json(journal, {"digest": digest, "phase": "rolled_back"})

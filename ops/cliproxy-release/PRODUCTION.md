@@ -113,6 +113,82 @@ recovery keeps admission closed. When the gate has restarted or a command's
 result is uncertain, use the journal and fresh readback before taking another
 action.
 
+### Bind the reusable Compose operations
+
+Install `compose_adapter.py` alongside `production.py` in the root-owned
+release directory. The installer supplies the executable `adapter` wrapper
+and calls `ComposeAdapter` with one approved digest and the two local
+`Phase` definitions. With Python isolated mode, add only the trusted
+installation directory to the wrapper's module search path. Run the adapter
+under the controller lock and return nonzero for any error. For
+`quiescent` and `switch`, pass the result of `production.adapter_fence()`
+as the `fence` keyword argument. The controller supplies the expected
+generation and epoch in the wrapper's sanitized environment. The adapter
+checks that fence against the real gate and separately requires site
+quiescence. Keep the binding, Compose files, runtime config and probe
+credentials private on the host.
+
+Before constructing the binding, verify the ZIP digest and use
+`staging.unpack` and `staging.verify_image` to reconcile both staged phases
+and their library sets. The phase directory contains a self-contained
+`compose.yaml`, the phase's `config.yaml` and a flat `plugins` directory
+containing the full platform set. Pin the Compose and config hashes, each
+library hash, the expected Meta version and the executable hash. Use the
+full local Docker image ID that resolves to the verified OCI image or its
+verified config digest, as appropriate for the local Docker store. Tag
+names can move. Preserve the baseline config and libraries in their own
+phase directory.
+
+Each Compose file describes only the existing gateway service under the
+same project name and project directory. It uses the bound image ID and
+existing private bind mounts in long syntax with `create_host_path: false`.
+Declare any existing networks as external. Record the canonical source,
+target, read/write mode and device/inode for the stable mounts, including
+OAuth and KV, once when installing the binding. Persist these identities
+across invocations. Point the phase-specific config and library binds at the
+phase's own files. Both are read-only by default. If the site enables writes
+to either, reconcile their bytes before certifying exact phase identity.
+Retain the baseline's Compose ownership and service labels. The installed
+gateway must already match the pinned baseline's Compose service hash and
+mount plan. If it was started from a tag or with different bind sources,
+reconcile and adopt the baseline under the site's release procedure before
+running the forward transaction. A stopped incumbent is checked using the
+installed container's image, Compose labels and mount metadata. For a
+running incumbent the live mount and PID 1 reads run under the gateway's
+configured container user. Start PID 1 as that user.
+
+The wrapper must verify the site's ingress and trusted-peer plan for
+`prepared`. Supply a read-only `check_quiescence(digest, phase, gate_state)`
+that returns literal `True` only with current evidence of the actual site's
+conditions in the verb table. It runs at the controller check and again
+immediately before replacement. The adapter also requires the controller's
+closed, empty gate generation and epoch. Install the pending-operation record under the
+controller's root-only state directory, scoped to the gateway service
+across both phases. A timeout, interrupted client or unconfirmed Compose
+result leaves that record in place. Reconcile the Docker operation and
+container state under the release lock before clearing it or trying another
+switch.
+
+Supply a fixed private probe command. It receives the verified container ID,
+ZIP digest and phase, and must verify that its endpoint is that container.
+Use the `check` function in `staging_probe.py` with a site's private request
+function and expected Meta model. It checks health, the catalogue and a
+fresh stream through its terminal event. Keep credential material off the
+command line. The adapter bounds the probe to 25 seconds, checks the Meta
+registration for the current start and confirms the gateway stayed on the
+same start before returning readiness. Verify during `prepared` where both
+phases emit the registration. By default the adapter reads the last 2,000
+Docker log lines from the current container start. For file logging or a
+different sink, supply a bounded `read_registration(container, started_at)`
+reader that returns only bytes from that exact start. The adapter still
+checks the expected Meta version. The controller reopens admission
+after readiness and its final gate readback.
+
+Live installation still needs the protected SSH route, the Caddy and direct
+client paths, Keeper and its queue, OAuth callbacks, and verification of
+actual config, plugin, reload and lifecycle writers. Resolve those site
+dependencies with the release task before enabling the workflow.
+
 ## Disposable proof
 
 Run `CLIPROXY_FIXTURE_GATE=<built-gate> python3 -ESB ops/cliproxy-release/test_production.py`.
@@ -121,3 +197,13 @@ for the ingress hops. The fixture exercises both hops, direct HTTP and RESP,
 one blocked writer, candidate health failure, a real process replacement, client identity, gate restart and rollback of a
 stopped candidate with synthetic OAuth and KV files. The
 fixture releases its own loopback listeners and processes on exit.
+
+The Compose fixture uses the same controller with two locally imported
+synthetic images, a separate keeper service and task-owned bind mounts.
+The [fixture workflow](../../.github/workflows/cliproxy-release-preflight.yml)
+shows the local build and test commands. It covers phase mismatch, preflight
+refusal, an unbound verifier, refusal after the gate restarts, and a failed
+Compose command that leaves a pending record. It also checks rollback of a
+stopped non-root gateway with file logging and newer OAuth and KV writes,
+and a hung readiness stream. The fixture exercises the production
+subprocess boundary. Its verifier applies only to the disposable namespace.

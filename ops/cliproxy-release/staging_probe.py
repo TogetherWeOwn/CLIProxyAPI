@@ -49,7 +49,7 @@ def request(path, payload=None):
     return OPENER.open(target, timeout=4)
 
 
-def completed(events):
+def completed(events, expected_text="stage-complete"):
     if not events or events[-1] != b"[DONE]":
         return False
     text = []
@@ -68,18 +68,21 @@ def completed(events):
             if content:
                 text.append(content)
             if reason is not None:
-                if reason != "stop" or "".join(text) != "stage-complete":
+                if (reason != "stop" or not text
+                        or (expected_text is not None and "".join(text) != expected_text)):
                     return False
                 finished = True
     return finished
 
 
-def check():
+def check(request, model, expected_text=None):
     deadline = time.monotonic() + 12
     while True:
         try:
             with request("/healthz") as health, request("/v1/models") as catalogue:
-                if health.status == 200 and any(model["id"] == CLIENT_MODEL for model in json.load(catalogue)["data"]):
+                models = catalogue.read(256 * 1024 + 1)
+                if (health.status == catalogue.status == 200 and len(models) <= 256 * 1024
+                        and any(entry["id"] == model for entry in json.loads(models)["data"])):
                     break
         except OSError:
             pass
@@ -87,13 +90,15 @@ def check():
             raise RuntimeError("gateway or Meta model unavailable")
         time.sleep(0.1)
     with request("/v1/chat/completions", {
-        "model": CLIENT_MODEL, "stream": True, "messages": [{"role": "user", "content": "fixture"}],
+        "model": model, "stream": True, "messages": [{"role": "user", "content": "fixture"}],
     }) as response:
+        if response.status != 200 or response.headers.get_content_type() != "text/event-stream":
+            raise RuntimeError("gateway did not start an SSE stream")
         body = response.read(256 * 1024 + 1)
         if len(body) > 256 * 1024:
             raise RuntimeError("unexpected stream size")
         events = [line.removeprefix(b"data:").strip() for line in body.splitlines() if line.startswith(b"data:")]
-    if not completed(events):
+    if not completed(events, expected_text):
         raise RuntimeError("missing Meta content or stream terminal")
 
 
@@ -102,4 +107,4 @@ if __name__ == "__main__":
         raise RuntimeError("unexpected gateway network interface")
     with http.server.ThreadingHTTPServer(("127.0.0.1", 19238), Upstream) as mock:
         threading.Thread(target=mock.serve_forever, daemon=True).start()
-        check()
+        check(request, CLIENT_MODEL, "stage-complete")
