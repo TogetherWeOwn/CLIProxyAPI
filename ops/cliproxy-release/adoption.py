@@ -9,6 +9,7 @@ SITE_OPERATIONS = {
     "legacy": 40,
     "isolate": 125,
     "isolated": 30,
+    "serving": 35,
     "undo-isolate": 35,
     "restore": 100,
     "resume": 30,
@@ -60,7 +61,10 @@ def transact(gate, adapter, site, journal, release_journal, action, digest, bind
             adapter("switch", digest, "baseline", fence=closed)
             adapter("ready", digest, "baseline")
             site("isolated", digest, binding)
-            gate.change(gate.require(closed, empty=True), False)
+            save_json(journal, dict(record, phase="validated"))
+            opened = gate.change(gate.require(closed, empty=True), False)
+            site("serving", digest, binding)
+            gate.require(opened, empty=False)
             save_json(journal, dict(record, phase="adopted"))
         except TRANSACTION_ERRORS:
             undo(gate, site, journal, record, drain_seconds)
@@ -68,7 +72,7 @@ def transact(gate, adapter, site, journal, release_journal, action, digest, bind
         return
 
     if (action != "undo-adoption"
-            or prior not in (record, *(dict(record, phase=p) for p in ("adopted", "undoing", "undone")))):
+            or prior not in (record, *(dict(record, phase=p) for p in ("validated", "adopted", "undoing", "undone")))):
         raise ReleaseError("no matching first adoption to undo")
     if prior["phase"] != "undone":
         undo(gate, site, journal, record, drain_seconds)
@@ -76,18 +80,26 @@ def transact(gate, adapter, site, journal, release_journal, action, digest, bind
 
 def undo(gate, site, journal, record, drain_seconds):
     digest, binding = record["digest"], record["binding"]
-    save_json(journal, dict(record, phase="undoing"))
-    # A host-side fence covers both layouts, including before the gate
-    # exists and after it has released the original published sockets.
-    site("undo-isolate", digest, binding)
     try:
-        state = gate.read()
-    except (FileNotFoundError, ConnectionRefusedError):
-        state = None
-    if state is not None:
-        closed = state if state["closed"] else gate.change(state, True)
+        save_json(journal, dict(record, phase="undoing"))
+    finally:
+        # A failed write cannot leave a known gate open or bypass the
+        # host fence covering both layouts.
+        try:
+            closed = close_gate(gate)
+        finally:
+            site("undo-isolate", digest, binding)
+    if closed is not None:
         gate.wait(closed, drain_seconds)
         gate.require(closed, empty=True)
     site("restore", digest, binding)
     site("resume", digest, binding)
     save_json(journal, dict(record, phase="undone"))
+
+
+def close_gate(gate):
+    try:
+        state = gate.read()
+    except (FileNotFoundError, ConnectionRefusedError):
+        return None
+    return state if state["closed"] else gate.change(state, True)

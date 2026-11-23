@@ -85,8 +85,16 @@ class LegacyCompose:
             raise ReleaseError("legacy Compose service hash changed")
         return mounts
 
+    def verify_tag(self):
+        identity = docker("image", "inspect", "--format", "{{.Id}}", self.image_tag)
+        if identity.strip() != self.baseline.image.encode("ascii"):
+            raise ReleaseError("legacy image tag no longer points to the approved artifact")
+
     def read(self, *, original=False, running=True):
-        item = self.adapter.installed(self.baseline, self.plan(), self.networks, self.service_hash)
+        mounts = self.plan()
+        if original:
+            self.verify_tag()
+        item = self.adapter.installed(self.baseline, mounts, self.networks, self.service_hash)
         state = item["State"]
         if (item["Config"]["Image"] != self.image_tag or item["HostConfig"]["PortBindings"] != self.ports
                 or (running and (not state["Running"] or state["Restarting"]))
@@ -99,9 +107,7 @@ class LegacyCompose:
         self.plan()
         if self.pending.exists() or self.adapter.pending.exists():
             raise ReleaseError("previous Compose operation needs reconciliation")
-        identity = docker("image", "inspect", "--format", "{{.Id}}", self.image_tag)
-        if identity.strip() != self.baseline.image.encode("ascii"):
-            raise ReleaseError("legacy image tag no longer points to the approved artifact")
+        self.verify_tag()
         if check_isolated() is not True:
             raise ReleaseError("legacy restoration requires isolated ingress and writers")
         save_json(self.pending, {"phase": "restore-legacy", "image": self.baseline.image})

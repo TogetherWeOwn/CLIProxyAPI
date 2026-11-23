@@ -42,6 +42,7 @@ retrying. The protected unit owns the transaction even if SSH disconnects.
 | `legacy` | Read-only preflight confirms the authorized running legacy container, original ingress and verified undo files. Verify that the site can prove legacy quiescence and can restore both layouts while ingress stays closed. |
 | `isolate` | Establish a host-side barrier that covers the old loopback publishes, the Docker bridge paths, both Caddy routes and callback ports. Drain existing work and verify the queue and writers before stopping the exact incumbent. Leave its stopped container for Compose to replace. Bring up closed gated ingress. |
 | `isolated` | Read back both Caddy routes and direct paths through the same closed gate. Verify that the original sockets and the private backend have no bypass. Check stable auth and KV mount identities and the current writer barrier. |
+| `serving` | After the gate opens, verify forwarding through both Caddy routes and direct HTTP, authenticated Keeper HTTP and RESP, and the expected callback behavior. Failure triggers protected undo. |
 | `undo-isolate` | Re-establish the site barrier after any partial operation. It must cover both layouts, including a missing or restarted gate. Preserve the connections needed to finish admitted work. |
 | `restore` | Reconcile pending Docker work and drain canceled or asynchronous work and remaining queue records. Close gate front listeners that occupy legacy addresses. Restore the original Compose service, files and both running Caddy configurations while admission stays fenced. |
 | `resume` | Verify the restored image, mounts and topology, and health through both ingress paths, direct callers and Keeper using the private observation path. Reopen the site barrier only after those checks. |
@@ -73,10 +74,18 @@ until the release task has resolved the capability gap.
 Dispatch `undo-adoption` through the same workflow if an interrupted attempt
 cannot be confirmed. It uses the original bound bundle and manifest and
 remains available if the adoption opt-in is withdrawn or protected main has
-advanced. Check the local journal and pending Compose records under the
-release lock. Automatic undo returns a failed workflow result even when the
+advanced. Check the local journal and pending Compose records under the release lock. A
+`validated` record means the pinned gateway and closed ingress passed but
+opening admission and forwarding were not confirmed. Use protected undo
+to recover that state. A failed journal write during recovery leaves the
+controller attempting both fences before returning the failure. Automatic undo returns a failed workflow result even when the
 legacy service was restored. An incomplete undo keeps admission fenced. An
 attempted forward release takes over recovery through the pinned baseline.
+An `undone` record ends that adoption attempt. To authorize a fresh attempt,
+first disable the adoption opt-in, verify the complete restored layout
+and absence of pending Compose work, then archive the old record under
+the release lock and install a fresh approval for the currently authorized
+incumbent and binding.
 
 Keep GitHub, protected SSH, the release service and observation independent
 of the gateway. Apply the normal exact-build staging, release review and

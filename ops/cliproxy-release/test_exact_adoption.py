@@ -317,6 +317,11 @@ class ExactFixture:
         elif verb == "isolated":
             assert self.closed and probe(self.port, "/healthz")[0] == 503
             assert all(proxy.status() == 503 for proxy in self.proxies)
+        elif verb == "serving":
+            if probe(self.port, "/healthz")[0] != 200 or any(proxy.status() != 200 for proxy in self.proxies):
+                raise ReleaseError("fixture ingress did not resume")
+            self.consume_usage("127.0.0.1", self.resp_port)
+            self.check_callback("127.0.0.1", self.port, self.callbacks[1455])
         elif verb == "undo-isolate":
             self.closed = True
         elif verb == "restore":
@@ -366,8 +371,6 @@ class ExactTests(unittest.TestCase):
                         self.assertNotEqual(adopted["Id"], host.authorized)
                         self.assertEqual(probe(host.port, "/healthz")[0], 200)
                         self.assertTrue(all(proxy.status() == 200 for proxy in host.proxies))
-                        host.consume_usage("127.0.0.1", host.resp_port)
-                        host.check_callback("127.0.0.1", host.port, host.callbacks[1455])
                         self.assertEqual(read_json(host.journal)["phase"], "adopted")
                         host.run("undo-adoption")
                     self.assertEqual(read_json(host.journal)["phase"], "undone")

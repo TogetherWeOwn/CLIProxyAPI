@@ -74,7 +74,7 @@ class AdoptionTests(unittest.TestCase):
         self.run_action()
         self.assertEqual(self.layout, "pinned")
         self.assertFalse(self.gate.read()["closed"])
-        self.assertEqual(self.calls, ["prepared", "legacy", "isolate", "isolated", "switch", "ready", "isolated"])
+        self.assertEqual(self.calls, ["prepared", "legacy", "isolate", "isolated", "switch", "ready", "isolated", "serving"])
         self.assertEqual(read_json(self.journal)["phase"], "adopted")
         self.assertFalse(self.release_journal.exists())
         with self.assertRaisesRegex(ReleaseError, "already attempted"):
@@ -90,6 +90,43 @@ class AdoptionTests(unittest.TestCase):
         self.assertEqual(self.layout, "legacy")
         self.assertEqual(self.calls[-3:], ["undo-isolate", "restore", "resume"])
         self.assertEqual(read_json(self.journal)["phase"], "undone")
+
+    def test_post_open_validation_failure_closes_gate_and_restores(self):
+        self.fail.add("serving")
+        with self.assertRaisesRegex(ReleaseError, "failed and legacy ingress was restored"):
+            self.run_action()
+        self.assertEqual(self.layout, "legacy")
+        self.assertEqual(read_json(self.journal)["phase"], "undone")
+
+    def test_write_failure_during_cutover_still_fences_both_layouts(self):
+        for failed_phase, prior in (("validated", "changing"), ("adopted", "validated")):
+            with self.subTest(failed_phase=failed_phase):
+                self.journal.unlink(missing_ok=True)
+                self.calls.clear()
+
+                def write(path, record):
+                    if record["phase"] in (failed_phase, "undoing"):
+                        raise OSError("synthetic journal write failure")
+                    save_json(path, record)
+
+                with patch("adoption.save_json", side_effect=write), self.assertRaises(OSError):
+                    self.run_action()
+                state = self.gate.read()
+                self.assertTrue(state["closed"])
+                self.assertEqual(state["epoch"], 0 if failed_phase == "validated" else 2)
+                self.assertEqual(read_json(self.journal)["phase"], prior)
+                self.assertIn("undo-isolate", self.calls)
+                self.assertNotIn("restore", self.calls)
+                self.assertEqual("serving" in self.calls, failed_phase == "adopted")
+                self.run_action("undo-adoption")
+
+    def test_interruption_after_validation_record_can_resume_undo(self):
+        with patch.object(self.gate, "change", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            self.run_action()
+        self.assertEqual(read_json(self.journal)["phase"], "validated")
+        self.assertTrue(self.gate.read()["closed"])
+        self.run_action("undo-adoption")
+        self.assertEqual(self.layout, "legacy")
 
     def test_isolation_failure_recovers_without_a_gate_or_switch(self):
         self.fail.add("isolate")
