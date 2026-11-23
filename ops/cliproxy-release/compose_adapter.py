@@ -56,19 +56,26 @@ class Phase:
     executable: str
     meta: str
 
-    def verify(self):
-        compose, config = self.directory / "compose.yaml", self.directory / "config.yaml"
-        plugins = self.directory / "plugins"
-        if (file_digest(compose, 64 * 1024) != self.compose_sha256
-                or file_digest(config, 1024 * 1024) != self.config_sha256
-                or plugins.resolve() != plugins or not plugins.is_dir()
+    def verify_libraries(self, plugins, *, allow_shadow=False):
+        entries = {path.name for path in plugins.iterdir()}
+        shadow = plugins / ".shadow"
+        if allow_shadow and shadow.is_dir() and not shadow.is_symlink():
+            entries.remove(".shadow")
+        if (plugins.resolve() != plugins or not plugins.is_dir()
                 or not 1 <= len(self.libraries) <= 32
                 or any(not matches(LIBRARY, name) for name in self.libraries)
-                or {path.name for path in plugins.iterdir()} != self.libraries.keys()
+                or entries != self.libraries.keys()
                 or f"meta-v{self.meta}.so" not in self.libraries
                 or any(file_digest(plugins / name, 768 * 1024 * 1024) != digest
                        for name, digest in self.libraries.items())):
+            raise ReleaseError("release libraries do not match the bound phase")
+
+    def verify(self):
+        compose, config = self.directory / "compose.yaml", self.directory / "config.yaml"
+        if (file_digest(compose, 64 * 1024) != self.compose_sha256
+                or file_digest(config, 1024 * 1024) != self.config_sha256):
             raise ReleaseError("release files do not match the bound phase")
+        self.verify_libraries(self.directory / "plugins")
 
 
 def command(*args, timeout=5, logs=False):
@@ -205,11 +212,15 @@ class ComposeAdapter:
 
     def incumbent(self, phase):
         mounts, networks = self.plan(phase)
-        item = self.container()
         identity = self.compose(phase, "config", "--hash", self.service).decode("ascii").split()
+        if len(identity) != 2 or identity[0] != self.service or not matches(DIGEST, identity[1]):
+            raise ReleaseError("invalid Compose service hash")
+        return self.installed(phase, mounts, networks, identity[1])
+
+    def installed(self, phase, mounts, networks, service_hash):
+        item = self.container()
         labels = item["Config"]["Labels"]
-        if (item["Image"] != phase.image or len(identity) != 2 or identity[0] != self.service
-                or not matches(DIGEST, identity[1]) or labels.get("com.docker.compose.config-hash") != identity[1]
+        if (item["Image"] != phase.image or labels.get("com.docker.compose.config-hash") != service_hash
                 or labels.get("com.docker.compose.project.working_dir") != str(self.directory)):
             raise ReleaseError("installed gateway is not the expected phase")
         if item["State"]["Running"] and set(item["NetworkSettings"]["Networks"]) != networks:
@@ -235,7 +246,8 @@ class ComposeAdapter:
 
     def switch(self, phase_name, phase, fence):
         self.plan(phase)
-        self.check_mounts(self.container(), self.state_mounts, exact=False)
+        incumbent = self.container()
+        self.check_mounts(incumbent, self.state_mounts, exact=False)
         closed = self.quiescent(phase_name, fence)
         # A timeout or failed Compose client can leave daemon work in flight.
         # Keep the marker until a synchronous success, even across a crash.
@@ -243,6 +255,8 @@ class ComposeAdapter:
         self.gate.require(closed, empty=True)
         self.compose(phase, "up", "--detach", "--no-deps", "--no-build", "--pull", "never",
                      "--force-recreate", "--scale", f"{self.service}=1", self.service, timeout=50)
+        if self.container()["Id"] == incumbent["Id"]:
+            raise ReleaseError("Compose did not replace the gateway")
         self.pending.unlink()
 
     @staticmethod

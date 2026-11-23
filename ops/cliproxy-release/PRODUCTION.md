@@ -21,7 +21,7 @@ digest. Deliver the verified images and libraries privately to the target.
 Use a dedicated `cliproxy-release` login with a root-managed authorized key
 and OpenSSH `restrict,command="/usr/bin/python3 -IB /etc/cliproxy-release/production.py submit"`.
 Give it passwordless sudo for the root-owned `/etc/cliproxy-release/queue`
-alone. The helper rejects all args other than the two literal actions and
+alone. The helper accepts only the fixed lifecycle actions and
 hexadecimal identities. Install `production.py`, `queue` and the local
 `adapter` under the root-owned directory, inaccessible for writes by the
 SSH login. Store the SHA of the deployed main workflow and exact staged ZIP
@@ -36,7 +36,9 @@ Systemd owns the bounded transaction after submission. If the runner loses
 its connection, check the unit and local transaction record before dispatching
 again. The host refuses replay of a forward action after the pair has reached
 its mutation phase. An interrupted replacement leaves admission closed.
-Submit `rollback` through the same workflow to recover an interrupted change.
+Submit `rollback` through the same workflow to recover an interrupted release.
+Use the separate [first-adoption procedure](ADOPTION.md) for a tag-based
+incumbent that is still serving the original ingress paths.
 
 ## Put every path behind the release boundary
 
@@ -151,8 +153,8 @@ to either, reconcile their bytes before certifying exact phase identity.
 Retain the baseline's Compose ownership and service labels. The installed
 gateway must already match the pinned baseline's Compose service hash and
 mount plan. If it was started from a tag or with different bind sources,
-reconcile and adopt the baseline under the site's release procedure before
-running the forward transaction. A stopped incumbent is checked using the
+adopt the baseline through the protected [first-adoption procedure](ADOPTION.md)
+before running the forward transaction. A stopped incumbent is checked using the
 installed container's image, Compose labels and mount metadata. For a
 running incumbent the live mount and PID 1 reads run under the gateway's
 configured container user. Start PID 1 as that user.

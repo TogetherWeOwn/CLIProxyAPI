@@ -20,6 +20,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -144,8 +145,24 @@ func (a *admission) forwardRESP(listener net.Listener, target string) error {
 	}
 }
 
-func run(ctx context.Context, listen []string, resp, target, socket, ingress string) error {
-	if _, _, err := net.SplitHostPort(target); err != nil {
+type callback struct {
+	listen string
+	port   string
+}
+
+func parseCallback(value string) (callback, error) {
+	listen, port, found := strings.Cut(value, "=")
+	host, _, errSplit := net.SplitHostPort(listen)
+	portNumber, errPort := strconv.ParseUint(port, 10, 16)
+	if !found || errSplit != nil || !net.ParseIP(host).IsLoopback() || errPort != nil || portNumber == 0 {
+		return callback{}, errors.New("callback needs a loopback listen address and backend port")
+	}
+	return callback{listen: listen, port: port}, nil
+}
+
+func run(ctx context.Context, listen []string, callbacks []callback, resp, target, socket, ingress string) error {
+	targetHost, _, errTarget := net.SplitHostPort(target)
+	if errTarget != nil {
 		return errors.New("target must be a host and port")
 	}
 	// Require a private directory. Do not unlink a possibly live control socket.
@@ -176,7 +193,7 @@ func run(ctx context.Context, listen []string, resp, target, socket, ingress str
 		defer closeResource(data, "http-listener")
 		tcp = append(tcp, data)
 	}
-	errs := make(chan error, len(tcp)+3)
+	errs := make(chan error, len(tcp)+len(callbacks)+3)
 	if resp != "" {
 		keeper, errKeeper := net.Listen("tcp", resp)
 		if errKeeper != nil {
@@ -199,6 +216,16 @@ func run(ctx context.Context, listen []string, resp, target, socket, ingress str
 		proxy := backendHTTP(target, true, transport, errLog)
 		upstream := &http.Server{Handler: a.http(proxy), ReadHeaderTimeout: 10 * time.Second, ErrorLog: errLog}
 		go func() { errs <- upstream.Serve(trusted) }()
+	}
+	for _, route := range callbacks {
+		listener, errListen := net.Listen("tcp", route.listen)
+		if errListen != nil {
+			return errListen
+		}
+		defer closeResource(listener, "oauth-callback")
+		proxy := backendHTTP(net.JoinHostPort(targetHost, route.port), false, transport, errLog)
+		server := &http.Server{Handler: a.http(proxy), ReadHeaderTimeout: 5 * time.Second, ErrorLog: errLog}
+		go func() { errs <- server.Serve(listener) }()
 	}
 	for _, data := range tcp {
 		go func() { errs <- public.Serve(data) }()
@@ -295,19 +322,27 @@ func main() {
 		listen = append(listen, address)
 		return nil
 	})
+	var callbacks []callback
+	flag.Func("callback", "loopback OAuth callback listen address and backend port, separated by =", func(value string) error {
+		route, err := parseCallback(value)
+		if err == nil {
+			callbacks = append(callbacks, route)
+		}
+		return err
+	})
 	resp := flag.String("resp", "", "private Keeper RESP listen address")
 	target := flag.String("target", "", "private HTTP/RESP backend address")
 	socket := flag.String("control", "", "local control socket")
 	ingress := flag.String("trusted-ingress", "", "Unix HTTP listener for authorized ingress proxies")
 	flag.Parse()
-	if len(listen) == 0 || *target == "" || *socket == "" || flag.NArg() != 0 ||
+	if len(listen) == 0 || len(callbacks) > 5 || *target == "" || *socket == "" || flag.NArg() != 0 ||
 		(*resp != "" && checkListenAddress(*resp) != nil) {
 		log.WithField("component", "release-gate").Error("invalid listener or target arguments")
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, listen, *resp, *target, *socket, *ingress); err != nil {
+	if err := run(ctx, listen, callbacks, *resp, *target, *socket, *ingress); err != nil {
 		log.WithField("component", "release-gate").Error("listener startup or serving failed")
 		os.Exit(1)
 	}
