@@ -266,6 +266,17 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual((fixture.root / "state" / "oauth").read_bytes(), b"refreshed")
         self.assertEqual((fixture.root / "state" / "kv").read_bytes(), b"current")
 
+    def test_usage_listener_does_not_forward_http(self):
+        fixture = self.fixture
+        self.assertEqual(probe(fixture.data_port), (200, b"baseline"))
+        with socket.create_connection(("127.0.0.1", fixture.resp_port), timeout=2) as usage:
+            usage.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            try:
+                self.assertEqual(usage.recv(1), b"")
+            except ConnectionResetError:
+                pass
+        eventually(lambda: fixture.gate.read()["active"] == 0)
+
     def test_existing_keepalive_cannot_admit_again_while_closed(self):
         fixture = self.fixture
         with close_connection(fixture.data_port) as conn:

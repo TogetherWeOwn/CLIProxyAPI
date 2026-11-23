@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -114,6 +115,15 @@ func (a *admission) forwardRESP(listener net.Listener, target string) error {
 		go func() {
 			defer a.leave()
 			defer closeResource(client, "resp-client")
+			// The backend selects its protocol from the first byte. Permit
+			// only a RESP command array so HTTP cannot reach it via this lane.
+			_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+			reader := bufio.NewReader(client)
+			prefix, errRead := reader.Peek(1)
+			if errRead != nil || prefix[0] != '*' {
+				return
+			}
+			_ = client.SetReadDeadline(time.Time{})
 			upstream, errDial := net.DialTimeout("tcp", target, 5*time.Second)
 			if errDial != nil {
 				return
@@ -123,7 +133,7 @@ func (a *admission) forwardRESP(listener net.Listener, target string) error {
 			// is blocked in a queue command and never writes a response.
 			done := make(chan struct{})
 			go func() {
-				_, _ = io.Copy(upstream, client)
+				_, _ = io.Copy(upstream, reader)
 				_ = upstream.Close()
 				close(done)
 			}()

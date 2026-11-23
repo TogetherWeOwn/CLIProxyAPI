@@ -68,9 +68,14 @@ instances must all reach the shared gate.
 
 CLIProxy also serves RESP on its HTTP port. Put the usage consumer's RESP
 connection on a separate restricted `-resp` listener, with no alternate route
-to the backend. This listener counts an entire RESP connection. Quiesce the
-usage consumer and reconcile its queue before restarting, then restore
-consumption. HTTP/1 keep-alive requests each pass admission. Active streaming
+to the backend. This listener admits only RESP command arrays and counts
+the entire connection. The gateway authenticates RESP using the TCP peer,
+so the usage consumer remains a remote management client on this binding.
+Use the existing remote-management policy and Keeper credentials. If the
+gateway requires a loopback peer for Keeper, this binding cannot serve it.
+Do not enable remote management to make the restart work. Quiesce the usage
+consumer and reconcile its queue before restarting, then verify that it can
+authenticate and resume consumption. HTTP/1 keep-alive requests each pass admission. Active streaming
 responses and HTTP upgrades keep their slot until the proxy handler returns.
 Read back gateway-side work as well when client cancellation or an asynchronous
 handler can outlive the proxy request. Account for any additional gateway
