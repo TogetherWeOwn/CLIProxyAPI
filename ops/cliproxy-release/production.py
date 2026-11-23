@@ -168,10 +168,10 @@ def restart(gate, adapter, journal, action, digest, drain_seconds=DRAIN_SECONDS)
         try:
             adapter("incumbent", digest, source)
         except ReleaseError:
-            if action != "rollback" or prior["phase"] != "changing":
+            if action != "rollback":
                 raise
-            # If an earlier recovery reopened baseline but did not finalize
-            # the record, confirm that exact baseline and finish the record.
+            # Recovery may have reopened baseline before recording completion.
+            # Verify that exact baseline before finalizing the record.
             adapter("incumbent", digest, target)
             adapter("ready", digest, target)
             save_json(journal, {"digest": digest, "phase": "rolled_back"})
@@ -214,14 +214,19 @@ def restart(gate, adapter, journal, action, digest, drain_seconds=DRAIN_SECONDS)
     save_json(journal, {"digest": digest, "phase": "deployed" if action == "deploy" else "rolled_back"})
 
 
-def approved(sha, digest):
-    return read_json(HOST_ROOT / "approved.json") == {"workflow_sha": sha, "bundle_sha256": digest}
+def approved(action, sha, digest):
+    record = read_json(HOST_ROOT / "approved.json")
+    return (
+        type(record) is dict and set(record) == {"workflow_sha", "bundle_sha256"}
+        and matches(SHA, record["workflow_sha"]) and record["bundle_sha256"] == digest
+        and (action == "rollback" or record["workflow_sha"] == sha)
+    )
 
 
 def host(action, sha, digest):
     with (STATE_ROOT / "lock").open("ab") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if not approved(sha, digest):
+        if not approved(action, sha, digest):
             raise ReleaseError("release pair is not approved on the target")
         restart(Gate(GATE_SOCKET), Adapter(HOST_ROOT / "adapter"), STATE_ROOT / (digest + ".json"), action, digest)
 
@@ -247,7 +252,7 @@ def submit():
 
 
 def queue(action, sha, digest):
-    if not approved(sha, digest):
+    if not approved(action, sha, digest):
         raise ReleaseError("release pair is not approved on the target")
     # No --pipe: the systemd unit remains owned by the host if SSH is lost.
     result = subprocess.run(

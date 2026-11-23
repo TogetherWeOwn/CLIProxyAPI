@@ -26,7 +26,9 @@ hexadecimal identities. Install `production.py`, `queue` and the local
 `adapter` under the root-owned directory, inaccessible for writes by the
 SSH login. Store the SHA of the deployed main workflow and exact staged ZIP
 digest in `/etc/cliproxy-release/approved.json` as `workflow_sha` and
-`bundle_sha256`. The host checks this allowlist again under the release lock.
+`bundle_sha256`. The host checks this allowlist again under the release lock. Forward requires
+the approved workflow SHA. Rollback stays confined to the approved pair and
+the local transaction state so it remains available if protected main advances.
 Create root-only `/var/lib/cliproxy-release` for the lock and transaction
 record. Keep one installer's controller and gate-control identity per target.
 
@@ -38,16 +40,31 @@ Submit `rollback` through the same workflow to recover an interrupted change.
 
 ## Put every path behind the release boundary
 
-Build `./ops/cliproxy-release/gate`. Run it independently of the backend.
-Its HTTP listeners require explicit loopback or private IPs and share one
-admission counter. Its control socket defaults closed on each new process
-generation and must live in a mode 0700 directory. Use
-`/run/cliproxy-release/gate.sock`. Install the backend on a private endpoint
-that clients cannot reach directly, pass it as `-target`, and route both
-Caddy instances and the loopback and Docker HTTP clients through the gate.
-Preserve the Caddy auth, TLS, forwarded client identity where required,
-access logs and path rules when changing the upstream. The gate forwards the
-original HTTP Host but removes forwarded identity headers.
+Build with `go build ./ops/cliproxy-release/gate` from the repository root.
+Run the gate independently of the backend. Its listeners share one
+admission counter. The direct HTTP listeners accept explicit loopback or
+private IPs and derive the client IP from the connection, ignoring client
+identity headers. The control socket defaults closed on each new process
+generation. Use `/run/cliproxy-release/gate.sock` in a gate-owned 0700
+systemd runtime directory. On clean stop the gate removes its own sockets.
+Have the serving unit's runtime directory lifecycle remove stale sockets
+after a crash.
+
+Route Caddy through the separate `-trusted-ingress` Unix socket in a
+gate-owned mode 2750 directory with a group limited to the two authorized
+proxies. In both Caddy upstreams overwrite `X-CLIProxy-Client-IP` from
+Caddy's trusted client IP, for example `header_up X-CLIProxy-Client-IP
+{client_ip}`. The gate accepts a single IP on that socket only, forwards it
+as `X-Forwarded-For` and strips `X-Real-IP`. Retain the Caddy auth, TLS,
+access logs and path rules.
+
+Install the backend on a private endpoint that clients cannot reach
+directly and pass it as `-target`. The backend must see a non-loopback
+gate address. Configure both gateway phases to trust only the gate peer
+for forwarded client identity. Verify that a remote request cannot become
+local by sending identity headers, and that different real clients retain
+separate management counters. Direct HTTP clients and the two Caddy
+instances must all reach the shared gate.
 
 CLIProxy also serves RESP on its HTTP port. Put the usage consumer's RESP
 connection on a separate restricted `-resp` listener, with no alternate route
@@ -69,8 +86,8 @@ existing Compose project and exact installed runtime identities.
 
 | Verb | Local operation |
 | --- | --- |
-| `prepared` | Resolve the digest to a private, local release directory, and check the phase's immutable image, executable, config and full platform library set. Check the compose and mount plan. Both phases use the same existing auth and KV sources. |
-| `incumbent` | Read back the running phase and its actual image, executable, config and libraries. Check freshness and target reachability. |
+| `prepared` | Resolve the digest to a private, local release directory, and check the phase's immutable image, executable, config and full platform library set. Check the compose, ingress identity and mount plan. Both phases use the same existing auth and KV sources. |
+| `incumbent` | Read back the exact installed phase and its image, executable, config and libraries. Verify the identity of a stopped gateway from the installed binding metadata. A crashed candidate must still be eligible for rollback. Readiness is verified separately. |
 | `quiescent` | Verify that all ingress reaches the gate, alternate listeners cannot admit work and pre-gate or canceled work has ended. Verify external config, plugin, mount and lifecycle writers are quiet through the switch, and management and reload work has completed. Refuse if any earlier restart can still mutate the target. |
 | `switch` | Recheck the local binding, save or revalidate the untouched baseline release files, then recreate only the gateway using the selected exact image, config and platform libraries. Reuse the existing OAuth and KV mounts. Do not recreate the usage consumer, rewrite its storage, restore an old state directory, or use compose options that remove volumes or build/pull images. Return only after Compose has finished. |
 | `ready` | Re-read the running identity, unchanged state mount identities, expected Meta registration and health. Run a fresh bounded probe to the private gateway with the expected model catalogue and a complete stream, without admitting general traffic. |
@@ -96,6 +113,6 @@ action.
 Run `CLIPROXY_FIXTURE_GATE=<built-gate> python3 -ESB ops/cliproxy-release/test_production.py`.
 Set `CLIPROXY_FIXTURE_CADDY` to a Caddy executable to use two Caddy processes
 for the ingress hops. The fixture exercises both hops, direct HTTP and RESP,
-one blocked writer, candidate health failure, a real process replacement
-and explicit restart rollback with newer synthetic OAuth and KV files. The
+one blocked writer, candidate health failure, a real process replacement, client identity, gate restart and rollback of a
+stopped candidate with synthetic OAuth and KV files. The
 fixture releases its own loopback listeners and processes on exit.

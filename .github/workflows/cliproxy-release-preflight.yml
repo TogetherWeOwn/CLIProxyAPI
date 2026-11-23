@@ -67,5 +67,5 @@ jobs:
         run: |
           gate="$(mktemp "$RUNNER_TEMP/cliproxy-gate.XXXXXXXX")"
           trap 'rm -- "$gate"' EXIT
-          GO111MODULE=off GOTOOLCHAIN=local go build -o "$gate" ops/cliproxy-release/gate/main.go
+          go build -o "$gate" ./ops/cliproxy-release/gate
           CLIPROXY_FIXTURE_GATE="$gate" python3 -ESB ops/cliproxy-release/test_production.py

@@ -16,7 +16,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from production import Gate, ReleaseError, dispatch, restart
+from production import Gate, ReleaseError, UnixHTTP, approved, dispatch, restart, submit
 
 BINARY = os.environ.get("CLIPROXY_FIXTURE_GATE")
 CADDY = os.environ.get("CLIPROXY_FIXTURE_CADDY")
@@ -41,10 +41,10 @@ def local_port():
         return listener.getsockname()[1]
 
 
-def probe(port, path="/"):
+def probe(port, path="/", headers=None):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
-        conn.request("GET", path)
+        conn.request("GET", path, headers=headers or {})
         response = conn.getresponse()
         return response.status, response.read()
     finally:
@@ -78,6 +78,15 @@ class Backend(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b"data: [DONE]\n")
             self.wfile.flush()
             return
+        if self.path == "/identity":
+            address = self.headers.get("X-Forwarded-For", "")
+            real = self.headers.get("X-Real-IP", "")
+            body = f"{address}|{real}".encode("ascii")
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/refresh":
             (root / "state" / "oauth").write_bytes(b"refreshed")
             (root / "state" / "kv").write_bytes(b"current")
@@ -100,6 +109,7 @@ class BindingFixture:
         self.root = root
         self.children = []
         self.server = None
+        self.phase = None
         self.backend_port = local_port()
         self.data_port = local_port()
         self.resp_port = local_port()
@@ -107,6 +117,12 @@ class BindingFixture:
         self.writer_clear = True
         self.fail_candidate = False
         self.journal = root / "transaction.json"
+        trusted = root / "trusted"
+        trusted.mkdir()
+        trusted.chmod(0o2750)
+        self.ingress = trusted / "ingress"
+        self.gate_args = None
+        self.gate_process = None
         (root / "state").mkdir()
         (root / "state" / "oauth").write_bytes(b"original")
         (root / "state" / "kv").write_bytes(b"original")
@@ -135,6 +151,7 @@ class BindingFixture:
         self.stop(self.server)
         self.server = self.spawn(sys.executable, "-ESB", __file__, "backend", str(self.root), phase, str(self.backend_port))
         eventually(lambda: probe(self.backend_port) == (200, phase.encode("ascii")))
+        self.phase = phase
 
     def proxy(self, name, port, target, resp=None):
         directory = self.root / name
@@ -146,7 +163,10 @@ class BindingFixture:
                 "apps": {"http": {"servers": {
                     "fixture": {"listen": [f"127.0.0.1:{port}"], "routes": [{
                         "handle": [{"handler": "reverse_proxy", "flush_interval": -1,
-                                    "upstreams": [{"dial": f"127.0.0.1:{target}"}]}],
+                                    "upstreams": [{"dial": f"unix/{self.ingress}"}],
+                                    "headers": {"request": {"set": {
+                                        "X-CLIProxy-Client-IP": ["{http.request.remote.host}"],
+                                    }}}}],
                     }]},
                 }}},
             }))
@@ -158,7 +178,12 @@ class BindingFixture:
         args = [BINARY, "-control", str(sock), "-listen", f"127.0.0.1:{port}", "-target", f"127.0.0.1:{target}"]
         if resp is not None:
             args += ["-resp", f"127.0.0.1:{resp}"]
-        self.spawn(*args)
+        if name == "gate":
+            args += ["-trusted-ingress", str(self.ingress)]
+            self.gate_args = args
+            self.gate_process = self.spawn(*args)
+        else:
+            self.spawn(*args)
         gate = Gate(sock)
         eventually(lambda: gate.read()["closed"])
         gate.change(gate.read(), False)
@@ -182,11 +207,11 @@ class BindingFixture:
         if verb == "switch":
             self.switches.append(phase)
             self.start_backend(phase)
-        if verb in ("incumbent", "ready"):
-            if probe(self.backend_port) != (200, phase.encode("ascii")):
-                raise ReleaseError("unexpected fixture incumbent")
-            if verb == "ready" and phase == "candidate" and self.fail_candidate:
-                raise ReleaseError("fixture candidate smoke failed")
+        if verb == "incumbent" and self.phase != phase:
+            raise ReleaseError("unexpected fixture incumbent")
+        if verb == "ready":
+            if probe(self.backend_port) != (200, phase.encode("ascii")) or (phase == "candidate" and self.fail_candidate):
+                raise ReleaseError("fixture smoke failed")
 
     def run(self, action="deploy", seconds=3):
         restart(self.gate, self, self.journal, action, DIGEST, seconds)
@@ -261,6 +286,37 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(fixture.gate.read()["active"], 0)
             fixture.gate.change(closed, False)
 
+    def test_only_privileged_ingress_can_supply_client_identity(self):
+        fixture = self.fixture
+        supplied = {"X-Forwarded-For": "198.51.100.12", "X-Real-IP": "127.0.0.9", "X-CLIProxy-Client-IP": "127.0.0.9"}
+        for port in fixture.paths:
+            self.assertEqual(probe(port, "/identity", supplied), (200, b"127.0.0.1|"))
+        for raw, expected in (
+            ("198.51.100.12", (200, b"198.51.100.12|")),
+            ("127.0.0.1, 198.51.100.12", (400, b"trusted ingress requires a single client IP\n")),
+        ):
+            conn = UnixHTTP(fixture.ingress, 2)
+            try:
+                conn.request("GET", "/identity", headers=supplied | {"X-CLIProxy-Client-IP": raw})
+                response = conn.getresponse()
+                self.assertEqual((response.status, response.read()), expected)
+            finally:
+                conn.close()
+
+    def test_gate_restart_rebinds_unix_socket_and_starts_closed(self):
+        fixture = self.fixture
+        old = fixture.gate.read()
+        fixture.stop(fixture.gate_process)
+        self.assertFalse(fixture.gate.socket_path.exists())
+        self.assertFalse(fixture.ingress.exists())
+        fixture.spawn(*fixture.gate_args)
+        eventually(lambda: fixture.gate.read()["closed"])
+        current = fixture.gate.read()
+        self.assertNotEqual(current["generation"], old["generation"])
+        self.assertEqual([probe(port)[0] for port in fixture.paths], [503, 503, 503])
+        with self.assertRaises(ReleaseError):
+            fixture.gate.change(old, True)
+
     def test_refuse_undrained_stream_or_writer(self):
         fixture = self.fixture
         streams = self.streams()
@@ -300,6 +356,34 @@ class LifecycleTests(unittest.TestCase):
         fixture.run("rollback")
         self.assertFalse(fixture.gate.read()["closed"])
         self.assertEqual(fixture.switches, [])
+
+    def test_undo_can_restore_a_stopped_candidate(self):
+        fixture = self.fixture
+        fixture.run()
+        fixture.stop(fixture.server)
+        self.assertEqual([probe(port)[0] for port in fixture.paths], [502, 502, 502])
+        fixture.run("rollback")
+        self.assertEqual(fixture.switches, ["candidate", "baseline"])
+        self.assertEqual([probe(port) for port in fixture.paths], [(200, b"baseline")] * 3)
+
+    def test_undo_can_finalize_after_lost_reopen_ack(self):
+        fixture = self.fixture
+        fixture.run()
+        change = fixture.gate.change
+
+        def lose_ack(state, closed):
+            result = change(state, closed)
+            if not closed:
+                raise ReleaseError("unconfirmed reopen")
+            return result
+
+        with patch.object(fixture.gate, "change", side_effect=lose_ack):
+            with self.assertRaisesRegex(ReleaseError, "unconfirmed reopen"):
+                fixture.run("rollback")
+        self.assertFalse(fixture.gate.read()["closed"])
+        fixture.run("rollback")
+        self.assertEqual(fixture.switches, ["candidate", "baseline"])
+        self.assertEqual(json.loads(fixture.journal.read_text())["phase"], "rolled_back")
 
     def test_interrupted_switch_resumes_undo_on_same_binding(self):
         fixture = self.fixture
@@ -347,6 +431,28 @@ class DispatchTests(unittest.TestCase):
                 with patch("production.subprocess.run") as ssh, self.assertRaises(ReleaseError):
                     dispatch()
                 ssh.assert_not_called()
+
+    def test_forced_command_passes_only_valid_args_to_fixed_helper(self):
+        command = f"cliproxy-release deploy {'f' * 40} {DIGEST}"
+        with patch("production.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            with patch.dict(os.environ, {"SSH_ORIGINAL_COMMAND": command + " && other"}, clear=True):
+                with self.assertRaisesRegex(ReleaseError, "invalid lifecycle command"):
+                    submit()
+            run.assert_not_called()
+            with patch.dict(os.environ, {"SSH_ORIGINAL_COMMAND": command}, clear=True):
+                submit()
+            self.assertEqual(run.call_args.args[0], [
+                "/usr/bin/sudo", "-n", "/etc/cliproxy-release/queue", "deploy", "f" * 40, DIGEST,
+            ])
+
+    def test_main_advance_preserves_only_approved_pair_undo(self):
+        with patch("production.read_json", return_value={
+            "workflow_sha": "f" * 40, "bundle_sha256": DIGEST,
+        }):
+            self.assertTrue(approved("deploy", "f" * 40, DIGEST))
+            self.assertFalse(approved("deploy", "b" * 40, DIGEST))
+            self.assertTrue(approved("rollback", "b" * 40, DIGEST))
+            self.assertFalse(approved("rollback", "b" * 40, "c" * 64))
 
     def test_dispatch_uses_pinned_target_and_fixed_command(self):
         def ssh(argv, **options):
