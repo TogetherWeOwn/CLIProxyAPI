@@ -65,7 +65,10 @@ jobs:
 
       - name: Rehearse gated restart and rollback
         run: |
-          gate="$(mktemp "$RUNNER_TEMP/cliproxy-gate.XXXXXXXX")"
-          trap 'rm -- "$gate"' EXIT
-          go build -o "$gate" ./ops/cliproxy-release/gate
-          CLIPROXY_FIXTURE_GATE="$gate" python3 -ESB ops/cliproxy-release/test_production.py
+          fixture="$(mktemp -d "$RUNNER_TEMP/cliproxy-fixture.XXXXXXXX")"
+          trap 'rm -r -- "$fixture"' EXIT
+          go build -o "$fixture/gate" ./ops/cliproxy-release/gate
+          CLIPROXY_FIXTURE_GATE="$fixture/gate" python3 -ESB ops/cliproxy-release/test_production.py
+          CGO_ENABLED=0 go build -o "$fixture/backend" ./ops/cliproxy-release/testdata/compose_gateway.go
+          CLIPROXY_FIXTURE_GATE="$fixture/gate" CLIPROXY_FIXTURE_COMPOSE_BACKEND="$fixture/backend" \
+            python3 -ESB ops/cliproxy-release/test_compose_adapter.py
