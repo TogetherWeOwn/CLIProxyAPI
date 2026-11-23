@@ -16,8 +16,10 @@ Create the ZIP with these file entries and no directory entries.
 - `baseline.oci.tar` is the rollback image. Include
   `candidate.oci.tar` when the candidate has a different image ID.
   Each is an uncompressed OCI tar with Docker's compatibility
-  `manifest.json` for the same Linux amd64 image (as emitted by `docker save`).
-  The workflow verifies both manifest representations before import.
+  `manifest.json` for the same Linux amd64 image. Check that a `docker save`
+  export contains both `index.json` and `manifest.json`. An optional legacy
+  `repositories` file is accepted. The workflow verifies the image and config
+  digests and requires exactly one Linux amd64 image before import.
 - `baseline/*.so` and `candidate/*.so` are the complete Linux amd64 plugin
   sets, each with a single `meta-v<version>.so`.
 

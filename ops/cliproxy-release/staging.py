@@ -148,7 +148,7 @@ def verify_image(path, spec):
             if entry.isdir() and entry.name in {"blobs", "blobs/sha256"}:
                 continue
             if (not entry.isfile() or entry.name in members or len(members) >= 64
-                    or (entry.name not in {"index.json", "manifest.json", "oci-layout"}
+                    or (entry.name not in {"index.json", "manifest.json", "oci-layout", "repositories"}
                         and not re.fullmatch("blobs/sha256/" + DIGEST, entry.name))):
                 raise StagingError("invalid image archive member")
             members[entry.name] = entry
@@ -168,11 +168,14 @@ def verify_image(path, spec):
         descriptor = roots[0]
         if descriptor["mediaType"] == OCI_INDEX:
             children = read_json(blob_path(descriptor["digest"]))["manifests"]
-            platform = [child for child in children
-                        if child.get("platform") == {"os": "linux", "architecture": "amd64"}]
-            if len(platform) != 1:
+            amd64 = []
+            for child in children:
+                platform = child.get("platform")
+                if isinstance(platform, dict) and (platform.get("os"), platform.get("architecture")) == ("linux", "amd64"):
+                    amd64.append(child)
+            if len(amd64) != 1:
                 raise StagingError("ambiguous OCI platform manifest")
-            descriptor = platform[0]
+            descriptor = amd64[0]
         if descriptor["mediaType"] != OCI_MANIFEST:
             raise StagingError("unsupported OCI image manifest")
         manifest = read_json(blob_path(descriptor["digest"]))
@@ -190,9 +193,12 @@ def verify_image(path, spec):
         if len(docker) != 1 or docker[0]["Config"] != config_path or docker[0]["Layers"] != layers:
             raise StagingError("Docker archive manifest does not match the OCI image")
         for layer in layers:
+            digest = hashlib.sha256()
             with archive.extractfile(members[layer]) as payload:
-                if hashlib.file_digest(payload, "sha256").hexdigest() != layer.rsplit("/", 1)[1]:
-                    raise StagingError("OCI layer digest mismatch")
+                while chunk := payload.read(1024 * 1024):
+                    digest.update(chunk)
+            if digest.hexdigest() != layer.rsplit("/", 1)[1]:
+                raise StagingError("OCI layer digest mismatch")
 
 
 def command(*argv, timeout=30, combine=False):

@@ -53,14 +53,25 @@ def completed(events):
     if not events or events[-1] != b"[DONE]":
         return False
     text = []
-    finishes = []
+    finished = False
     for event in events[:-1]:
-        for choice in json.loads(event)["choices"]:
-            if choice["index"] == 0:
-                text.append(choice["delta"].get("content") or "")
-                if choice["finish_reason"] is not None:
-                    finishes.append(choice["finish_reason"])
-    return "".join(text) == "stage-complete" and finishes == ["stop"]
+        chunk = json.loads(event)
+        if "error" in chunk:
+            return False
+        for choice in chunk["choices"]:
+            if choice["index"] != 0:
+                continue
+            content = choice["delta"].get("content")
+            reason = choice["finish_reason"]
+            if finished and (content or reason is not None):
+                return False
+            if content:
+                text.append(content)
+            if reason is not None:
+                if reason != "stop" or "".join(text) != "stage-complete":
+                    return False
+                finished = True
+    return finished
 
 
 def check():

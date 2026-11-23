@@ -85,6 +85,7 @@ class StagingTests(unittest.TestCase):
         compat = [{"Config": staging.blob_path(config_digest), "Layers": [staging.blob_path(layer_digest)]}]
         files = {
             "oci-layout": b'{"imageLayoutVersion":"1.0.0"}',
+            "repositories": b"{}",
             "index.json": json.dumps({"schemaVersion": 2, "manifests": [descriptor]}).encode(),
             "manifest.json": json.dumps(compat).encode(),
             staging.blob_path(image): manifest,
@@ -105,10 +106,28 @@ class StagingTests(unittest.TestCase):
             reference = config_digest if classic else image
             self.assertEqual(staging.command("docker", "image", "inspect", "--format", "{{.Id}}", reference), reference)
 
+    def test_amd64_variants_make_oci_index_ambiguous(self):
+        platform = {"os": "linux", "architecture": "amd64"}
+        index = json.dumps({"manifests": [
+            {"platform": platform}, {"platform": {**platform, "variant": "v3"}},
+        ]}).encode()
+        image = "sha256:" + hashlib.sha256(index).hexdigest()
+        root = json.dumps({"manifests": [{"mediaType": staging.OCI_INDEX, "digest": image}]}).encode()
+        image_archive = self.root / "variants.tar"
+        with tarfile.open(image_archive, "w") as archive:
+            for path, data in [("index.json", root), (staging.blob_path(image), index)]:
+                entry = tarfile.TarInfo(path)
+                entry.size = len(data)
+                archive.addfile(entry, io.BytesIO(data))
+        with self.assertRaisesRegex(staging.StagingError, "ambiguous OCI platform"):
+            staging.verify_image(image_archive, {"image": image})
+
     def test_text_then_done_needs_finish_reason(self):
         text = b'{"choices":[{"index":0,"delta":{"content":"stage-complete"},"finish_reason":null}]}'
         finish = b'{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}'
         self.assertFalse(completed([text, b"[DONE]"]))
+        self.assertFalse(completed([finish, text, b"[DONE]"]))
+        self.assertFalse(completed([text, finish, b'{"error":{}}', b"[DONE]"]))
         self.assertTrue(completed([text, finish, b"[DONE]"]))
 
     def test_candidate_failure_still_restarts_same_baseline_and_fails(self):
