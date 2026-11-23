@@ -1,6 +1,7 @@
 """Protected dispatch and host-side restart transaction for one approved pair."""
 
 import fcntl
+import hashlib
 import http.client
 import json
 import os
@@ -14,7 +15,9 @@ import time
 
 SHA = r"[0-9a-f]{40}"
 DIGEST = r"[0-9a-f]{64}"
-ACTIONS = ("deploy", "rollback")
+ADOPTION_ACTIONS = ("adopt", "undo-adoption")
+ACTIONS = ("deploy", "rollback", *ADOPTION_ACTIONS)
+ACTION_PATTERN = "|".join(ACTIONS)
 HOST_ROOT = Path("/etc/cliproxy-release")
 STATE_ROOT = Path("/var/lib/cliproxy-release")
 GATE_SOCKET = Path("/run/cliproxy-release/gate.sock")
@@ -227,12 +230,34 @@ def restart(gate, adapter, journal, action, digest, drain_seconds=DRAIN_SECONDS)
     save_json(journal, {"digest": digest, "phase": "deployed" if action == "deploy" else "rolled_back"})
 
 
+def adoption_binding(action, sha, digest):
+    """A second, host-local opt-in binds the first cutover and its recovery."""
+    approval_path = HOST_ROOT / "adoption-approved.json"
+    if not approval_path.is_file():
+        raise ReleaseError("first adoption is disabled on this target")
+    approval = read_json(approval_path)
+    machine = Path("/etc/machine-id").read_text(encoding="ascii").strip()
+    if (type(approval) is not dict or set(approval) != {
+            "machine_id", "workflow_sha", "bundle_sha256", "binding_sha256",
+        } or not matches(r"[0-9a-f]{32}", machine) or machine != approval["machine_id"]
+            or not matches(SHA, approval["workflow_sha"])
+            or (action == "adopt" and sha != approval["workflow_sha"])
+            or digest != approval["bundle_sha256"]
+            or not matches(DIGEST, approval["binding_sha256"])):
+        raise ReleaseError("first adoption is not approved on this target")
+    with (HOST_ROOT / "adoption.json").open("rb") as file:
+        binding = file.read(65537)
+    if len(binding) > 65536 or hashlib.sha256(binding).hexdigest() != approval["binding_sha256"]:
+        raise ReleaseError("first adoption binding changed")
+    return approval["binding_sha256"]
+
+
 def approved(action, sha, digest):
     record = read_json(HOST_ROOT / "approved.json")
     return (
         type(record) is dict and set(record) == {"workflow_sha", "bundle_sha256"}
         and matches(SHA, record["workflow_sha"]) and record["bundle_sha256"] == digest
-        and (action == "rollback" or record["workflow_sha"] == sha)
+        and (action in ("rollback", "undo-adoption") or record["workflow_sha"] == sha)
     )
 
 
@@ -241,14 +266,34 @@ def host(action, sha, digest):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if not approved(action, sha, digest):
             raise ReleaseError("release pair is not approved on the target")
-        restart(Gate(GATE_SOCKET), Adapter(HOST_ROOT / "adapter"), STATE_ROOT / (digest + ".json"), action, digest)
+        gate, adapter = Gate(GATE_SOCKET), Adapter(HOST_ROOT / "adapter")
+        journal = STATE_ROOT / (digest + ".json")
+        # Track admission for the whole target, even if a later pair is approved.
+        adoption_journal = STATE_ROOT / "adoption.json"
+        if action in ADOPTION_ACTIONS:
+            if any(matches(DIGEST, path.stem) for path in STATE_ROOT.glob("*.json")):
+                raise ReleaseError("first adoption requires an unused release target")
+            # Isolated Python must only load the host-installed controller.
+            sys.path.insert(0, str(HOST_ROOT))
+            from adoption import Site, transact
+            binding = adoption_binding(action, sha, digest)
+            transact(gate, adapter, Site(HOST_ROOT / "adoption-adapter"), adoption_journal,
+                     journal, action, digest, binding)
+            return
+        if adoption_journal.exists():
+            state = read_json(adoption_journal)
+            if (type(state) is not dict or set(state) != {"phase", "digest", "binding"}
+                    or state["phase"] != "adopted"
+                    or not matches(DIGEST, state["digest"]) or not matches(DIGEST, state["binding"])):
+                raise ReleaseError("first adoption needs recovery")
+        restart(gate, adapter, journal, action, digest)
 
 
 def submit():
     # The SSH account can invoke only this entrypoint. The forced command
     # never interprets client text as shell, a path, or systemd options.
     original = os.environ.get("SSH_ORIGINAL_COMMAND", "")
-    pattern = rf"cliproxy-release (deploy|rollback) ({SHA}) ({DIGEST})"
+    pattern = rf"cliproxy-release ({ACTION_PATTERN}) ({SHA}) ({DIGEST})"
     match = re.fullmatch(pattern, original)
     if match is None:
         raise ReleaseError("invalid lifecycle command")
@@ -267,6 +312,8 @@ def submit():
 def queue(action, sha, digest):
     if not approved(action, sha, digest):
         raise ReleaseError("release pair is not approved on the target")
+    if action in ADOPTION_ACTIONS:
+        adoption_binding(action, sha, digest)
     # No --pipe: the systemd unit remains owned by the host if SSH is lost.
     result = subprocess.run(
         ["/usr/bin/systemd-run", "--wait", "--quiet", "--collect", f"--unit={UNIT}",
@@ -336,6 +383,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # The host-installed adapter imports this module by name.
+    sys.modules["production"] = sys.modules[__name__]
     try:
         main()
     except ReleaseError as error:

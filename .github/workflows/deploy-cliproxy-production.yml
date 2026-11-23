@@ -7,7 +7,7 @@ on:
         description: Release action
         required: true
         type: choice
-        options: [deploy, rollback]
+        options: [deploy, rollback, adopt, undo-adoption]
       bundle_sha256:
         description: SHA-256 of the approved staged bundle
         required: true
@@ -25,7 +25,9 @@ jobs:
       github.repository == 'TogetherWeOwn/CLIProxyAPI' &&
       github.ref == 'refs/heads/main' &&
       github.workflow_sha == github.sha &&
-      vars.CLIPROXY_PRODUCTION_ENABLED == 'true'
+      vars.CLIPROXY_PRODUCTION_ENABLED == 'true' &&
+      (inputs.operation != 'adopt' ||
+       vars.CLIPROXY_FIRST_ADOPTION_ENABLED == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: cliproxy-production
@@ -36,7 +38,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Restart the approved gateway pair
+      - name: Run the approved gateway operation
         env:
           RELEASE_ACTION: ${{ inputs.operation }}
           BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}

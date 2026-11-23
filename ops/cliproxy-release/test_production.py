@@ -113,6 +113,7 @@ class BindingFixture:
         self.backend_port = local_port()
         self.data_port = local_port()
         self.resp_port = local_port()
+        self.callback_port = local_port()
         self.switches = []
         self.writer_clear = True
         self.fail_candidate = False
@@ -179,7 +180,8 @@ class BindingFixture:
         if resp is not None:
             args += ["-resp", f"127.0.0.1:{resp}"]
         if name == "gate":
-            args += ["-trusted-ingress", str(self.ingress)]
+            args += ["-trusted-ingress", str(self.ingress),
+                     "-callback", f"127.0.0.1:{self.callback_port}={target}"]
             self.gate_args = args
             self.gate_process = self.spawn(*args)
         else:
@@ -265,6 +267,14 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(fixture.switches, ["candidate", "baseline"])
         self.assertEqual((fixture.root / "state" / "oauth").read_bytes(), b"refreshed")
         self.assertEqual((fixture.root / "state" / "kv").read_bytes(), b"current")
+
+    def test_oauth_callback_listener_uses_the_shared_admission_boundary(self):
+        host = self.fixture
+        self.assertEqual(probe(host.callback_port, "/callback?state=synthetic"), (200, b"baseline"))
+        closed = host.gate.change(host.gate.read(), True)
+        self.assertEqual(probe(host.callback_port, "/callback?state=synthetic")[0], 503)
+        host.gate.change(closed, False)
+        self.assertEqual(probe(host.callback_port, "/callback?state=synthetic"), (200, b"baseline"))
 
     def test_usage_listener_does_not_forward_http(self):
         fixture = self.fixture
