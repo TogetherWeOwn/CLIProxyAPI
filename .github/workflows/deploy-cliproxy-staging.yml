@@ -1,0 +1,38 @@
+name: CLIProxy isolated staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_sha256:
+        description: SHA-256 of the exact staging bundle
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  stage:
+    if: >-
+      github.repository == 'TogetherWeOwn/CLIProxyAPI' &&
+      github.ref == 'refs/heads/main' &&
+      github.workflow_sha == github.sha
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: cliproxy-staging
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Stage exact pair and rehearse restart rollback
+        shell: bash
+        env:
+          BUNDLE_URL: ${{ secrets.CLIPROXY_STAGING_BUNDLE_URL }}
+          BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          python3 -IB ops/cliproxy-release/staging.py
+          printf 'Verified forward and restart rollback of isolated bundle %s.\n' \
+            "$BUNDLE_SHA256" >> "$GITHUB_STEP_SUMMARY"

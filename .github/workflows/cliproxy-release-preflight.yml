@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/cliproxy-release-preflight.yml'
+      - '.github/workflows/deploy-cliproxy-staging.yml'
       - 'ops/cliproxy-release/**'
 
 permissions: {}
@@ -59,3 +60,4 @@ jobs:
           fi
           python3 -ESB ops/cliproxy-release/test_preflight.py
           python3 -ESB ops/cliproxy-release/test_controller.py
+          python3 -ESB ops/cliproxy-release/test_staging.py
