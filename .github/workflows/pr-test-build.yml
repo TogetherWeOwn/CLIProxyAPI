@@ -30,6 +30,10 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
+      - name: Run durable usage feed fixture
+        env:
+          USAGE_FEED_REQUIRE_FIXTURE: "1"
+        run: go test -count=1 ./internal/usagefeed
       - name: Build PR head
         run: |
           go build -o test-output ./cmd/server
