@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import fcntl
 import os
 from pathlib import Path
+import signal
 import stat
 import subprocess
 import sys
@@ -54,20 +55,17 @@ def launch(directory, command):
         # Reserve before spawning. Losing the supervisor leaves an unresolved record.
         record = f"run-{uuid4().hex}"
         reserve(directory, record)
+        # Terminal Ctrl-C reaches the child in this foreground group. Handle
+        # it in the supervisor through spawn, wait and record retirement.
+        # Exec resets caught signal handlers to the default in the child.
+        signal.signal(signal.SIGINT, lambda *_: None)
         try:
             child = subprocess.Popen(command)
         except OSError:
             os.unlink(record, dir_fd=directory)
             raise
 
-    # Keep inherited stdio and the foreground process group. Terminal Ctrl-C
-    # also reaches the child, so continue waiting for its exit status.
-    while True:
-        try:
-            result = child.wait()
-            break
-        except KeyboardInterrupt:
-            continue
+    result = child.wait()
     if result < 0:
         return 128 - result
     with locked(directory):

@@ -6,10 +6,12 @@ import http.client
 import http.server
 import os
 from pathlib import Path
+import pty
 import select
 import signal
 import subprocess
 import sys
+import termios
 import tempfile
 import threading
 import time
@@ -122,6 +124,14 @@ def pause_hold(state):
 
     with patch("launch_hold.locked", paused):
         return launch_hold.main([state, "hold"])
+
+
+def interruptible_cli():
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    signal.signal(signal.SIGINT, lambda *_: print("interrupted", flush=True))
+    print("foreground", flush=True)
+    assert sys.stdin.readline() == "exit\n"
+    return 43
 
 
 class LaunchHoldTests(unittest.TestCase):
@@ -242,6 +252,40 @@ class LaunchHoldTests(unittest.TestCase):
         self.control("undo")
         self.status("open", 1)
 
+    def test_foreground_ctrl_c_reaches_cli_and_supervisor_keeps_waiting(self):
+        master, slave = pty.openpty()
+        with os.fdopen(master, "r+b", buffering=0) as terminal:
+            try:
+                attributes = termios.tcgetattr(slave)
+                attributes[3] &= ~termios.ECHO
+                termios.tcsetattr(slave, termios.TCSANOW, attributes)
+                command = self.adapter + ["run"] + PYTHON + [str(SCRIPT), "interruptible-cli"]
+                wrapper = subprocess.Popen(PYTHON + [str(SCRIPT), "terminal-exec"] + command,
+                                           stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+            finally:
+                os.close(slave)
+
+            def expect(line):
+                self.assertTrue(select.select([terminal], [], [], WAIT)[0], line)
+                self.assertEqual(terminal.readline(), line)
+
+            try:
+                expect(b"foreground\r\n")
+                self.control("hold")
+                terminal.write(b"\x03")
+                expect(b"interrupted\r\n")
+                self.assertIsNone(wrapper.poll())
+                self.status("held", 1)
+                terminal.write(b"exit\n")
+                self.assertEqual(wrapper.wait(timeout=WAIT), 43)
+                self.status("held", 0)
+            finally:
+                try:
+                    os.killpg(wrapper.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                wrapper.wait(timeout=WAIT)
+
     def test_ordinary_exit_code_is_preserved(self):
         Terminal(self.stack, self.adapter + ["run"] + PYTHON + ["-c", "raise SystemExit(7)"]).exited(7)
         self.status("open", 0)
@@ -259,5 +303,10 @@ if __name__ == "__main__":
         synthetic_cli(*sys.argv[2:])
     elif sys.argv[1:2] == ["pause-hold"]:
         sys.exit(pause_hold(sys.argv[2]))
+    elif sys.argv[1:2] == ["terminal-exec"]:
+        fcntl.ioctl(sys.stdin.fileno(), termios.TIOCSCTTY, 0)
+        os.execv(sys.argv[2], sys.argv[2:])
+    elif sys.argv[1:2] == ["interruptible-cli"]:
+        sys.exit(interruptible_cli())
     else:
         unittest.main()
