@@ -63,6 +63,7 @@ jobs:
           python3 -ESB ops/cliproxy-release/test_controller.py
           python3 -ESB ops/cliproxy-release/test_staging.py
           python3 -ESB ops/cliproxy-release/test_adoption.py
+          python3 -ESB ops/cliproxy-release/test_launch_hold.py
 
       - name: Rehearse gated restart and rollback
         run: |
