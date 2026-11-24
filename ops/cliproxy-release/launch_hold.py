@@ -57,8 +57,9 @@ def launch(directory, command):
         reserve(directory, record)
         # Terminal Ctrl-C reaches the child in this foreground group. Handle
         # it in the supervisor through spawn, wait and record retirement.
-        # Exec resets caught signal handlers to the default in the child.
-        signal.signal(signal.SIGINT, lambda *_: None)
+        # Exec resets caught signals to default and preserves ignored signals.
+        if signal.getsignal(signal.SIGINT) != signal.SIG_IGN:
+            signal.signal(signal.SIGINT, lambda *_: None)
         try:
             child = subprocess.Popen(command)
         except OSError:

@@ -12,9 +12,10 @@ Use the same path for every participating wrapper and for `hold`, `status`,
 and `undo`. Keep the directory and lock in place across those commands.
 The default is open. A held launch exits with status 75.
 
-The adapter reserves a launch under the hold lock and releases the lock
-after spawning the CLI. The child inherits terminal I/O and the foreground
-process group. Terminal Ctrl-C reaches the child while the supervisor keeps
+The adapter admits a launch by reserving it under the hold lock, then
+spawns the CLI before it releases the lock. The child inherits terminal I/O
+and the foreground process group. Once the child exists, terminal Ctrl-C
+reaches it with the inherited SIGINT disposition while the supervisor keeps
 its reservation. The supervisor forwards the exit code and removes the
 reservation on ordinary exit. A signalled child or lost supervisor leaves
 an unresolved record. Undo reopens launch under the same lock and preserves

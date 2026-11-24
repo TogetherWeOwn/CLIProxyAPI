@@ -290,6 +290,13 @@ class LaunchHoldTests(unittest.TestCase):
         Terminal(self.stack, self.adapter + ["run"] + PYTHON + ["-c", "raise SystemExit(7)"]).exited(7)
         self.status("open", 0)
 
+    def test_inherited_ignored_sigint_is_preserved(self):
+        command = ["/bin/sh", "-c", 'trap "" INT; exec "$@"', "fixture"] + self.adapter + [
+            "run", "/bin/sh", "-c", 'kill -INT "$$"; exit 43',
+        ]
+        Terminal(self.stack, command).exited(43)
+        self.status("open", 0)
+
     def test_rejects_symlink_state_without_writing_to_target(self):
         target = self.root / "other"
         target.mkdir(mode=0o700)
