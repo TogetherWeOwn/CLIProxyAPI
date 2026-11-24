@@ -31,9 +31,30 @@ func TestFeedInterruptedFinalCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var defaultCommit string
+	if errScan := db.QueryRowContext(ctx, "SHOW synchronous_commit").Scan(&defaultCommit); errScan != nil || defaultCommit != "off" {
+		t.Fatalf("fixture synchronous_commit = %q, %v", defaultCommit, errScan)
+	}
+	// Verify the effective setting inside feed writes. Crash recovery alone
+	// cannot distinguish synchronous commit from an incidental WAL flush.
+	if _, errExec := db.ExecContext(ctx, `
+		CREATE FUNCTION cli_proxy_usage_feed.check_synchronous_commit() RETURNS trigger
+		LANGUAGE plpgsql AS $$
+		BEGIN
+			IF current_setting('synchronous_commit') <> 'on' THEN
+				RAISE EXCEPTION 'usage feed transaction must commit synchronously';
+			END IF;
+			RETURN NEW;
+		END;
+		$$;
+		CREATE TRIGGER check_synchronous_commit BEFORE UPDATE ON cli_proxy_usage_feed.progress
+		FOR EACH ROW EXECUTE FUNCTION cli_proxy_usage_feed.check_synchronous_commit();
+	`); errExec != nil {
+		t.Fatal(errExec)
+	}
 	for sequence := int64(1); sequence <= 4; sequence++ {
-		if got, err := feed.Accept(ctx, []byte(fmt.Sprintf("synthetic-%d", sequence))); got != sequence || err != nil {
-			t.Fatalf("accept %d = %d, %v", sequence, got, err)
+		if got, errAccept := feed.Accept(ctx, []byte(fmt.Sprintf("synthetic-%d", sequence))); got != sequence || errAccept != nil {
+			t.Fatalf("accept %d = %d, %v", sequence, got, errAccept)
 		}
 	}
 	terminal, err := feed.Seal(ctx)
@@ -272,6 +293,17 @@ func fixturePostgres(t *testing.T) (*sql.DB, func() *sql.DB) {
 		requireFixtureTool(t, "PostgreSQL server binaries")
 	}
 	root := t.TempDir()
+	// Unix socket paths have a short limit, especially on macOS where the
+	// default temporary directory already consumes much of it.
+	socketDir, errSocket := os.MkdirTemp("/tmp", "usage-feed-")
+	if errSocket != nil {
+		t.Fatal(errSocket)
+	}
+	t.Cleanup(func() {
+		if errRemove := os.RemoveAll(socketDir); errRemove != nil {
+			t.Errorf("remove fixture socket directory: %v", errRemove)
+		}
+	})
 	data := filepath.Join(root, "data")
 	pgctl := filepath.Join(filepath.Dir(initdb), "pg_ctl")
 	run := func(program string, args ...string) {
@@ -287,7 +319,8 @@ func fixturePostgres(t *testing.T) (*sql.DB, func() *sql.DB) {
 	run(initdb, "-D", data, "-A", "trust", "-U", "usage_fixture", "--no-locale", "--no-instructions")
 	start := func() {
 		run(pgctl, "-D", data, "-l", filepath.Join(root, "postgres.log"), "-w", "-t", "15",
-			"-o", "-c listen_addresses= -c unix_socket_directories=. -c unix_socket_permissions=0700", "start")
+			"-o", "-c listen_addresses= -c unix_socket_directories="+socketDir+
+				" -c unix_socket_permissions=0700 -c synchronous_commit=off", "start")
 	}
 	t.Cleanup(func() {
 		run(pgctl, "-D", data, "-m", "immediate", "-w", "-t", "15", "stop")
@@ -295,10 +328,11 @@ func fixturePostgres(t *testing.T) (*sql.DB, func() *sql.DB) {
 	start()
 	t.Setenv("PGSERVICE", "")
 	t.Setenv("PGPASSWORD", "")
+	t.Setenv("PGOPTIONS", "")
 	connect := func() *sql.DB {
 		t.Helper()
 		params := url.Values{
-			"host":     {data},
+			"host":     {socketDir},
 			"port":     {"5432"},
 			"sslmode":  {"disable"},
 			"passfile": {os.DevNull},

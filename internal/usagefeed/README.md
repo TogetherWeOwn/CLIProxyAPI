@@ -10,8 +10,9 @@ Generate and save a fresh epoch UUID before calling `Create` in a dedicated
 PostgreSQL database using the existing pgx driver. Pass that same UUID to
 `Open` on restart or to reconcile an ambiguous creation commit. A missing
 feed or wrong epoch fails to open. Schema creation is explicit and
-transactional. Use a fresh database for a new epoch. Feed writes require PostgreSQL `fsync` and `full_page_writes`
-and set `synchronous_commit=on` for each transaction. The database and its role
+transactional. Use a fresh database for a new epoch. Feed writes require
+PostgreSQL `fsync` and `full_page_writes` and set `synchronous_commit=on` for each
+transaction. The database and its role
 must be controlled by the gateway. Keep the same durable database across
 restarts. Reusing an epoch after a point-in-time rollback or failover that lost
 commits invalidates the sequence contract.
@@ -66,7 +67,8 @@ to account for every request.
 With PostgreSQL server binaries and the `sqlite3` CLI installed, run
 `USAGE_FEED_REQUIRE_FIXTURE=1 go test -race -count=1 ./internal/usagefeed`.
 The fixture starts PostgreSQL in a temporary directory on a private Unix socket
-and uses a disposable SQLite inbox. It injects a deferred constraint violation at
+and uses a disposable SQLite inbox. A fixture trigger verifies that feed writes
+override the asynchronous database default. It injects a deferred constraint violation at
 the last SQLite commit, crashes and restarts the disposable producer database,
 and verifies replay, the reopened inbox contents, a lost acknowledgment, and
 bounded acceptance.
