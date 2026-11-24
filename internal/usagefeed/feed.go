@@ -85,6 +85,7 @@ func Open(ctx context.Context, db *sql.DB, epoch uuid.UUID) (*Feed, error) {
 
 // Accept durably appends one record, or returns an error without a receipt. Full
 // feeds reject new records so the caller can retry after consumer progress.
+// An ErrCommitUnknown result requires the caller to stop automatic retries.
 func (f *Feed) Accept(ctx context.Context, payload []byte) (int64, error) {
 	if len(payload) == 0 || len(payload) > maxPayload {
 		return 0, ErrPayload
@@ -122,7 +123,7 @@ func (f *Feed) Accept(ctx context.Context, payload []byte) (int64, error) {
 
 // Replay returns up to limit records from the earliest unacknowledged sequence,
 // with progress from the same snapshot. Reads never acknowledge records.
-func (f *Feed) Replay(ctx context.Context, limit int) (State, []Record, error) {
+func (f *Feed) Replay(ctx context.Context, limit int) (state State, records []Record, err error) {
 	if limit < 1 || limit > maxBatch {
 		return State{}, nil, ErrBatch
 	}
@@ -130,8 +131,13 @@ func (f *Feed) Replay(ctx context.Context, limit int) (State, []Record, error) {
 	if err != nil {
 		return State{}, nil, fmt.Errorf("begin usage feed replay: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
-	state, _, err := f.progress(tx.QueryRowContext(ctx, progressQuery))
+	defer func() {
+		if errRollback := rollback(tx); errRollback != nil {
+			state, records = State{}, nil
+			err = errors.Join(err, errRollback)
+		}
+	}()
+	state, _, err = f.progress(tx.QueryRowContext(ctx, progressQuery))
 	if err != nil {
 		return State{}, nil, err
 	}
@@ -141,9 +147,14 @@ func (f *Feed) Replay(ctx context.Context, limit int) (State, []Record, error) {
 	if err != nil {
 		return State{}, nil, fmt.Errorf("read usage feed records: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if errClose := rows.Close(); errClose != nil {
+			state, records = State{}, nil
+			err = errors.Join(err, fmt.Errorf("close usage feed replay rows: %w", errClose))
+		}
+	}()
 	expected := int(min(int64(limit), state.Accepted-state.Acked))
-	records := make([]Record, 0, expected)
+	records = make([]Record, 0, expected)
 	for rows.Next() {
 		var record Record
 		if errScan := rows.Scan(&record.Sequence, &record.Payload); errScan != nil {
@@ -241,12 +252,16 @@ func (f *Feed) progress(row *sql.Row) (State, int, error) {
 	return state, capacity, nil
 }
 
-func (f *Feed) write(ctx context.Context, apply func(*sql.Tx) error) error {
+func (f *Feed) write(ctx context.Context, apply func(*sql.Tx) error) (err error) {
 	tx, err := f.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return fmt.Errorf("begin usage feed write: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() {
+		if errRollback := rollback(tx); errRollback != nil {
+			err = errors.Join(err, errRollback)
+		}
+	}()
 	var durable bool
 	if errQuery := tx.QueryRowContext(ctx, `SELECT current_setting('fsync') = 'on'
 		AND current_setting('full_page_writes') = 'on'`).Scan(&durable); errQuery != nil {
@@ -263,6 +278,13 @@ func (f *Feed) write(ctx context.Context, apply func(*sql.Tx) error) error {
 	}
 	if errCommit := tx.Commit(); errCommit != nil {
 		return fmt.Errorf("%w: %w", ErrCommitUnknown, errCommit)
+	}
+	return nil
+}
+
+func rollback(tx *sql.Tx) error {
+	if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		return fmt.Errorf("roll back usage feed transaction: %w", err)
 	}
 	return nil
 }

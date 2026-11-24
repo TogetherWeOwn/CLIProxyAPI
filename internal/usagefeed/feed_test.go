@@ -308,7 +308,11 @@ func fixturePostgres(t *testing.T) (*sql.DB, func() *sql.DB) {
 			t.Fatal(errParse)
 		}
 		db := stdlib.OpenDB(*cfg)
-		t.Cleanup(func() { _ = db.Close() })
+		t.Cleanup(func() {
+			if errClose := db.Close(); errClose != nil {
+				t.Errorf("close fixture database: %v", errClose)
+			}
+		})
 		if errPing := db.PingContext(t.Context()); errPing != nil {
 			t.Fatal(errPing)
 		}

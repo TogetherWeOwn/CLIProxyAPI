@@ -29,6 +29,8 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
+        env:
+          USAGE_FEED_REQUIRE_FIXTURE: "1"
         run: go test ./...
       - name: Build PR head
         run: |

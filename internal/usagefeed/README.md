@@ -9,8 +9,8 @@ startup, configuration, and legacy RESP clients continue on their existing paths
 Generate and save a fresh epoch UUID before calling `Create` in a dedicated
 PostgreSQL database using the existing pgx driver. Pass that same UUID to
 `Open` on restart or to reconcile an ambiguous creation commit. A missing
-feed or wrong epoch fails to open. Schema creation is explicit
-and transactional. Feed writes require PostgreSQL `fsync` and `full_page_writes`
+feed or wrong epoch fails to open. Schema creation is explicit and
+transactional. Use a fresh database for a new epoch. Feed writes require PostgreSQL `fsync` and `full_page_writes`
 and set `synchronous_commit=on` for each transaction. The database and its role
 must be controlled by the gateway. Keep the same durable database across
 restarts. Reusing an epoch after a point-in-time rollback or failover that lost
@@ -25,10 +25,13 @@ can retry after the consumer makes progress. The caller is responsible for
 surfacing or handling that backpressure. The asynchronous legacy usage plug-in
 interface has no way to return this result upstream.
 
-A connection failure during commit can leave the outcome unknown.
-`ErrCommitUnknown` means the caller received no receipt and the record may
-already be in the feed. Resolve that uncertainty before retrying
-`Accept` for the same event. `Ack` and `Seal` can be retried with the same inputs.
+`ErrCommitUnknown` means a write may have committed without a receipt. On this
+result from `Accept`, stop automatic retries and surface the ambiguous event.
+The feed identifies committed records by sequence and removes them after
+acknowledgment. Retrying the same event safely would require independent
+reconciliation in the producer adapter. A committed record remains covered by
+the feed's terminal sequence even if the caller did not receive its receipt.
+`Ack` and `Seal` can be retried with the same inputs.
 
 `Seal` commits an irreversible end to acceptance for the epoch. An accept racing
 with the seal either commits within the terminal sequence or returns
